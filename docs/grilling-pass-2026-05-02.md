@@ -2,13 +2,13 @@
 title: "Jottrace grilling-pass refinements"
 date: 2026-05-02
 status: rationale-archive (folded into design doc v3.1)
-applies_to: season-unknown-design-20260501-224222.md
+applies_to: design.md
 mode: Builder
 ---
 
 # Jottrace grilling-pass refinements (2026-05-02)
 
-> **Status: folded.** All twelve decisions below are folded into v3.1 of the design doc (`../season-unknown-design-20260501-224222.md`). This file is preserved as a rationale archive — it explains *why* each seam was decided, which the design doc itself does not. Don't update jottrace based on this file alone; the design doc is the source of truth.
+> **Status: folded.** All twelve decisions below are folded into v3.1 of the design doc (`./design.md`). This file is preserved as a rationale archive — it explains *why* each seam was decided, which the design doc itself does not. Don't update jottrace based on this file alone; the design doc is the source of truth.
 
 A `/grill-with-docs` pass on the approved v3 design doc. Each Q below was a seam the original plan did not pin down; each carries a single locked decision plus a short rationale and any schema/CLI consequence.
 
