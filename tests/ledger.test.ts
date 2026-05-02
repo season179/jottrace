@@ -3,6 +3,7 @@ import {
 	computeDigests,
 	type Ledger,
 	openLedger,
+	upsertSessionSkeleton,
 	upsertTopicCandidate,
 } from "../src/ledger.ts";
 import type { Session } from "../src/models.ts";
@@ -130,6 +131,32 @@ describe("insertSession with short_id collision", () => {
 			)
 			.get("claude-code", "session-B");
 		expect(persistedB?.short_id).toBe(fullB);
+	});
+
+	test("upsertSessionSkeleton reports collision recovery when pre-resolved to full digest", () => {
+		const sessionA = makeSession({ source_session_id: "session-A" });
+		const sessionB = makeSession({ source_session_id: "session-B" });
+
+		ledger.insertSession(sessionA, {
+			short: "a".repeat(12),
+			full: `${"a".repeat(12)}${"1".repeat(52)}`,
+		});
+
+		const fullB = `${"a".repeat(12)}${"2".repeat(52)}`;
+		const result = upsertSessionSkeleton(ledger, {
+			session: sessionB,
+			note_path: "sessions/2026/05/claude-code/session-B.md",
+			processed_at: "2026-05-02T08:00:00.000Z",
+			digests: {
+				short: "a".repeat(12),
+				full: fullB,
+			},
+		});
+
+		expect(result).toEqual({
+			short_id: fullB,
+			collision_recovered: true,
+		});
 	});
 
 	test("computeDigests returns 12-hex short and 64-hex full from sha256(harness:id)", () => {

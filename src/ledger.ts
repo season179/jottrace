@@ -183,6 +183,78 @@ export function openLedger(path: string): Ledger {
 	return ledger;
 }
 
+export interface UpsertSessionSkeletonArgs {
+	session: Session;
+	note_path: string;
+	processed_at: string;
+	digests?: Digests;
+	short_id?: string;
+}
+
+export function resolveSessionShortId(
+	ledger: Ledger,
+	session: Session,
+	digests = computeDigests(session.harness, session.source_session_id),
+): string {
+	const existing = ledger.db
+		.query<
+			{ harness: Harness; source_session_id: string; short_id: string },
+			[string]
+		>(
+			"SELECT harness, source_session_id, short_id FROM sessions WHERE short_id = ?",
+		)
+		.get(digests.short);
+
+	if (!existing) return digests.short;
+	if (
+		existing.harness === session.harness &&
+		existing.source_session_id === session.source_session_id
+	) {
+		return existing.short_id;
+	}
+	return digests.full;
+}
+
+export function upsertSessionSkeleton(
+	ledger: Ledger,
+	args: UpsertSessionSkeletonArgs,
+): InsertSessionResult {
+	const existing = ledger.db
+		.query<SessionSkeletonRow, [Harness, string]>(
+			`SELECT
+				short_id, parent_session_id, source_path, source_revision, source_size,
+				source_mtime, byte_offset, started_at, ended_at, cwd, project,
+				git_branch, model, event_count, note_path, synthesis_status,
+				synthesis_error, synthesis_attempts
+			FROM sessions WHERE harness = ? AND source_session_id = ?`,
+		)
+		.get(args.session.harness, args.session.source_session_id);
+
+	if (existing) {
+		if (!sessionSkeletonMatches(existing, args)) {
+			updateSessionSkeleton(ledger, args, existing.short_id);
+		}
+		return { short_id: existing.short_id, collision_recovered: false };
+	}
+
+	const digests =
+		args.digests ??
+		computeDigests(args.session.harness, args.session.source_session_id);
+	const short_id =
+		args.short_id ?? resolveSessionShortId(ledger, args.session, digests);
+	const result = insertSessionSkeleton(ledger, args, short_id);
+	if (result) {
+		return {
+			...result,
+			collision_recovered:
+				short_id === digests.full && short_id !== digests.short,
+		};
+	}
+
+	insertSessionSkeleton(ledger, args, digests.full);
+	return { short_id: digests.full, collision_recovered: true };
+}
+
 export interface UpsertTopicCandidateArgs {
 	harness: Harness;
 	source_session_id: string;
@@ -336,6 +408,27 @@ interface SessionInsertParams {
 	$processed_at: string;
 }
 
+interface SessionSkeletonRow {
+	short_id: string;
+	parent_session_id: string | null;
+	source_path: string;
+	source_revision: string;
+	source_size: number;
+	source_mtime: number;
+	byte_offset: number;
+	started_at: string;
+	ended_at: string;
+	cwd: string | null;
+	project: string | null;
+	git_branch: string | null;
+	model: string | null;
+	event_count: number;
+	note_path: string | null;
+	synthesis_status: SynthesisStatus;
+	synthesis_error: string | null;
+	synthesis_attempts: number;
+}
+
 function sessionParams(
 	session: Session,
 	short_id: string,
@@ -363,6 +456,89 @@ function sessionParams(
 		$synthesis_attempts: 0,
 		$processed_at: new Date().toISOString(),
 	};
+}
+
+function skeletonParams(
+	args: UpsertSessionSkeletonArgs,
+	short_id: string,
+): SessionInsertParams {
+	return {
+		...sessionParams(args.session, short_id),
+		$note_path: args.note_path,
+		$processed_at: args.processed_at,
+	};
+}
+
+function insertSessionSkeleton(
+	ledger: Ledger,
+	args: UpsertSessionSkeletonArgs,
+	short_id: string,
+): InsertSessionResult | null {
+	try {
+		ledger.db.prepare(INSERT_SESSION_SQL).run(skeletonParams(args, short_id));
+		return { short_id, collision_recovered: false };
+	} catch (err) {
+		if (!isUniqueShortIdError(err)) throw err;
+		return null;
+	}
+}
+
+function updateSessionSkeleton(
+	ledger: Ledger,
+	args: UpsertSessionSkeletonArgs,
+	short_id: string,
+): void {
+	const params = skeletonParams(args, short_id);
+	ledger.db
+		.prepare(
+			`UPDATE sessions SET
+				parent_session_id = $parent_session_id,
+				source_path = $source_path,
+				source_revision = $source_revision,
+				source_size = $source_size,
+				source_mtime = $source_mtime,
+				byte_offset = $byte_offset,
+				started_at = $started_at,
+				ended_at = $ended_at,
+				cwd = $cwd,
+				project = $project,
+				git_branch = $git_branch,
+				model = $model,
+				event_count = $event_count,
+				note_path = $note_path,
+				synthesis_status = $synthesis_status,
+				synthesis_error = $synthesis_error,
+				synthesis_attempts = $synthesis_attempts,
+				processed_at = $processed_at
+			WHERE harness = $harness AND source_session_id = $source_session_id`,
+		)
+		.run(params);
+}
+
+function sessionSkeletonMatches(
+	row: SessionSkeletonRow,
+	args: UpsertSessionSkeletonArgs,
+): boolean {
+	const session = args.session;
+	return (
+		row.parent_session_id === session.parent_session_id &&
+		row.source_path === session.source_path &&
+		row.source_revision === session.source_revision &&
+		row.source_size === session.source_size &&
+		row.source_mtime === session.source_mtime &&
+		row.byte_offset === session.byte_offset &&
+		row.started_at === session.started_at &&
+		row.ended_at === session.ended_at &&
+		row.cwd === session.cwd &&
+		row.project === session.project &&
+		row.git_branch === session.git_branch &&
+		row.model === session.model &&
+		row.event_count === session.events.length &&
+		row.note_path === args.note_path &&
+		row.synthesis_status === "pending" &&
+		row.synthesis_error === null &&
+		row.synthesis_attempts === 0
+	);
 }
 
 function isUniqueShortIdError(err: unknown): boolean {

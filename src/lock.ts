@@ -8,6 +8,7 @@ import {
 } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
+import { isNodeError } from "./errors.ts";
 
 export interface LockHandle {
 	readonly lockPath: string;
@@ -171,8 +172,4 @@ function readLock(lockPath: string): LockInfo {
 	}
 
 	return { pid, startedAt };
-}
-
-function isNodeError(err: unknown): err is NodeJS.ErrnoException {
-	return err instanceof Error && "code" in err;
 }
