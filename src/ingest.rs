@@ -1,4 +1,4 @@
-use rusqlite::{Connection, OptionalExtension, Transaction, params};
+use rusqlite::{Connection, OptionalExtension, Transaction, named_params, params};
 use serde::Deserialize;
 use std::env;
 use std::fs::{self, File, Metadata};
@@ -35,6 +35,7 @@ pub struct IngestReport {
 struct SourceFile {
     source: &'static str,
     source_session_id: String,
+    parent_source_session_id: Option<String>,
     path: PathBuf,
 }
 
@@ -42,6 +43,7 @@ struct SourceFile {
 struct StoredSession {
     id: i64,
     file_path: Option<String>,
+    parent_session_id: Option<i64>,
     current_generation: i64,
     file_size: Option<i64>,
     file_mtime: Option<i64>,
@@ -66,6 +68,7 @@ struct ParsedMetadata {
 struct SessionUpdate<'a> {
     source_file: &'a SourceFile,
     session_id: i64,
+    parent_session_id: Option<i64>,
     generation: i64,
     pass_size: i64,
     file_mtime: Option<i64>,
@@ -88,6 +91,7 @@ struct IngestErrorRecord<'a> {
 struct SkippedSessionUpdate<'a> {
     source_file: &'a SourceFile,
     session_id: i64,
+    parent_session_id: Option<i64>,
     checked_file: Option<CheckedFileState<'a>>,
 }
 
@@ -157,16 +161,27 @@ fn discover_claude_session_files() -> Result<Vec<SourceFile>> {
     paths.sort();
     paths.dedup();
 
-    paths
+    let mut source_files = paths
         .into_iter()
         .map(|path| {
+            let source_session_id = source_session_id_from_path(&path)?;
+            let parent_source_session_id =
+                parent_source_session_id_from_path(&path, &source_session_id);
             Ok(SourceFile {
                 source: CLAUDE_SOURCE,
-                source_session_id: source_session_id_from_path(&path)?,
+                source_session_id,
+                parent_source_session_id,
                 path,
             })
         })
-        .collect()
+        .collect::<Result<Vec<_>>>()?;
+    source_files.sort_by(|left, right| {
+        left.parent_source_session_id
+            .is_some()
+            .cmp(&right.parent_source_session_id.is_some())
+            .then_with(|| left.path.cmp(&right.path))
+    });
+    Ok(source_files)
 }
 
 fn collect_jsonl_files(root: &Path, recursive: bool, paths: &mut Vec<PathBuf>) -> Result<()> {
@@ -223,9 +238,13 @@ fn ingest_jsonl_file(conn: &mut Connection, source_file: &SourceFile) -> Result<
     if let Some(stored) = load_session(conn, source_file)?
         && unchanged_by_mtime(&stored, pass_size, file_mtime)
     {
-        if stored.file_path.as_deref() == Some(source_file.path.to_string_lossy().as_ref()) {
+        let path_is_current =
+            stored.file_path.as_deref() == Some(source_file.path.to_string_lossy().as_ref());
+        let parent_session_id = resolve_parent_session_id(conn, source_file)?;
+        if path_is_current && stored.parent_session_id == parent_session_id {
             return Ok(0);
         }
+
         let tx = conn
             .transaction()
             .map_err(|source| sqlite_error(&source_file.path, source))?;
@@ -234,6 +253,7 @@ fn ingest_jsonl_file(conn: &mut Connection, source_file: &SourceFile) -> Result<
             SkippedSessionUpdate {
                 source_file,
                 session_id: stored.id,
+                parent_session_id,
                 checked_file: None,
             },
         )?;
@@ -254,11 +274,13 @@ fn ingest_jsonl_file(conn: &mut Connection, source_file: &SourceFile) -> Result<
     let import_mode = import_mode(&stored, pass_size, &content_fingerprint);
 
     if import_mode == ImportMode::Skip {
+        let parent_session_id = resolve_parent_session_id(&tx, source_file)?;
         update_skipped_session(
             &tx,
             SkippedSessionUpdate {
                 source_file,
                 session_id: stored.id,
+                parent_session_id,
                 checked_file: Some(CheckedFileState {
                     pass_size,
                     file_mtime,
@@ -292,11 +314,13 @@ fn ingest_jsonl_file(conn: &mut Connection, source_file: &SourceFile) -> Result<
     )?;
 
     let event_count = generation_event_count(&tx, source_file, stored.id, generation)?;
+    let parent_session_id = resolve_parent_session_id(&tx, source_file)?;
     update_session_after_import(
         &tx,
         SessionUpdate {
             source_file,
             session_id: stored.id,
+            parent_session_id,
             generation,
             pass_size,
             file_mtime,
@@ -445,25 +469,41 @@ fn insert_session_if_missing(tx: &Transaction<'_>, source_file: &SourceFile) -> 
 }
 
 fn load_session(conn: &Connection, source_file: &SourceFile) -> Result<Option<StoredSession>> {
+    load_session_by_source_session_id(
+        conn,
+        &source_file.path,
+        source_file.source,
+        &source_file.source_session_id,
+    )
+}
+
+fn load_session_by_source_session_id(
+    conn: &Connection,
+    error_path: &Path,
+    source: &str,
+    source_session_id: &str,
+) -> Result<Option<StoredSession>> {
     conn.query_row(
-        "SELECT id, file_path, current_generation, file_size, file_mtime, content_fingerprint, next_read_offset
+        "SELECT id, file_path, parent_session_id, current_generation, file_size, file_mtime,
+                content_fingerprint, next_read_offset
          FROM sessions
          WHERE source = ?1 AND source_session_id = ?2",
-        params![source_file.source, source_file.source_session_id.as_str()],
+        params![source, source_session_id],
         |row| {
             Ok(StoredSession {
                 id: row.get(0)?,
                 file_path: row.get(1)?,
-                current_generation: row.get(2)?,
-                file_size: row.get(3)?,
-                file_mtime: row.get(4)?,
-                content_fingerprint: row.get(5)?,
-                next_read_offset: row.get(6)?,
+                parent_session_id: row.get(2)?,
+                current_generation: row.get(3)?,
+                file_size: row.get(4)?,
+                file_mtime: row.get(5)?,
+                content_fingerprint: row.get(6)?,
+                next_read_offset: row.get(7)?,
             })
         },
     )
     .optional()
-    .map_err(|source| sqlite_error(&source_file.path, source))
+    .map_err(|source| sqlite_error(error_path, source))
 }
 
 fn unchanged_by_mtime(stored: &StoredSession, pass_size: i64, file_mtime: Option<i64>) -> bool {
@@ -493,71 +533,105 @@ fn update_skipped_session(tx: &Transaction<'_>, update: SkippedSessionUpdate<'_>
     let file_mtime = checked_file.and_then(|state| state.file_mtime);
     let pass_size = checked_file.map(|state| state.pass_size);
     let content_fingerprint = checked_file.map(|state| state.content_fingerprint);
+    let file_path = update.source_file.path.to_string_lossy();
+    let has_parent_source = update.source_file.parent_source_session_id.is_some();
 
     tx.execute(
         "UPDATE sessions
-         SET file_path = ?1,
-             file_mtime = CASE WHEN ?2 THEN ?3 ELSE file_mtime END,
-             file_size = CASE WHEN ?2 THEN ?4 ELSE file_size END,
-             content_fingerprint = CASE WHEN ?2 THEN ?5 ELSE content_fingerprint END,
+         SET file_path = :file_path,
+             parent_session_id = CASE
+                 WHEN :has_parent_source THEN :parent_session_id
+                 ELSE NULL
+             END,
+             file_mtime = CASE WHEN :has_checked_file THEN :file_mtime ELSE file_mtime END,
+             file_size = CASE WHEN :has_checked_file THEN :pass_size ELSE file_size END,
+             content_fingerprint = CASE
+                 WHEN :has_checked_file THEN :content_fingerprint
+                 ELSE content_fingerprint
+             END,
              last_read_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now'),
              updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
-         WHERE id = ?6",
-        params![
-            update.source_file.path.to_string_lossy(),
-            has_checked_file,
-            file_mtime,
-            pass_size,
-            content_fingerprint,
-            update.session_id,
-        ],
+         WHERE id = :session_id",
+        named_params! {
+            ":file_path": file_path,
+            ":has_parent_source": has_parent_source,
+            ":parent_session_id": update.parent_session_id,
+            ":has_checked_file": has_checked_file,
+            ":file_mtime": file_mtime,
+            ":pass_size": pass_size,
+            ":content_fingerprint": content_fingerprint,
+            ":session_id": update.session_id,
+        },
     )
     .map_err(|source| sqlite_error(&update.source_file.path, source))?;
     Ok(())
 }
 
 fn update_session_after_import(tx: &Transaction<'_>, update: SessionUpdate<'_>) -> Result<()> {
+    let file_path = update.source_file.path.to_string_lossy();
+    let has_parent_source = update.source_file.parent_source_session_id.is_some();
+
     tx.execute(
         "UPDATE sessions
-         SET file_path = ?1,
-             cwd = COALESCE(?2, cwd),
+         SET file_path = :file_path,
+             parent_session_id = CASE
+                 WHEN :has_parent_source THEN :parent_session_id
+                 ELSE NULL
+             END,
+             cwd = COALESCE(:cwd, cwd),
              started_at = CASE
-                 WHEN ?3 IS NULL THEN started_at
-                 WHEN started_at IS NULL THEN ?3
-                 WHEN ?3 < started_at THEN ?3
+                 WHEN :started_at IS NULL THEN started_at
+                 WHEN started_at IS NULL THEN :started_at
+                 WHEN :started_at < started_at THEN :started_at
                  ELSE started_at
              END,
              ended_at = CASE
-                 WHEN ?4 IS NULL THEN ended_at
-                 WHEN ended_at IS NULL THEN ?4
-                 WHEN ?4 > ended_at THEN ?4
+                 WHEN :ended_at IS NULL THEN ended_at
+                 WHEN ended_at IS NULL THEN :ended_at
+                 WHEN :ended_at > ended_at THEN :ended_at
                  ELSE ended_at
              END,
-             current_generation = ?5,
-             file_mtime = ?6,
-             file_size = ?7,
-             content_fingerprint = ?8,
-             next_read_offset = ?9,
-             event_count = ?10,
+             current_generation = :current_generation,
+             file_mtime = :file_mtime,
+             file_size = :file_size,
+             content_fingerprint = :content_fingerprint,
+             next_read_offset = :next_read_offset,
+             event_count = :event_count,
              last_read_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now'),
              updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
-         WHERE id = ?11",
-        params![
-            update.source_file.path.to_string_lossy(),
-            update.metadata.cwd.as_deref(),
-            update.metadata.started_at.as_deref(),
-            update.metadata.ended_at.as_deref(),
-            update.generation,
-            update.file_mtime,
-            update.pass_size,
-            update.content_fingerprint,
-            update.next_read_offset,
-            update.event_count,
-            update.session_id,
-        ],
+         WHERE id = :session_id",
+        named_params! {
+            ":file_path": file_path,
+            ":has_parent_source": has_parent_source,
+            ":parent_session_id": update.parent_session_id,
+            ":cwd": update.metadata.cwd.as_deref(),
+            ":started_at": update.metadata.started_at.as_deref(),
+            ":ended_at": update.metadata.ended_at.as_deref(),
+            ":current_generation": update.generation,
+            ":file_mtime": update.file_mtime,
+            ":file_size": update.pass_size,
+            ":content_fingerprint": update.content_fingerprint,
+            ":next_read_offset": update.next_read_offset,
+            ":event_count": update.event_count,
+            ":session_id": update.session_id,
+        },
     )
     .map_err(|source| sqlite_error(&update.source_file.path, source))?;
     Ok(())
+}
+
+fn resolve_parent_session_id(conn: &Connection, source_file: &SourceFile) -> Result<Option<i64>> {
+    let Some(parent_source_session_id) = &source_file.parent_source_session_id else {
+        return Ok(None);
+    };
+
+    load_session_by_source_session_id(
+        conn,
+        &source_file.path,
+        source_file.source,
+        parent_source_session_id,
+    )
+    .map(|session| session.map(|session| session.id))
 }
 
 fn record_ingest_error(tx: &Transaction<'_>, record: IngestErrorRecord<'_>) -> Result<()> {
@@ -707,6 +781,23 @@ fn source_session_id_from_path(path: &Path) -> Result<String> {
         .and_then(|stem| stem.to_str())
         .map(str::to_string)
         .ok_or_else(|| invalid_path(path, "session file name is not valid UTF-8"))
+}
+
+fn parent_source_session_id_from_path(path: &Path, source_session_id: &str) -> Option<String> {
+    if !source_session_id.starts_with("agent-") {
+        return None;
+    }
+
+    let subagents_dir = path.parent()?;
+    if subagents_dir.file_name()? != "subagents" {
+        return None;
+    }
+
+    subagents_dir
+        .parent()?
+        .file_name()?
+        .to_str()
+        .map(str::to_string)
 }
 
 fn file_mtime(metadata: &Metadata) -> Option<i64> {
