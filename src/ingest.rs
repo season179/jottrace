@@ -155,7 +155,7 @@ fn discover_claude_session_files() -> Result<Vec<SourceFile>> {
     for install_dir in CLAUDE_INSTALL_DIRS {
         let root = home.join(install_dir);
         collect_jsonl_files(&root.join("projects"), true, &mut paths)?;
-        collect_jsonl_files(&root, false, &mut paths)?;
+        collect_flat_session_files(&root, &mut paths)?;
     }
 
     paths.sort();
@@ -164,9 +164,8 @@ fn discover_claude_session_files() -> Result<Vec<SourceFile>> {
     let mut source_files = paths
         .into_iter()
         .map(|path| {
-            let source_session_id = source_session_id_from_path(&path)?;
-            let parent_source_session_id =
-                parent_source_session_id_from_path(&path, &source_session_id);
+            let (source_session_id, parent_source_session_id) =
+                source_session_ids_from_path(&path)?;
             Ok(SourceFile {
                 source: CLAUDE_SOURCE,
                 source_session_id,
@@ -219,6 +218,17 @@ fn collect_jsonl_files(root: &Path, recursive: bool, paths: &mut Vec<PathBuf>) -
         }
     }
 
+    Ok(())
+}
+
+fn collect_flat_session_files(root: &Path, paths: &mut Vec<PathBuf>) -> Result<()> {
+    let mut flat_paths = Vec::new();
+    collect_jsonl_files(root, false, &mut flat_paths)?;
+    paths.extend(flat_paths.into_iter().filter(|path| {
+        path.file_stem()
+            .and_then(|stem| stem.to_str())
+            .is_some_and(is_uuid_stem)
+    }));
     Ok(())
 }
 
@@ -776,15 +786,25 @@ fn event_timestamp<'a>(header: &'a EventHeader<'a>) -> Option<&'a str> {
     })
 }
 
-fn source_session_id_from_path(path: &Path) -> Result<String> {
-    path.file_stem()
+fn source_session_ids_from_path(path: &Path) -> Result<(String, Option<String>)> {
+    let file_stem = path
+        .file_stem()
         .and_then(|stem| stem.to_str())
         .map(str::to_string)
-        .ok_or_else(|| invalid_path(path, "session file name is not valid UTF-8"))
+        .ok_or_else(|| invalid_path(path, "session file name is not valid UTF-8"))?;
+
+    let parent_source_session_id = parent_source_session_id_from_path(path, &file_stem);
+    let source_session_id = if let Some(parent_source_session_id) = &parent_source_session_id {
+        format!("{parent_source_session_id}/subagents/{file_stem}")
+    } else {
+        file_stem
+    };
+
+    Ok((source_session_id, parent_source_session_id))
 }
 
-fn parent_source_session_id_from_path(path: &Path, source_session_id: &str) -> Option<String> {
-    if !source_session_id.starts_with("agent-") {
+fn parent_source_session_id_from_path(path: &Path, file_stem: &str) -> Option<String> {
+    if !file_stem.starts_with("agent-") {
         return None;
     }
 
@@ -793,11 +813,24 @@ fn parent_source_session_id_from_path(path: &Path, source_session_id: &str) -> O
         return None;
     }
 
-    subagents_dir
+    let parent_source_session_id = subagents_dir
         .parent()?
         .file_name()?
         .to_str()
-        .map(str::to_string)
+        .map(str::to_string)?;
+
+    is_uuid_stem(&parent_source_session_id).then_some(parent_source_session_id)
+}
+
+fn is_uuid_stem(value: &str) -> bool {
+    value.len() == 36
+        && value
+            .char_indices()
+            .all(|(index, ch)| matches!(index, 8 | 13 | 18 | 23) == (ch == '-'))
+        && value
+            .chars()
+            .filter(|ch| *ch != '-')
+            .all(|ch| ch.is_ascii_hexdigit())
 }
 
 fn file_mtime(metadata: &Metadata) -> Option<i64> {

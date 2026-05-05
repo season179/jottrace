@@ -5,7 +5,7 @@ use std::time::Duration;
 use crate::{JottraceError, Result, data_dir_from_env, ensure_private_file};
 
 pub const DB_FILE_NAME: &str = "db.sqlite";
-pub const LATEST_SCHEMA_VERSION: i64 = 2;
+pub const LATEST_SCHEMA_VERSION: i64 = 3;
 
 const MIGRATIONS: &[Migration] = &[
     Migration {
@@ -15,6 +15,10 @@ const MIGRATIONS: &[Migration] = &[
     Migration {
         version: 2,
         sql: include_str!("migrations/002_ingest_error_recency_index.sql"),
+    },
+    Migration {
+        version: 3,
+        sql: include_str!("migrations/003_claude_sidechain_source_ids.sql"),
     },
 ];
 const UNRESOLVED_INGEST_ERROR_COUNT_SQL: &str =
@@ -313,6 +317,121 @@ mod tests {
             })
             .expect("migrated line number");
         assert_eq!(line_number, 2);
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn migrates_v2_claude_sidechain_source_session_ids_to_parent_qualified() {
+        let root = temp_root("storage-upgrade-v2-sidechain-ids");
+        let db_path = root.join(DB_FILE_NAME);
+        ensure_private_file(&db_path).expect("create db file");
+        let parent_source_session_id = "00000000-0000-4000-8000-000000000021";
+        let old_sidechain_source_session_id = "agent-a000000000000021";
+        let new_sidechain_source_session_id =
+            "00000000-0000-4000-8000-000000000021/subagents/agent-a000000000000021";
+        let sidechain_file_path = "/Users/fixture/subagents/archive/.claude/projects/-Users-fixture-Workspace-jottrace/00000000-0000-4000-8000-000000000021/subagents/agent-a000000000000021.jsonl";
+        let unlinked_old_sidechain_source_session_id = "agent-a000000000000022";
+        let unlinked_new_sidechain_source_session_id =
+            "11111111-1111-4111-8111-111111111111/subagents/agent-a000000000000022";
+        let unlinked_sidechain_file_path = "/Users/fixture/subagents/archive/.claude/projects/-Users-fixture-Workspace-jottrace/11111111-1111-4111-8111-111111111111/subagents/agent-a000000000000022.jsonl";
+        let non_uuid_parent_source_session_id = "agent-a000000000000023";
+        let non_uuid_parent_file_path =
+            "/Users/fixture/.claude/projects/subagents/agent-a000000000000023.jsonl";
+
+        {
+            let conn = Connection::open(&db_path).expect("open v2 db");
+            conn.execute_batch(include_str!("migrations/001_initial_schema.sql"))
+                .expect("create v1 schema");
+            conn.execute_batch(include_str!(
+                "migrations/002_ingest_error_recency_index.sql"
+            ))
+            .expect("create v2 schema");
+            conn.execute(
+                "INSERT INTO sessions (source, source_session_id, file_path)
+                 VALUES ('claude_cli', ?1, '/Users/fixture/.claude/projects/-Users-fixture-Workspace-jottrace/00000000-0000-4000-8000-000000000021.jsonl')",
+                [parent_source_session_id],
+            )
+            .expect("insert parent session");
+            conn.execute(
+                "INSERT INTO sessions (source, source_session_id, file_path, parent_session_id)
+                 VALUES ('claude_cli', ?1, ?2, 1)",
+                [old_sidechain_source_session_id, sidechain_file_path],
+            )
+            .expect("insert old sidechain session");
+            conn.execute(
+                "INSERT INTO sessions (source, source_session_id, file_path)
+                 VALUES ('claude_cli', ?1, ?2)",
+                [
+                    unlinked_old_sidechain_source_session_id,
+                    unlinked_sidechain_file_path,
+                ],
+            )
+            .expect("insert unlinked old sidechain session");
+            conn.execute(
+                "INSERT INTO sessions (source, source_session_id, file_path)
+                 VALUES ('claude_cli', ?1, ?2)",
+                [non_uuid_parent_source_session_id, non_uuid_parent_file_path],
+            )
+            .expect("insert non-uuid parent session");
+            conn.execute(
+                "INSERT INTO ingest_errors
+                    (source, source_session_id, session_id, file_path, line_number, error_kind, message)
+                 VALUES ('claude_cli', ?1, 2, ?2, 1, 'invalid_json', 'bad line')",
+                [old_sidechain_source_session_id, sidechain_file_path],
+            )
+            .expect("insert old sidechain ingest error");
+            conn.pragma_update(None, "user_version", 2)
+                .expect("set user_version");
+        }
+
+        let conn = open_database(&db_path).expect("migrate db");
+
+        let migrated_source_session_id: String = conn
+            .query_row(
+                "SELECT source_session_id FROM sessions WHERE id = 2",
+                [],
+                |row| row.get(0),
+            )
+            .expect("migrated sidechain source id");
+        assert_eq!(migrated_source_session_id, new_sidechain_source_session_id);
+        let migrated_error_source_session_id: String = conn
+            .query_row(
+                "SELECT source_session_id FROM ingest_errors WHERE session_id = 2",
+                [],
+                |row| row.get(0),
+            )
+            .expect("migrated ingest error source id");
+        assert_eq!(
+            migrated_error_source_session_id,
+            new_sidechain_source_session_id
+        );
+        let unlinked_migrated_source_session_id: String = conn
+            .query_row(
+                "SELECT source_session_id FROM sessions WHERE id = 3",
+                [],
+                |row| row.get(0),
+            )
+            .expect("migrated unlinked sidechain source id");
+        assert_eq!(
+            unlinked_migrated_source_session_id,
+            unlinked_new_sidechain_source_session_id
+        );
+        let non_uuid_parent_migrated_source_session_id: String = conn
+            .query_row(
+                "SELECT source_session_id FROM sessions WHERE id = 4",
+                [],
+                |row| row.get(0),
+            )
+            .expect("non-uuid parent source id");
+        assert_eq!(
+            non_uuid_parent_migrated_source_session_id,
+            non_uuid_parent_source_session_id
+        );
+        assert_eq!(
+            user_version(&db_path, &conn).expect("user_version"),
+            LATEST_SCHEMA_VERSION
+        );
 
         let _ = fs::remove_dir_all(root);
     }

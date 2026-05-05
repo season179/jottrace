@@ -299,8 +299,10 @@ payload.
   `~/.claude-zai/`, each with the same `projects/<encoded-cwd>/` shape.
 - Two project directory shapes coexist: the new one
   (`projects/<encoded-cwd>/<session-uuid>.jsonl`) and an older flat
-  layout (sessions sit directly in the install dir as `*.jsonl`). The
-  reader handles both.
+  layout (sessions sit directly in the install dir as
+  `<session-uuid>.jsonl`). The reader handles both, but flat-root JSONL
+  files whose stem is not UUID-shaped are ignored because files like
+  `history.jsonl` are not session transcripts.
 - One JSONL file per session, append-only.
 - Each line is one event (JSON object). Event shape varies by `type`
   (`user`, `assistant`, `system`, `file-history-snapshot`, ...).
@@ -322,12 +324,14 @@ often with a sibling `agent-<id>.meta.json` file that carries lightweight
 agent metadata. Each subagent JSONL file is stored as its own row in
 `sessions`, with a nullable `parent_session_id` column linking back to
 the spawning session. The sidechain's canonical `source_session_id` is
-the JSONL filename stem (`agent-<id>`). Parent linkage is derived from
-the path segment immediately above `subagents`; for the observed fixture
-shape, that segment is the parent Claude session UUID. If the parent row
-is not available yet, the sidechain is still preserved with a null
-`parent_session_id`; its `file_path` retains the parent source id so a
-later run can resolve the link after the parent session is imported.
+parent-qualified:
+`<parent-session-uuid>/subagents/agent-<id>`. Parent linkage is derived
+from the path segment immediately above `subagents`; for the observed
+fixture shape, that segment is the parent Claude session UUID. If the
+parent row is not available yet, the sidechain is still preserved with a
+null `parent_session_id`; its `source_session_id` and `file_path` retain
+the parent source id so a later run can resolve the link after the parent
+session is imported.
 Subagent events use the same
 `(session_id, generation, seq)` PK shape as regular sessions; they are
 not folded into the parent's event stream. Re-read behavior is identical

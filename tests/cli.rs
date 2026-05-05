@@ -17,6 +17,7 @@ const CLAUDE_FIXTURE_SESSION_ID: &str = "00000000-0000-4000-8000-000000000021";
 const CLAUDE_SIDECHAIN_FIXTURE_SESSION: &str = "claude-cli/projects/-Users-fixture-Workspace-jottrace/00000000-0000-4000-8000-000000000021/subagents/agent-a000000000000021.jsonl";
 const CLAUDE_SIDECHAIN_FIXTURE_META: &str = "claude-cli/projects/-Users-fixture-Workspace-jottrace/00000000-0000-4000-8000-000000000021/subagents/agent-a000000000000021.meta.json";
 const CLAUDE_SIDECHAIN_FIXTURE_SESSION_ID: &str = "agent-a000000000000021";
+const OTHER_CLAUDE_FIXTURE_SESSION_ID: &str = "11111111-1111-4111-8111-111111111111";
 const CORRUPT_FIXTURE_SESSION: &str = "edge-cases/corrupt-line.jsonl";
 const CORRUPT_FIXTURE_SESSION_ID: &str = "00000000-0000-4000-8000-000000000000";
 const UNREADABLE_FIXTURE_SESSION_ID: &str = "00000000-0000-4000-8000-000000000001";
@@ -629,7 +630,7 @@ fn ingest_preserves_claude_cli_sidechain_as_child_session() {
     let sidechain = sidechain_session(&conn);
     assert_eq!(
         sidechain.source_session_id,
-        CLAUDE_SIDECHAIN_FIXTURE_SESSION_ID
+        sidechain_source_session_id(CLAUDE_FIXTURE_SESSION_ID)
     );
     assert!(sidechain.parent_session_id.is_some());
     assert_eq!(
@@ -691,6 +692,129 @@ fn ingest_preserves_claude_cli_sidechain_without_parent_until_parent_is_availabl
         sidechain.parent_source_session_id.as_deref(),
         Some(CLAUDE_FIXTURE_SESSION_ID)
     );
+
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn ingest_keeps_same_named_claude_sidechains_under_different_parents_separate() {
+    let root = temp_root("ingest-claude-sidechain-collision");
+    let data_dir = root.join(".jottrace");
+    install_primary_claude_fixture(&root);
+    install_claude_fixture(
+        &root,
+        OTHER_CLAUDE_FIXTURE_SESSION_ID,
+        CLAUDE_FIXTURE_SESSION,
+    );
+    install_claude_sidechain_fixture_for_parent(&root, CLAUDE_FIXTURE_SESSION_ID);
+    install_claude_sidechain_fixture_for_parent(&root, OTHER_CLAUDE_FIXTURE_SESSION_ID);
+
+    let ingest = run_ingest(&root, &data_dir);
+    assert!(ingest.contains("sessions: 4"));
+    assert!(ingest.contains("events: 38"));
+    assert!(ingest.contains("inserted_events: 38"));
+
+    let conn = Connection::open(db_path(&data_dir)).expect("open preserved db");
+    let child_links = sidechain_parent_links(&conn);
+    assert_eq!(
+        child_links,
+        vec![
+            (
+                sidechain_source_session_id(CLAUDE_FIXTURE_SESSION_ID),
+                CLAUDE_FIXTURE_SESSION_ID.to_string(),
+                7,
+            ),
+            (
+                sidechain_source_session_id(OTHER_CLAUDE_FIXTURE_SESSION_ID),
+                OTHER_CLAUDE_FIXTURE_SESSION_ID.to_string(),
+                7,
+            ),
+        ]
+    );
+
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn ingest_ignores_claude_flat_root_non_session_jsonl() {
+    let root = temp_root("ingest-ignore-history-jsonl");
+    let data_dir = root.join(".jottrace");
+    install_primary_claude_fixture(&root);
+    let history_file = root.join(".claude/history.jsonl");
+    write_text_file(&history_file, "{\"timestamp\":1759140367754}\n");
+
+    let ingest = run_ingest(&root, &data_dir);
+    assert!(ingest.contains("sessions: 1"));
+    assert!(ingest.contains("events: 12"));
+    assert!(ingest.contains("unresolved_ingest_errors: 0"));
+
+    let conn = Connection::open(db_path(&data_dir)).expect("open preserved db");
+    let history_sessions: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM sessions WHERE source_session_id = 'history'",
+            [],
+            |row| row.get(0),
+        )
+        .expect("history session count");
+    assert_eq!(history_sessions, 0);
+
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn ingest_preserves_uuid_named_claude_flat_root_session() {
+    let root = temp_root("ingest-flat-root-uuid");
+    let data_dir = root.join(".jottrace");
+    let flat_session_file = root
+        .join(".claude")
+        .join(format!("{CLAUDE_FIXTURE_SESSION_ID}.jsonl"));
+    copy_reader_fixture(CLAUDE_FIXTURE_SESSION, &flat_session_file);
+
+    let ingest = run_ingest(&root, &data_dir);
+    assert!(ingest.contains("sessions: 1"));
+    assert!(ingest.contains("events: 12"));
+    assert!(ingest.contains("unresolved_ingest_errors: 0"));
+
+    let conn = Connection::open(db_path(&data_dir)).expect("open preserved db");
+    let stored_file_path: String = conn
+        .query_row(
+            "SELECT file_path
+             FROM sessions
+             WHERE source_session_id = ?1",
+            [CLAUDE_FIXTURE_SESSION_ID],
+            |row| row.get(0),
+        )
+        .expect("flat root session path");
+    assert_eq!(PathBuf::from(stored_file_path), flat_session_file);
+
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn ingest_does_not_treat_subagents_project_directory_as_sidechain_parent() {
+    let root = temp_root("ingest-subagents-project-dir");
+    let data_dir = root.join(".jottrace");
+    let session_file = root
+        .join(".claude/projects/subagents")
+        .join(format!("{CLAUDE_FIXTURE_SESSION_ID}.jsonl"));
+    copy_reader_fixture(CLAUDE_FIXTURE_SESSION, &session_file);
+
+    let ingest = run_ingest(&root, &data_dir);
+    assert!(ingest.contains("sessions: 1"));
+    assert!(ingest.contains("events: 12"));
+
+    let conn = Connection::open(db_path(&data_dir)).expect("open preserved db");
+    let (source_session_id, parent_session_id): (String, Option<i64>) = conn
+        .query_row(
+            "SELECT source_session_id, parent_session_id
+             FROM sessions
+             WHERE file_path = ?1",
+            [session_file.to_string_lossy().as_ref()],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .expect("subagents project session metadata");
+    assert_eq!(source_session_id, CLAUDE_FIXTURE_SESSION_ID);
+    assert_eq!(parent_session_id, None);
 
     let _ = fs::remove_dir_all(root);
 }
@@ -772,7 +896,7 @@ fn sidechain_session(conn: &Connection) -> SidechainSession {
          LEFT JOIN sessions parent ON parent.id = child.parent_session_id
          WHERE child.source = 'claude_cli'
            AND child.source_session_id = ?1",
-        [CLAUDE_SIDECHAIN_FIXTURE_SESSION_ID],
+        [sidechain_source_session_id(CLAUDE_FIXTURE_SESSION_ID)],
         |row| {
             let file_path: String = row.get(7)?;
             Ok(SidechainSession {
@@ -795,8 +919,12 @@ fn install_primary_claude_fixture(root: &Path) -> PathBuf {
 }
 
 fn install_claude_sidechain_fixture(root: &Path) -> PathBuf {
+    install_claude_sidechain_fixture_for_parent(root, CLAUDE_FIXTURE_SESSION_ID)
+}
+
+fn install_claude_sidechain_fixture_for_parent(root: &Path, parent_session_id: &str) -> PathBuf {
     let sidechain_file = claude_project_dir(root)
-        .join(CLAUDE_FIXTURE_SESSION_ID)
+        .join(parent_session_id)
         .join("subagents")
         .join(format!("{CLAUDE_SIDECHAIN_FIXTURE_SESSION_ID}.jsonl"));
     let sidechain_meta = sidechain_file.with_extension("meta.json");
@@ -819,11 +947,40 @@ fn claude_project_dir(root: &Path) -> PathBuf {
     root.join(".claude/projects/-Users-fixture-Workspace-jottrace")
 }
 
+fn sidechain_source_session_id(parent_session_id: &str) -> String {
+    format!("{parent_session_id}/subagents/{CLAUDE_SIDECHAIN_FIXTURE_SESSION_ID}")
+}
+
+fn sidechain_parent_links(conn: &Connection) -> Vec<(String, String, i64)> {
+    let mut statement = conn
+        .prepare(
+            "SELECT child.source_session_id, parent.source_session_id, child.event_count
+             FROM sessions child
+             JOIN sessions parent ON parent.id = child.parent_session_id
+             WHERE child.source = 'claude_cli'
+               AND child.source_session_id LIKE '%/subagents/%'
+             ORDER BY child.source_session_id",
+        )
+        .expect("prepare sidechain parent links");
+    statement
+        .query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))
+        .expect("query sidechain parent links")
+        .map(|row| row.expect("sidechain parent link"))
+        .collect()
+}
+
 fn copy_reader_fixture(fixture_relative: &str, destination: &Path) {
     if let Some(parent) = destination.parent() {
         fs::create_dir_all(parent).expect("create fixture destination parent");
     }
     fs::copy(reader_fixture(fixture_relative), destination).expect("copy fixture");
+}
+
+fn write_text_file(path: &Path, content: &str) {
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent).expect("create text fixture parent");
+    }
+    fs::write(path, content).expect("write text fixture");
 }
 
 fn set_modified(path: &Path, unix_seconds: u64) {
