@@ -85,6 +85,18 @@ struct IngestErrorRecord<'a> {
     message: &'a str,
 }
 
+struct SkippedSessionUpdate<'a> {
+    source_file: &'a SourceFile,
+    session_id: i64,
+    checked_file: Option<CheckedFileState<'a>>,
+}
+
+struct CheckedFileState<'a> {
+    pass_size: i64,
+    file_mtime: Option<i64>,
+    content_fingerprint: &'a str,
+}
+
 #[derive(Debug, Deserialize)]
 struct EventHeader<'a> {
     #[serde(default, borrow)]
@@ -211,7 +223,14 @@ fn ingest_jsonl_file(conn: &mut Connection, source_file: &SourceFile) -> Result<
         let tx = conn
             .transaction()
             .map_err(|source| sqlite_error(&source_file.path, source))?;
-        update_skipped_session(&tx, source_file, stored.id)?;
+        update_skipped_session(
+            &tx,
+            SkippedSessionUpdate {
+                source_file,
+                session_id: stored.id,
+                checked_file: None,
+            },
+        )?;
         tx.commit()
             .map_err(|source| sqlite_error(&source_file.path, source))?;
         return Ok(0);
@@ -229,7 +248,18 @@ fn ingest_jsonl_file(conn: &mut Connection, source_file: &SourceFile) -> Result<
     let import_mode = import_mode(&stored, pass_size, &content_fingerprint);
 
     if import_mode == ImportMode::Skip {
-        update_skipped_session(&tx, source_file, stored.id)?;
+        update_skipped_session(
+            &tx,
+            SkippedSessionUpdate {
+                source_file,
+                session_id: stored.id,
+                checked_file: Some(CheckedFileState {
+                    pass_size,
+                    file_mtime,
+                    content_fingerprint: &content_fingerprint,
+                }),
+            },
+        )?;
         tx.commit()
             .map_err(|source| sqlite_error(&source_file.path, source))?;
         return Ok(0);
@@ -412,20 +442,32 @@ fn import_mode(stored: &StoredSession, pass_size: i64, content_fingerprint: &str
     }
 }
 
-fn update_skipped_session(
-    tx: &Transaction<'_>,
-    source_file: &SourceFile,
-    session_id: i64,
-) -> Result<()> {
+fn update_skipped_session(tx: &Transaction<'_>, update: SkippedSessionUpdate<'_>) -> Result<()> {
+    let checked_file = update.checked_file.as_ref();
+    let has_checked_file = checked_file.is_some();
+    let file_mtime = checked_file.and_then(|state| state.file_mtime);
+    let pass_size = checked_file.map(|state| state.pass_size);
+    let content_fingerprint = checked_file.map(|state| state.content_fingerprint);
+
     tx.execute(
         "UPDATE sessions
          SET file_path = ?1,
+             file_mtime = CASE WHEN ?2 THEN ?3 ELSE file_mtime END,
+             file_size = CASE WHEN ?2 THEN ?4 ELSE file_size END,
+             content_fingerprint = CASE WHEN ?2 THEN ?5 ELSE content_fingerprint END,
              last_read_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now'),
              updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
-         WHERE id = ?2",
-        params![source_file.path.to_string_lossy(), session_id],
+         WHERE id = ?6",
+        params![
+            update.source_file.path.to_string_lossy(),
+            has_checked_file,
+            file_mtime,
+            pass_size,
+            content_fingerprint,
+            update.session_id,
+        ],
     )
-    .map_err(|source| sqlite_error(&source_file.path, source))?;
+    .map_err(|source| sqlite_error(&update.source_file.path, source))?;
     Ok(())
 }
 
