@@ -30,16 +30,14 @@ fn edge_case_fixtures_encode_jsonl_reader_state() {
     let corrupt =
         fs::read_to_string(fixture("edge-cases/corrupt-line.jsonl")).expect("read corrupt fixture");
     assert!(
-        corrupt
-            .lines()
-            .any(|line| line.contains("not valid json")),
+        corrupt.lines().any(|line| line.contains("not valid json")),
         "corrupt-line fixture must contain an intentionally invalid JSONL line"
     );
 
     let truncated_before = fs::read(fixture("edge-cases/truncation-before.jsonl"))
         .expect("read truncation before fixture");
-    let truncated_after =
-        fs::read(fixture("edge-cases/truncation-after.jsonl")).expect("read truncation after fixture");
+    let truncated_after = fs::read(fixture("edge-cases/truncation-after.jsonl"))
+        .expect("read truncation after fixture");
     assert!(
         truncated_after.len() < truncated_before.len(),
         "truncation-after must be smaller than truncation-before"
