@@ -321,7 +321,14 @@ sidechains. The observed current shape is
 often with a sibling `agent-<id>.meta.json` file that carries lightweight
 agent metadata. Each subagent JSONL file is stored as its own row in
 `sessions`, with a nullable `parent_session_id` column linking back to
-the spawning session. Subagent events use the same
+the spawning session. The sidechain's canonical `source_session_id` is
+the JSONL filename stem (`agent-<id>`). Parent linkage is derived from
+the path segment immediately above `subagents`; for the observed fixture
+shape, that segment is the parent Claude session UUID. If the parent row
+is not available yet, the sidechain is still preserved with a null
+`parent_session_id`; its `file_path` retains the parent source id so a
+later run can resolve the link after the parent session is imported.
+Subagent events use the same
 `(session_id, generation, seq)` PK shape as regular sessions; they are
 not folded into the parent's event stream. Re-read behavior is identical
 to a regular session.
@@ -594,13 +601,10 @@ Listed so we don't pretend they're decided.
 - **Multi-source orchestration.** Whether all readers run inside one
   binary or as separate processes invoked by the scheduler. (The
   shared-DB question is decided: one DB per user, see Schema.)
-- **Subagent / parent-child linkage derivation.** For Claude CLI's
-  `agent-<uuid>.jsonl` files and OpenCode's parent/child sessions:
-  what's the cheapest deterministic way to derive `parent_session_id`
-  from the file plus the parent's events? Likely the parent's
-  `parentUuid` chain or a `Task` tool_use event referencing the
-  subagent's UUID. Decide after looking at real fixtures; the schema
-  column already exists.
+- **OpenCode parent-child linkage derivation.** The Claude CLI sidechain
+  rule is settled above. OpenCode's parent/child sessions still need the
+  cheapest deterministic `parent_session_id` derivation once real
+  fixtures land.
 - **Distribution caveats.** macOS Gatekeeper quarantine on unsigned
   binaries (ad-hoc sign vs. notarize vs. document `xattr -d`
   workaround); Linux glibc compatibility (build on oldest-supported

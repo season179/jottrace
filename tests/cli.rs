@@ -14,6 +14,9 @@ use std::os::unix::fs::{MetadataExt, PermissionsExt};
 
 const CLAUDE_FIXTURE_SESSION: &str = "claude-cli/projects/-Users-fixture-Workspace-jottrace/00000000-0000-4000-8000-000000000021.jsonl";
 const CLAUDE_FIXTURE_SESSION_ID: &str = "00000000-0000-4000-8000-000000000021";
+const CLAUDE_SIDECHAIN_FIXTURE_SESSION: &str = "claude-cli/projects/-Users-fixture-Workspace-jottrace/00000000-0000-4000-8000-000000000021/subagents/agent-a000000000000021.jsonl";
+const CLAUDE_SIDECHAIN_FIXTURE_META: &str = "claude-cli/projects/-Users-fixture-Workspace-jottrace/00000000-0000-4000-8000-000000000021/subagents/agent-a000000000000021.meta.json";
+const CLAUDE_SIDECHAIN_FIXTURE_SESSION_ID: &str = "agent-a000000000000021";
 const CORRUPT_FIXTURE_SESSION: &str = "edge-cases/corrupt-line.jsonl";
 const CORRUPT_FIXTURE_SESSION_ID: &str = "00000000-0000-4000-8000-000000000000";
 const UNREADABLE_FIXTURE_SESSION_ID: &str = "00000000-0000-4000-8000-000000000001";
@@ -609,6 +612,89 @@ fn ingest_preserves_claude_cli_fixture_and_status_reports_counts() {
     let _ = fs::remove_dir_all(root);
 }
 
+#[test]
+fn ingest_preserves_claude_cli_sidechain_as_child_session() {
+    let root = temp_root("ingest-claude-sidechain");
+    let data_dir = root.join(".jottrace");
+    install_primary_claude_fixture(&root);
+    let sidechain_file = install_claude_sidechain_fixture(&root);
+
+    let ingest = run_ingest(&root, &data_dir);
+    assert!(ingest.contains("sessions: 2"));
+    assert!(ingest.contains("events: 19"));
+    assert!(ingest.contains("inserted_events: 19"));
+    assert!(ingest.contains("unresolved_ingest_errors: 0"));
+
+    let conn = Connection::open(db_path(&data_dir)).expect("open preserved db");
+    let sidechain = sidechain_session(&conn);
+    assert_eq!(
+        sidechain.source_session_id,
+        CLAUDE_SIDECHAIN_FIXTURE_SESSION_ID
+    );
+    assert!(sidechain.parent_session_id.is_some());
+    assert_eq!(
+        sidechain.parent_source_session_id.as_deref(),
+        Some(CLAUDE_FIXTURE_SESSION_ID)
+    );
+    assert_eq!(sidechain.event_count, 7);
+    assert_eq!(
+        sidechain.cwd.as_deref(),
+        Some("/Users/fixture/Workspace/jottrace")
+    );
+    assert_eq!(
+        sidechain.started_at.as_deref(),
+        Some("2026-05-05T01:01:00.000Z")
+    );
+    assert_eq!(
+        sidechain.ended_at.as_deref(),
+        Some("2026-05-05T01:01:06.000Z")
+    );
+    assert_eq!(sidechain.file_path, sidechain_file);
+
+    let second = run_ingest(&root, &data_dir);
+    assert!(second.contains("sessions: 2"));
+    assert!(second.contains("events: 19"));
+    assert!(second.contains("inserted_events: 0"));
+
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn ingest_preserves_claude_cli_sidechain_without_parent_until_parent_is_available() {
+    let root = temp_root("ingest-claude-sidechain-late-parent");
+    let data_dir = root.join(".jottrace");
+    let sidechain_file = install_claude_sidechain_fixture(&root);
+
+    let first = run_ingest(&root, &data_dir);
+    assert!(first.contains("sessions: 1"));
+    assert!(first.contains("events: 7"));
+    assert!(first.contains("inserted_events: 7"));
+
+    let conn = Connection::open(db_path(&data_dir)).expect("open preserved db");
+    let sidechain = sidechain_session(&conn);
+    assert_eq!(sidechain.parent_session_id, None);
+    assert_eq!(sidechain.parent_source_session_id, None);
+    assert_eq!(sidechain.event_count, 7);
+    assert_eq!(sidechain.file_path, sidechain_file);
+    drop(conn);
+
+    install_primary_claude_fixture(&root);
+
+    let second = run_ingest(&root, &data_dir);
+    assert!(second.contains("sessions: 2"));
+    assert!(second.contains("events: 19"));
+    assert!(second.contains("inserted_events: 12"));
+
+    let conn = Connection::open(db_path(&data_dir)).expect("open preserved db");
+    let sidechain = sidechain_session(&conn);
+    assert_eq!(
+        sidechain.parent_source_session_id.as_deref(),
+        Some(CLAUDE_FIXTURE_SESSION_ID)
+    );
+
+    let _ = fs::remove_dir_all(root);
+}
+
 #[cfg(unix)]
 #[test]
 fn doctor_rejects_insecure_existing_data_dir() {
@@ -667,23 +753,77 @@ fn db_path(data_dir: &Path) -> PathBuf {
     data_dir.join(jottrace::storage::DB_FILE_NAME)
 }
 
+struct SidechainSession {
+    source_session_id: String,
+    parent_session_id: Option<i64>,
+    parent_source_session_id: Option<String>,
+    event_count: i64,
+    cwd: Option<String>,
+    started_at: Option<String>,
+    ended_at: Option<String>,
+    file_path: PathBuf,
+}
+
+fn sidechain_session(conn: &Connection) -> SidechainSession {
+    conn.query_row(
+        "SELECT child.source_session_id, child.parent_session_id, parent.source_session_id,
+                child.event_count, child.cwd, child.started_at, child.ended_at, child.file_path
+         FROM sessions child
+         LEFT JOIN sessions parent ON parent.id = child.parent_session_id
+         WHERE child.source = 'claude_cli'
+           AND child.source_session_id = ?1",
+        [CLAUDE_SIDECHAIN_FIXTURE_SESSION_ID],
+        |row| {
+            let file_path: String = row.get(7)?;
+            Ok(SidechainSession {
+                source_session_id: row.get(0)?,
+                parent_session_id: row.get(1)?,
+                parent_source_session_id: row.get(2)?,
+                event_count: row.get(3)?,
+                cwd: row.get(4)?,
+                started_at: row.get(5)?,
+                ended_at: row.get(6)?,
+                file_path: PathBuf::from(file_path),
+            })
+        },
+    )
+    .expect("sidechain session")
+}
+
 fn install_primary_claude_fixture(root: &Path) -> PathBuf {
     install_claude_fixture(root, CLAUDE_FIXTURE_SESSION_ID, CLAUDE_FIXTURE_SESSION)
 }
 
+fn install_claude_sidechain_fixture(root: &Path) -> PathBuf {
+    let sidechain_file = claude_project_dir(root)
+        .join(CLAUDE_FIXTURE_SESSION_ID)
+        .join("subagents")
+        .join(format!("{CLAUDE_SIDECHAIN_FIXTURE_SESSION_ID}.jsonl"));
+    let sidechain_meta = sidechain_file.with_extension("meta.json");
+    copy_reader_fixture(CLAUDE_SIDECHAIN_FIXTURE_SESSION, &sidechain_file);
+    copy_reader_fixture(CLAUDE_SIDECHAIN_FIXTURE_META, &sidechain_meta);
+    sidechain_file
+}
+
 fn install_claude_fixture(root: &Path, session_id: &str, fixture_relative: &str) -> PathBuf {
-    let session_file = root
-        .join(".claude/projects/-Users-fixture-Workspace-jottrace")
-        .join(format!("{session_id}.jsonl"));
-    if let Some(parent) = session_file.parent() {
-        fs::create_dir_all(parent).expect("create fixture destination parent");
-    }
-    fs::copy(reader_fixture(fixture_relative), &session_file).expect("copy fixture");
+    let session_file = claude_project_dir(root).join(format!("{session_id}.jsonl"));
+    copy_reader_fixture(fixture_relative, &session_file);
     session_file
 }
 
 fn replace_with_fixture(path: &Path, fixture_relative: &str) {
-    fs::copy(reader_fixture(fixture_relative), path).expect("replace fixture");
+    copy_reader_fixture(fixture_relative, path);
+}
+
+fn claude_project_dir(root: &Path) -> PathBuf {
+    root.join(".claude/projects/-Users-fixture-Workspace-jottrace")
+}
+
+fn copy_reader_fixture(fixture_relative: &str, destination: &Path) {
+    if let Some(parent) = destination.parent() {
+        fs::create_dir_all(parent).expect("create fixture destination parent");
+    }
+    fs::copy(reader_fixture(fixture_relative), destination).expect("copy fixture");
 }
 
 fn set_modified(path: &Path, unix_seconds: u64) {
