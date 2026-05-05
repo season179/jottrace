@@ -33,6 +33,9 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
+      - name: Check version policy
+        run: scripts/check-version.sh
+
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
         with:

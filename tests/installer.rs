@@ -58,7 +58,7 @@ fn installer_downloads_matching_release_artifact_to_local_bin() {
     assert!(version.status.success());
     assert_eq!(
         String::from_utf8_lossy(&version.stdout).trim(),
-        "jottrace 0.1.0"
+        "jottrace 26.5.0"
     );
 
     let _ = fs::remove_dir_all(root);
@@ -127,7 +127,7 @@ fn create_release_artifact(
     let fake_binary = payload_dir.join("jottrace");
     fs::write(
         &fake_binary,
-        "#!/usr/bin/env sh\nif [ \"$1\" = \"--version\" ]; then echo 'jottrace 0.1.0'; else exit 64; fi\n",
+        "#!/usr/bin/env sh\nif [ \"$1\" = \"--version\" ]; then echo 'jottrace 26.5.0'; else exit 64; fi\n",
     )
     .expect("write fake binary");
     #[cfg(unix)]
