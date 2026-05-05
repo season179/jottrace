@@ -23,6 +23,8 @@ design docs, but are not implemented as user-facing ingest sources yet.
   rewritten or truncated source files as new generations.
 - Record corrupt or unreadable source-file errors without blocking unrelated
   sessions.
+- Browse preserved sessions, events, and unresolved ingest errors locally with
+  `jottrace web`.
 
 ## Install
 
@@ -54,6 +56,7 @@ jottrace --version
 jottrace doctor
 jottrace ingest
 jottrace status
+jottrace web
 ```
 
 `jottrace doctor` creates or checks the local data directory at `~/.jottrace`
@@ -81,11 +84,29 @@ session/event counts, inserted event count, and unresolved ingest-error count.
 `jottrace status` initializes `~/.jottrace/db.sqlite` if needed and reports
 the schema version plus session, event, and unresolved ingest-error counts.
 
+`jottrace web` starts a read-only web UI bound to `127.0.0.1`, prints the URL
+and database path, and serves data from the existing SQLite journal. The UI lets
+you filter sessions by source, cwd/path metadata, session id, and visible raw
+payload text; selecting a session shows its preserved events and payload
+previews. Unresolved ingest errors are shown on the page to help diagnose broken
+source files.
+
+The web UI is local-only. It does not mutate source files, delete journal rows,
+or send transcript data to external services. To request a fixed port instead
+of an available OS-assigned port:
+
+```sh
+jottrace web --port 7421
+```
+
+For scripted smoke checks, `jottrace web --once` serves one request and exits.
+
 To use a different journal directory:
 
 ```sh
 JOTTRACE_HOME=/path/to/private/journal jottrace ingest
 JOTTRACE_HOME=/path/to/private/journal jottrace status
+JOTTRACE_HOME=/path/to/private/journal jottrace web
 ```
 
 ## Update
@@ -109,6 +130,7 @@ Run the development binary with:
 cargo run -- doctor
 cargo run -- ingest
 cargo run -- status
+cargo run -- web
 ```
 
 ## Maintainer Release

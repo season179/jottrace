@@ -6,6 +6,7 @@ use crate::{JottraceError, Result, data_dir_from_env, ensure_private_file};
 
 pub const DB_FILE_NAME: &str = "db.sqlite";
 pub const LATEST_SCHEMA_VERSION: i64 = 3;
+pub(crate) const RAW_CODEC: &str = "raw";
 
 const MIGRATIONS: &[Migration] = &[
     Migration {

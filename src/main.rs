@@ -1,4 +1,5 @@
 use std::env;
+use std::io::{self, Write};
 use std::process::ExitCode;
 
 fn main() -> ExitCode {
@@ -19,6 +20,7 @@ fn main() -> ExitCode {
         Some("doctor") => run_doctor_command(),
         Some("ingest") => run_ingest_command(),
         Some("status") => run_status_command(),
+        Some("web") => run_web_command(args),
         Some(command) => {
             eprintln!("unknown command: {command}");
             eprintln!("run `jottrace --help` for usage");
@@ -27,6 +29,95 @@ fn main() -> ExitCode {
             ExitCode::from(2)
         }
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct WebOptions {
+    port: u16,
+    once: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum WebCommand {
+    Run(WebOptions),
+    Help,
+}
+
+fn run_web_command(args: impl Iterator<Item = String>) -> ExitCode {
+    let options = match parse_web_command(args) {
+        Ok(WebCommand::Run(options)) => options,
+        Ok(WebCommand::Help) => {
+            print_web_help();
+            return ExitCode::SUCCESS;
+        }
+        Err(message) => {
+            eprintln!("{message}");
+            eprintln!("run `jottrace web --help` for usage");
+            return ExitCode::from(2);
+        }
+    };
+
+    let db_path = match jottrace::storage::db_path_from_env() {
+        Ok(db_path) => db_path,
+        Err(error) => {
+            eprintln!("jottrace web failed: {error}");
+            return ExitCode::FAILURE;
+        }
+    };
+
+    let server = match jottrace::web::WebServer::bind(db_path.clone(), options.port) {
+        Ok(server) => server,
+        Err(error) => {
+            eprintln!("jottrace web failed: {error}");
+            return ExitCode::FAILURE;
+        }
+    };
+
+    println!("jottrace web");
+    println!("url: {}", server.local_url());
+    println!("db: {}", db_path.display());
+    let _ = io::stdout().flush();
+
+    let result = if options.once {
+        server.serve_once()
+    } else {
+        server.serve_forever()
+    };
+
+    match result {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(error) => {
+            eprintln!("jottrace web failed: {error}");
+            ExitCode::FAILURE
+        }
+    }
+}
+
+fn parse_web_command(
+    mut args: impl Iterator<Item = String>,
+) -> std::result::Result<WebCommand, String> {
+    let mut options = WebOptions {
+        port: 0,
+        once: false,
+    };
+
+    while let Some(arg) = args.next() {
+        match arg.as_str() {
+            "--help" | "-h" => return Ok(WebCommand::Help),
+            "--once" => options.once = true,
+            "--port" => {
+                let value = args
+                    .next()
+                    .ok_or_else(|| "--port requires a value".to_string())?;
+                options.port = value
+                    .parse()
+                    .map_err(|_| format!("invalid port: {value}"))?;
+            }
+            _ => return Err(format!("unknown web option: {arg}")),
+        }
+    }
+
+    Ok(WebCommand::Run(options))
 }
 
 fn run_ingest_command() -> ExitCode {
@@ -131,5 +222,18 @@ fn print_help() {
     println!("  jottrace doctor");
     println!("  jottrace ingest");
     println!("  jottrace status");
+    println!("  jottrace web [--port <port>] [--once]");
     println!("  jottrace --version");
+}
+
+fn print_web_help() {
+    println!("jottrace web");
+    println!("Start a read-only local web UI for the preserved journal.");
+    println!();
+    println!("Usage:");
+    println!("  jottrace web [--port <port>] [--once]");
+    println!();
+    println!("Options:");
+    println!("  --port <port>  Bind to a fixed localhost port instead of an available port");
+    println!("  --once         Serve one request and exit, useful for smoke tests");
 }
