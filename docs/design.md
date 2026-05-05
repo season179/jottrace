@@ -315,13 +315,16 @@ payload.
 
 ### Subagent sidechain files
 
-Claude CLI emits a separate JSONL file for subagent (Task tool)
-sidechains, named `agent-<uuid>.jsonl` in the same project directory.
-Each subagent file is stored as its own row in `sessions`, with a
-nullable `parent_session_id` column linking back to the spawning
-session. Subagent events use the same `(session_id, generation, seq)` PK
-shape as regular sessions; they are not folded into the parent's event
-stream. Re-read behavior is identical to a regular session.
+Claude CLI emits separate JSONL files for subagent (Task tool)
+sidechains. The observed current shape is
+`projects/<encoded-cwd>/<parent-session-uuid>/subagents/agent-<id>.jsonl`,
+often with a sibling `agent-<id>.meta.json` file that carries lightweight
+agent metadata. Each subagent JSONL file is stored as its own row in
+`sessions`, with a nullable `parent_session_id` column linking back to
+the spawning session. Subagent events use the same
+`(session_id, generation, seq)` PK shape as regular sessions; they are
+not folded into the parent's event stream. Re-read behavior is identical
+to a regular session.
 
 Rationale: matches how Claude CLI writes them on disk (separate files),
 keeps session-level metadata intact (each subagent has its own
