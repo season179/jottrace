@@ -2,6 +2,7 @@ mod common;
 
 use common::reader_fixture;
 use std::fs;
+use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -84,7 +85,7 @@ fn status_reports_empty_fresh_database() {
     assert!(stdout.contains("events: 0"));
     assert!(stdout.contains("unresolved_ingest_errors: 0"));
 
-    let db_path = data_dir.join("db.sqlite");
+    let db_path = db_path(&data_dir);
     assert!(
         db_path.exists(),
         "status should initialize the local database"
@@ -102,20 +103,13 @@ fn ingest_is_idempotent_for_unchanged_claude_cli_fixture() {
     let data_dir = root.join(".jottrace");
     install_primary_claude_fixture(&root);
 
-    for _ in 0..2 {
-        let output = Command::new(binary())
-            .arg("ingest")
-            .env("HOME", &root)
-            .env("JOTTRACE_HOME", &data_dir)
-            .output()
-            .expect("run jottrace ingest");
-        assert!(
-            output.status.success(),
-            "stdout:\n{}\nstderr:\n{}",
-            String::from_utf8_lossy(&output.stdout),
-            String::from_utf8_lossy(&output.stderr)
-        );
-    }
+    let first = run_ingest(&root, &data_dir);
+    assert!(first.contains("events: 12"));
+    assert!(first.contains("inserted_events: 12"));
+
+    let second = run_ingest(&root, &data_dir);
+    assert!(second.contains("events: 12"));
+    assert!(second.contains("inserted_events: 0"));
 
     let status = Command::new(binary())
         .arg("status")
@@ -127,6 +121,115 @@ fn ingest_is_idempotent_for_unchanged_claude_cli_fixture() {
     assert!(stdout.contains("sessions: 1"));
     assert!(stdout.contains("events: 12"));
 
+    let conn = Connection::open(db_path(&data_dir)).expect("open preserved db");
+    let event_count: i64 = conn
+        .query_row("SELECT COUNT(*) FROM events", [], |row| row.get(0))
+        .expect("event count");
+    assert_eq!(event_count, 12);
+
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn ingest_appends_only_new_complete_claude_cli_lines() {
+    let root = temp_root("ingest-append");
+    let data_dir = root.join(".jottrace");
+    let session_file = install_primary_claude_fixture(&root);
+
+    let first = run_ingest(&root, &data_dir);
+    assert!(first.contains("events: 12"));
+    assert!(first.contains("inserted_events: 12"));
+
+    let appended_line = first_fixture_line();
+    let mut file = fs::OpenOptions::new()
+        .append(true)
+        .open(&session_file)
+        .expect("open session for append");
+    file.write_all(&appended_line).expect("append event line");
+    file.write_all(b"\n").expect("append newline");
+
+    let second = run_ingest(&root, &data_dir);
+    assert!(second.contains("events: 13"));
+    assert!(second.contains("inserted_events: 1"));
+
+    let conn = Connection::open(db_path(&data_dir)).expect("open preserved db");
+    let event_count: i64 = conn
+        .query_row("SELECT COUNT(*) FROM events", [], |row| row.get(0))
+        .expect("event count");
+    let last_seq: i64 = conn
+        .query_row("SELECT MAX(seq) FROM events", [], |row| row.get(0))
+        .expect("last seq");
+    assert_eq!(event_count, 13);
+    assert_eq!(last_seq, 12);
+
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn ingest_defers_unterminated_claude_cli_tail() {
+    let root = temp_root("ingest-partial-tail");
+    let data_dir = root.join(".jottrace");
+    let session_file = install_primary_claude_fixture(&root);
+
+    let first = run_ingest(&root, &data_dir);
+    assert!(first.contains("events: 12"));
+    assert!(first.contains("inserted_events: 12"));
+    let original_len = fs::metadata(&session_file).expect("session metadata").len() as i64;
+
+    let appended_line = first_fixture_line();
+    let partial_len = appended_line.len() / 2;
+    let mut file = fs::OpenOptions::new()
+        .append(true)
+        .open(&session_file)
+        .expect("open session for partial append");
+    file.write_all(&appended_line[..partial_len])
+        .expect("append partial event line");
+
+    let second = run_ingest(&root, &data_dir);
+    assert!(second.contains("events: 12"));
+    assert!(second.contains("inserted_events: 0"));
+
+    let conn = Connection::open(db_path(&data_dir)).expect("open preserved db");
+    let (event_count, file_size, next_read_offset): (i64, i64, i64) = conn
+        .query_row(
+            "SELECT event_count, file_size, next_read_offset
+             FROM sessions
+             WHERE source = 'claude_cli'",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .expect("session offsets");
+    assert_eq!(event_count, 12);
+    assert_eq!(file_size, original_len + partial_len as i64);
+    assert_eq!(next_read_offset, original_len);
+
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn ingest_reports_lock_contention_as_clear_cli_failure() {
+    let root = temp_root("ingest-lock-held");
+    let data_dir = root.join(".jottrace");
+    install_primary_claude_fixture(&root);
+    let mut lock_file = jottrace::create_private_file(&data_dir.join(jottrace::LOCK_FILE_NAME))
+        .expect("create held lock");
+    lock_file
+        .write_all(b"held by integration test\n")
+        .expect("write held lock");
+
+    let output = Command::new(binary())
+        .arg("ingest")
+        .env("HOME", &root)
+        .env("JOTTRACE_HOME", &data_dir)
+        .output()
+        .expect("run jottrace ingest");
+
+    assert!(!output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("jottrace ingest failed"));
+    assert!(stderr.contains("another jottrace DB-mutating command is already running"));
+    assert!(stderr.contains(jottrace::LOCK_FILE_NAME));
+
     let _ = fs::remove_dir_all(root);
 }
 
@@ -136,19 +239,7 @@ fn ingest_preserves_claude_cli_fixture_and_status_reports_counts() {
     let data_dir = root.join(".jottrace");
     let session_file = install_primary_claude_fixture(&root);
 
-    let ingest = Command::new(binary())
-        .arg("ingest")
-        .env("HOME", &root)
-        .env("JOTTRACE_HOME", &data_dir)
-        .output()
-        .expect("run jottrace ingest");
-
-    assert!(
-        ingest.status.success(),
-        "stdout:\n{}\nstderr:\n{}",
-        String::from_utf8_lossy(&ingest.stdout),
-        String::from_utf8_lossy(&ingest.stderr)
-    );
+    run_ingest(&root, &data_dir);
 
     let status = Command::new(binary())
         .arg("status")
@@ -168,7 +259,7 @@ fn ingest_preserves_claude_cli_fixture_and_status_reports_counts() {
     assert!(stdout.contains("events: 12"));
     assert!(stdout.contains("unresolved_ingest_errors: 0"));
 
-    let conn = Connection::open(data_dir.join("db.sqlite")).expect("open preserved db");
+    let conn = Connection::open(db_path(&data_dir)).expect("open preserved db");
     let (source_session_id, cwd, started_at, ended_at, event_count, file_size, file_mtime): (
         String,
         String,
@@ -263,6 +354,26 @@ fn first_fixture_line() -> Vec<u8> {
         .next()
         .expect("first line")
         .to_vec()
+}
+
+fn run_ingest(home: &Path, data_dir: &Path) -> String {
+    let output = Command::new(binary())
+        .arg("ingest")
+        .env("HOME", home)
+        .env("JOTTRACE_HOME", data_dir)
+        .output()
+        .expect("run jottrace ingest");
+    assert!(
+        output.status.success(),
+        "stdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    String::from_utf8(output.stdout).expect("stdout should be utf-8")
+}
+
+fn db_path(data_dir: &Path) -> PathBuf {
+    data_dir.join(jottrace::storage::DB_FILE_NAME)
 }
 
 fn install_primary_claude_fixture(root: &Path) -> PathBuf {

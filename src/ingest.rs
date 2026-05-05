@@ -6,7 +6,7 @@ use std::io::{self, Read};
 use std::path::{Path, PathBuf};
 use std::time::UNIX_EPOCH;
 
-use crate::storage::{db_path_from_env, open_database, sqlite_error, status_from_connection};
+use crate::storage::{DB_FILE_NAME, open_database, sqlite_error, status_from_connection};
 use crate::{JottraceError, Result};
 
 const CLAUDE_SOURCE: &str = "claude_cli";
@@ -41,6 +41,7 @@ struct SourceFile {
 #[derive(Debug, Clone)]
 struct StoredSession {
     id: i64,
+    file_path: Option<String>,
     current_generation: i64,
     file_size: Option<i64>,
     file_mtime: Option<i64>,
@@ -101,8 +102,10 @@ struct SnapshotHeader<'a> {
 }
 
 pub fn run_ingest() -> Result<IngestReport> {
+    let data_dir = crate::data_dir_from_env()?;
+    let _lock = crate::acquire_data_lock(&data_dir)?;
     let source_files = discover_claude_session_files()?;
-    let db_path = db_path_from_env()?;
+    let db_path = data_dir.join(DB_FILE_NAME);
     let mut conn = open_database(&db_path)?;
     let mut inserted_event_count = 0;
 
@@ -202,6 +205,9 @@ fn ingest_jsonl_file(conn: &mut Connection, source_file: &SourceFile) -> Result<
     if let Some(stored) = load_session(conn, source_file)?
         && unchanged_by_mtime(&stored, pass_size, file_mtime)
     {
+        if stored.file_path.as_deref() == Some(source_file.path.to_string_lossy().as_ref()) {
+            return Ok(0);
+        }
         let tx = conn
             .transaction()
             .map_err(|source| sqlite_error(&source_file.path, source))?;
@@ -365,18 +371,19 @@ fn insert_session_if_missing(tx: &Transaction<'_>, source_file: &SourceFile) -> 
 
 fn load_session(conn: &Connection, source_file: &SourceFile) -> Result<Option<StoredSession>> {
     conn.query_row(
-        "SELECT id, current_generation, file_size, file_mtime, content_fingerprint, next_read_offset
+        "SELECT id, file_path, current_generation, file_size, file_mtime, content_fingerprint, next_read_offset
          FROM sessions
          WHERE source = ?1 AND source_session_id = ?2",
         params![source_file.source, source_file.source_session_id.as_str()],
         |row| {
             Ok(StoredSession {
                 id: row.get(0)?,
-                current_generation: row.get(1)?,
-                file_size: row.get(2)?,
-                file_mtime: row.get(3)?,
-                content_fingerprint: row.get(4)?,
-                next_read_offset: row.get(5)?,
+                file_path: row.get(1)?,
+                current_generation: row.get(2)?,
+                file_size: row.get(3)?,
+                file_mtime: row.get(4)?,
+                content_fingerprint: row.get(5)?,
+                next_read_offset: row.get(6)?,
             })
         },
     )

@@ -1,8 +1,9 @@
 use std::env;
 use std::fmt;
 use std::fs::{self, File, OpenOptions};
-use std::io;
+use std::io::{self, Write};
 use std::path::{Path, PathBuf};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 #[cfg(unix)]
 use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt, PermissionsExt};
@@ -14,6 +15,8 @@ pub use storage::{StatusReport, run_status};
 
 /// Default per-user data directory name for the current MVP.
 pub const APP_DIR_NAME: &str = ".jottrace";
+/// Single-instance guard for commands that mutate the local database.
+pub const LOCK_FILE_NAME: &str = "jottrace.lock";
 /// Session transcripts may contain private code, prompts, and paths, so the
 /// default directory is readable only by the current user.
 pub const PRIVATE_DIR_MODE: u32 = 0o700;
@@ -50,6 +53,8 @@ pub enum JottraceError {
         actual: i64,
         supported: i64,
     },
+    /// A DB-mutating command is already active in this data directory.
+    LockHeld(PathBuf),
     Sqlite {
         path: PathBuf,
         source: rusqlite::Error,
@@ -86,6 +91,11 @@ impl fmt::Display for JottraceError {
                 path.display(),
                 actual,
                 supported
+            ),
+            Self::LockHeld(path) => write!(
+                f,
+                "another jottrace DB-mutating command is already running; lock: {}",
+                path.display()
             ),
             Self::Sqlite { path, source } => write!(f, "{}: {}", path.display(), source),
         }
@@ -129,6 +139,49 @@ pub fn run_doctor() -> Result<DoctorReport> {
     Ok(DoctorReport { data_dir })
 }
 
+pub(crate) struct DataLock {
+    path: PathBuf,
+    token: String,
+}
+
+pub(crate) fn acquire_data_lock(data_dir: &Path) -> Result<DataLock> {
+    ensure_private_dir(data_dir)?;
+    let path = data_dir.join(LOCK_FILE_NAME);
+    let token = lock_token();
+
+    let mut file = match create_private_file(&path) {
+        Ok(file) => file,
+        Err(JottraceError::Io {
+            path: error_path,
+            source,
+        }) if source.kind() == io::ErrorKind::AlreadyExists => {
+            return Err(JottraceError::LockHeld(error_path));
+        }
+        Err(error) => return Err(error),
+    };
+
+    if let Err(source) = writeln!(file, "{token}") {
+        let _ = fs::remove_file(&path);
+        return Err(JottraceError::Io {
+            path: path.clone(),
+            source,
+        });
+    }
+
+    Ok(DataLock { path, token })
+}
+
+impl Drop for DataLock {
+    fn drop(&mut self) {
+        let Ok(contents) = fs::read_to_string(&self.path) else {
+            return;
+        };
+        if contents.trim_end() == self.token {
+            let _ = fs::remove_file(&self.path);
+        }
+    }
+}
+
 /// Ensure a directory exists and is private enough for transcript data.
 pub fn ensure_private_dir(path: &Path) -> Result<()> {
     match fs::metadata(path) {
@@ -169,7 +222,10 @@ pub fn create_private_file(path: &Path) -> Result<File> {
     #[cfg(unix)]
     // The open mode is the first line of defense, but chmod after creation
     // corrects for umask and keeps behavior stable across Unix environments.
-    set_mode(path, PRIVATE_FILE_MODE)?;
+    if let Err(error) = set_mode(path, PRIVATE_FILE_MODE) {
+        let _ = fs::remove_file(path);
+        return Err(error);
+    }
 
     Ok(file)
 }
@@ -293,6 +349,13 @@ fn private_open_options() -> OpenOptions {
     // afterwards would leave a small window with process-default permissions.
     options.mode(PRIVATE_FILE_MODE);
     options
+}
+
+fn lock_token() -> String {
+    let started_at = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |duration| duration.as_nanos());
+    format!("pid={}\nstarted_at_ns={started_at}", std::process::id())
 }
 
 #[cfg(test)]
