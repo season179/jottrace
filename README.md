@@ -62,14 +62,21 @@ cargo run -- doctor
 
 ## Maintainer Release
 
+Jottrace uses CalVer in `YY.M.PATCH` form. For example, the first release in
+May 2026 is `v26.5.0`; later releases in the same month increment the patch
+segment, such as `v26.5.1`.
+
+`scripts/check-version.sh` enforces that `Cargo.toml` uses this shape and that
+release tags match the Cargo package version.
+
 The release workflow runs on version tags and publishes the artifacts consumed
 by `install.sh`.
 
 ```sh
 git checkout main
 git pull --ff-only
-git tag v0.1.0
-git push origin v0.1.0
+git tag v26.5.0
+git push origin v26.5.0
 ```
 
 After the `Release` GitHub Action finishes, the install command above should

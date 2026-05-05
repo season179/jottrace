@@ -1,6 +1,6 @@
 [package]
 name = "jottrace"
-version = "0.1.0"
+version = "26.5.0"
 edition = "2024"
 license = "MIT"
 description = "Preserve AI coding-session transcripts into a local journal"

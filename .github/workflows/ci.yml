@@ -28,5 +28,11 @@ jobs:
       - name: Check installer shell syntax
         run: bash -n install.sh
 
+      - name: Check version script shell syntax
+        run: bash -n scripts/check-version.sh
+
+      - name: Check version policy
+        run: scripts/check-version.sh
+
       - name: Run tests
         run: cargo test
