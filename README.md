@@ -80,8 +80,8 @@ by `install.sh`.
 ```sh
 git checkout main
 git pull --ff-only
-git tag v26.5.0
-git push origin v26.5.0
+git tag v26.5.1
+git push origin v26.5.1
 ```
 
 After the `Release` GitHub Action finishes, the install command above should
