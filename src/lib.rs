@@ -7,7 +7,9 @@ use std::path::{Path, PathBuf};
 #[cfg(unix)]
 use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt, PermissionsExt};
 
+pub mod ingest;
 pub mod storage;
+pub use ingest::{IngestReport, run_ingest};
 pub use storage::{StatusReport, run_status};
 
 /// Default per-user data directory name for the current MVP.

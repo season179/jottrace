@@ -1,3 +1,6 @@
+mod common;
+
+use common::reader_fixture as fixture;
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -82,12 +85,6 @@ fn committed_reader_fixtures_do_not_contain_known_local_sensitive_markers() {
             );
         }
     }
-}
-
-fn fixture(relative: &str) -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("tests/fixtures/readers")
-        .join(relative)
 }
 
 fn fixture_files(root: &Path) -> Vec<PathBuf> {

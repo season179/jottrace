@@ -92,7 +92,7 @@ fn run_migrations(path: &Path, conn: &mut Connection) -> Result<()> {
     tx.commit().map_err(|source| sqlite_error(path, source))
 }
 
-fn status_from_connection(path: &Path, conn: &Connection) -> Result<StatusReport> {
+pub(crate) fn status_from_connection(path: &Path, conn: &Connection) -> Result<StatusReport> {
     Ok(StatusReport {
         db_path: path.to_path_buf(),
         schema_version: user_version(path, conn)?,
@@ -118,7 +118,7 @@ fn user_version(path: &Path, conn: &Connection) -> Result<i64> {
         .map_err(|source| sqlite_error(path, source))
 }
 
-fn sqlite_error(path: &Path, source: rusqlite::Error) -> JottraceError {
+pub(crate) fn sqlite_error(path: &Path, source: rusqlite::Error) -> JottraceError {
     JottraceError::Sqlite {
         path: path.to_path_buf(),
         source,
