@@ -7,6 +7,8 @@ use std::os::unix::fs::{MetadataExt, PermissionsExt};
 
 #[test]
 fn version_prints_package_version() {
+    // Run the compiled binary instead of the library so this test covers the
+    // real command-line dispatch a user or script will exercise.
     let output = Command::new(binary())
         .arg("--version")
         .output()
@@ -24,6 +26,8 @@ fn doctor_creates_private_data_dir() {
     let root = temp_root("doctor-ok");
     let data_dir = root.join(".jottrace");
 
+    // JOTTRACE_HOME keeps the integration test hermetic; it must never create
+    // or chmod state under the developer's actual HOME.
     let output = Command::new(binary())
         .arg("doctor")
         .env("JOTTRACE_HOME", &data_dir)
@@ -56,6 +60,8 @@ fn doctor_rejects_insecure_existing_data_dir() {
     fs::set_permissions(&data_dir, fs::Permissions::from_mode(0o755))
         .expect("set insecure dir mode");
 
+    // This protects the privacy boundary across releases: an existing loose
+    // directory must stay visible as a problem instead of being accepted.
     let output = Command::new(binary())
         .arg("doctor")
         .env("JOTTRACE_HOME", &data_dir)
@@ -75,6 +81,8 @@ fn binary() -> &'static str {
 }
 
 fn temp_root(name: &str) -> std::path::PathBuf {
+    // Cargo can run tests concurrently, so the temp path needs more entropy
+    // than the test name alone.
     let unique = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .expect("clock")
@@ -84,5 +92,6 @@ fn temp_root(name: &str) -> std::path::PathBuf {
 
 #[cfg(unix)]
 fn mode(path: &std::path::Path) -> u32 {
+    // Metadata includes file-type bits; masking leaves only chmod-style perms.
     fs::metadata(path).expect("metadata").mode() & 0o777
 }
