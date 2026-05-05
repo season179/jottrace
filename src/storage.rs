@@ -1,16 +1,24 @@
-use rusqlite::Connection;
+use rusqlite::{Connection, Row, params};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use crate::{JottraceError, Result, data_dir_from_env, ensure_private_file};
 
 pub const DB_FILE_NAME: &str = "db.sqlite";
-pub const LATEST_SCHEMA_VERSION: i64 = 1;
+pub const LATEST_SCHEMA_VERSION: i64 = 2;
 
-const MIGRATIONS: &[Migration] = &[Migration {
-    version: 1,
-    sql: include_str!("migrations/001_initial_schema.sql"),
-}];
+const MIGRATIONS: &[Migration] = &[
+    Migration {
+        version: 1,
+        sql: include_str!("migrations/001_initial_schema.sql"),
+    },
+    Migration {
+        version: 2,
+        sql: include_str!("migrations/002_ingest_error_recency_index.sql"),
+    },
+];
+const UNRESOLVED_INGEST_ERROR_COUNT_SQL: &str =
+    "SELECT COUNT(*) FROM ingest_errors WHERE resolved_at IS NULL";
 
 #[derive(Debug)]
 struct Migration {
@@ -27,6 +35,21 @@ pub struct StatusReport {
     pub unresolved_ingest_error_count: u64,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct IngestErrorSummary {
+    pub source: String,
+    pub source_session_id: Option<String>,
+    pub file_path: PathBuf,
+    pub generation: Option<i64>,
+    pub byte_offset: Option<i64>,
+    pub line_number: Option<i64>,
+    pub error_kind: String,
+    pub message: String,
+    pub first_seen_at: String,
+    pub last_seen_at: String,
+    pub occurrence_count: u64,
+}
+
 pub fn db_path_from_env() -> Result<PathBuf> {
     Ok(data_dir_from_env()?.join(DB_FILE_NAME))
 }
@@ -39,6 +62,14 @@ pub fn run_status() -> Result<StatusReport> {
 pub fn status_for_path(path: &Path) -> Result<StatusReport> {
     let conn = open_database(path)?;
     status_from_connection(path, &conn)
+}
+
+pub fn unresolved_ingest_errors_for_path(
+    path: &Path,
+    limit: usize,
+) -> Result<Vec<IngestErrorSummary>> {
+    let conn = open_database(path)?;
+    unresolved_ingest_errors_from_connection(path, &conn, limit)
 }
 
 pub fn open_database(path: &Path) -> Result<Connection> {
@@ -98,11 +129,56 @@ pub(crate) fn status_from_connection(path: &Path, conn: &Connection) -> Result<S
         schema_version: user_version(path, conn)?,
         session_count: count(path, conn, "SELECT COUNT(*) FROM sessions")?,
         event_count: count(path, conn, "SELECT COUNT(*) FROM events")?,
-        unresolved_ingest_error_count: count(
-            path,
-            conn,
-            "SELECT COUNT(*) FROM ingest_errors WHERE resolved_at IS NULL",
-        )?,
+        unresolved_ingest_error_count: unresolved_ingest_error_count_from_connection(path, conn)?,
+    })
+}
+
+pub(crate) fn unresolved_ingest_error_count_from_connection(
+    path: &Path,
+    conn: &Connection,
+) -> Result<u64> {
+    count(path, conn, UNRESOLVED_INGEST_ERROR_COUNT_SQL)
+}
+
+pub(crate) fn unresolved_ingest_errors_from_connection(
+    path: &Path,
+    conn: &Connection,
+    limit: usize,
+) -> Result<Vec<IngestErrorSummary>> {
+    let mut statement = conn
+        .prepare(
+            "SELECT source, source_session_id, file_path, generation, byte_offset,
+                    line_number, error_kind, message, first_seen_at, last_seen_at,
+                    occurrence_count
+             FROM ingest_errors
+             WHERE resolved_at IS NULL
+             ORDER BY last_seen_at DESC, id DESC
+             LIMIT ?1",
+        )
+        .map_err(|source| sqlite_error(path, source))?;
+
+    statement
+        .query_map(params![limit as i64], ingest_error_summary_from_row)
+        .map_err(|source| sqlite_error(path, source))?
+        .collect::<std::result::Result<Vec<_>, _>>()
+        .map_err(|source| sqlite_error(path, source))
+}
+
+fn ingest_error_summary_from_row(row: &Row<'_>) -> rusqlite::Result<IngestErrorSummary> {
+    let file_path: String = row.get("file_path")?;
+    let occurrence_count: i64 = row.get("occurrence_count")?;
+    Ok(IngestErrorSummary {
+        source: row.get("source")?,
+        source_session_id: row.get("source_session_id")?,
+        file_path: PathBuf::from(file_path),
+        generation: row.get("generation")?,
+        byte_offset: row.get("byte_offset")?,
+        line_number: row.get("line_number")?,
+        error_kind: row.get("error_kind")?,
+        message: row.get("message")?,
+        first_seen_at: row.get("first_seen_at")?,
+        last_seen_at: row.get("last_seen_at")?,
+        occurrence_count: occurrence_count as u64,
     })
 }
 
@@ -149,6 +225,7 @@ mod tests {
         assert_sql_object(&conn, "index", "idx_sessions_source_started_at");
         assert_sql_object(&conn, "index", "idx_events_session_ts");
         assert_sql_object(&conn, "index", "idx_ingest_errors_unresolved");
+        assert_sql_object(&conn, "index", "idx_ingest_errors_unresolved_last_seen");
 
         assert!(columns(&conn, "sessions").contains(&"id".to_string()));
         assert!(columns(&conn, "sessions").contains(&"source_session_id".to_string()));
@@ -192,6 +269,50 @@ mod tests {
             .query_row("SELECT COUNT(*) FROM v0_marker", [], |row| row.get(0))
             .expect("marker count");
         assert_eq!(marker_count, 1);
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn migrates_existing_v1_database_to_latest_version() {
+        let root = temp_root("storage-upgrade-v1");
+        let db_path = root.join(DB_FILE_NAME);
+        ensure_private_file(&db_path).expect("create db file");
+
+        {
+            let conn = Connection::open(&db_path).expect("open v1 db");
+            conn.execute_batch(include_str!("migrations/001_initial_schema.sql"))
+                .expect("create v1 schema");
+            conn.execute(
+                "INSERT INTO sessions (source, source_session_id)
+                 VALUES ('claude_cli', 's1')",
+                [],
+            )
+            .expect("insert session");
+            conn.execute(
+                "INSERT INTO ingest_errors
+                    (source, source_session_id, session_id, file_path, line_number, error_kind, message)
+                 VALUES ('claude_cli', 's1', 1, '/tmp/s1.jsonl', 1, 'invalid_json', 'bad line')",
+                [],
+            )
+            .expect("insert v1 ingest error");
+            conn.pragma_update(None, "user_version", 1)
+                .expect("set user_version");
+        }
+
+        let conn = open_database(&db_path).expect("migrate db");
+
+        assert_eq!(
+            user_version(&db_path, &conn).expect("user_version"),
+            LATEST_SCHEMA_VERSION
+        );
+        assert_sql_object(&conn, "index", "idx_ingest_errors_unresolved_last_seen");
+        let line_number: i64 = conn
+            .query_row("SELECT line_number FROM ingest_errors", [], |row| {
+                row.get(0)
+            })
+            .expect("migrated line number");
+        assert_eq!(line_number, 2);
 
         let _ = fs::remove_dir_all(root);
     }

@@ -11,7 +11,7 @@ use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt, PermissionsExt};
 pub mod ingest;
 pub mod storage;
 pub use ingest::{IngestReport, run_ingest};
-pub use storage::{StatusReport, run_status};
+pub use storage::{IngestErrorSummary, StatusReport, run_status};
 
 /// Default per-user data directory name for the current MVP.
 pub const APP_DIR_NAME: &str = ".jottrace";
@@ -23,6 +23,7 @@ pub const PRIVATE_DIR_MODE: u32 = 0o700;
 /// Files are kept even tighter than directories: readable and writable by the
 /// current user, with no group/world access.
 pub const PRIVATE_FILE_MODE: u32 = 0o600;
+const DOCTOR_INGEST_ERROR_LIMIT: usize = 5;
 
 #[derive(Debug)]
 pub enum JottraceError {
@@ -117,6 +118,8 @@ pub type Result<T> = std::result::Result<T, JottraceError>;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DoctorReport {
     pub data_dir: PathBuf,
+    pub unresolved_ingest_error_count: u64,
+    pub recent_ingest_errors: Vec<IngestErrorSummary>,
 }
 
 /// Resolve the data directory from the environment.
@@ -136,7 +139,20 @@ pub fn data_dir_from_env() -> Result<PathBuf> {
 pub fn run_doctor() -> Result<DoctorReport> {
     let data_dir = data_dir_from_env()?;
     ensure_private_dir(&data_dir)?;
-    Ok(DoctorReport { data_dir })
+    let db_path = data_dir.join(storage::DB_FILE_NAME);
+    let conn = storage::open_database(&db_path)?;
+    let unresolved_ingest_error_count =
+        storage::unresolved_ingest_error_count_from_connection(&db_path, &conn)?;
+    let ingest_errors = storage::unresolved_ingest_errors_from_connection(
+        &db_path,
+        &conn,
+        DOCTOR_INGEST_ERROR_LIMIT,
+    )?;
+    Ok(DoctorReport {
+        data_dir,
+        unresolved_ingest_error_count,
+        recent_ingest_errors: ingest_errors,
+    })
 }
 
 pub(crate) struct DataLock {

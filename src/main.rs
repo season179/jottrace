@@ -59,6 +59,38 @@ fn run_doctor_command() -> ExitCode {
             println!("jottrace doctor");
             println!("data_dir: {} (ok)", report.data_dir.display());
             println!("permissions: private (ok)");
+            println!(
+                "unresolved_ingest_errors: {}",
+                report.unresolved_ingest_error_count
+            );
+            if !report.recent_ingest_errors.is_empty() {
+                println!(
+                    "recent_ingest_errors: {}",
+                    report.recent_ingest_errors.len()
+                );
+            }
+            for ingest_error in &report.recent_ingest_errors {
+                println!("recent_ingest_error:");
+                println!("  source: {}", ingest_error.source);
+                if let Some(source_session_id) = &ingest_error.source_session_id {
+                    println!("  source_session_id: {source_session_id}");
+                }
+                println!("  file: {}", ingest_error.file_path.display());
+                if let Some(line_number) = ingest_error.line_number {
+                    println!("  line: {line_number}");
+                }
+                if let Some(byte_offset) = ingest_error.byte_offset {
+                    println!("  byte_offset: {byte_offset}");
+                }
+                if let Some(generation) = ingest_error.generation {
+                    println!("  generation: {generation}");
+                }
+                println!("  kind: {}", ingest_error.error_kind);
+                println!("  first_seen_at: {}", ingest_error.first_seen_at);
+                println!("  last_seen_at: {}", ingest_error.last_seen_at);
+                println!("  occurrences: {}", ingest_error.occurrence_count);
+                println!("  message: {}", ingest_error.message);
+            }
             ExitCode::SUCCESS
         }
         Err(error) => {
