@@ -31,7 +31,7 @@ jobs:
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
 
       - name: Check version policy
         run: scripts/check-version.sh
@@ -55,7 +55,7 @@ jobs:
           (cd dist && shasum -a 256 "jottrace-${{ matrix.artifact }}.tar.gz" > "jottrace-${{ matrix.artifact }}.tar.gz.sha256")
 
       - name: Upload release artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: release-${{ matrix.artifact }}
           path: dist/*
@@ -68,10 +68,10 @@ jobs:
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
 
       - name: Download Linux artifact
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           name: release-linux-x86_64
           path: ${{ runner.temp }}/jottrace-release/${{ github.ref_name }}
@@ -94,7 +94,7 @@ jobs:
 
     steps:
       - name: Download release artifacts
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           pattern: release-*
           merge-multiple: true
