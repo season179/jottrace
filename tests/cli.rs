@@ -14,6 +14,9 @@ use std::os::unix::fs::{MetadataExt, PermissionsExt};
 
 const CLAUDE_FIXTURE_SESSION: &str = "claude-cli/projects/-Users-fixture-Workspace-jottrace/00000000-0000-4000-8000-000000000021.jsonl";
 const CLAUDE_FIXTURE_SESSION_ID: &str = "00000000-0000-4000-8000-000000000021";
+const CORRUPT_FIXTURE_SESSION: &str = "edge-cases/corrupt-line.jsonl";
+const CORRUPT_FIXTURE_SESSION_ID: &str = "00000000-0000-4000-8000-000000000000";
+const UNREADABLE_FIXTURE_SESSION_ID: &str = "00000000-0000-4000-8000-000000000001";
 
 #[test]
 fn version_prints_package_version() {
@@ -93,6 +96,165 @@ fn status_reports_empty_fresh_database() {
 
     #[cfg(unix)]
     assert_eq!(mode(&db_path), 0o600);
+
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn doctor_reports_unresolved_ingest_errors() {
+    let root = temp_root("doctor-ingest-errors");
+    let data_dir = root.join(".jottrace");
+    install_claude_fixture(&root, CORRUPT_FIXTURE_SESSION_ID, CORRUPT_FIXTURE_SESSION);
+
+    let ingest = run_ingest(&root, &data_dir);
+    assert!(ingest.contains("unresolved_ingest_errors: 1"));
+
+    let output = Command::new(binary())
+        .arg("doctor")
+        .env("JOTTRACE_HOME", &data_dir)
+        .output()
+        .expect("run jottrace doctor");
+
+    assert!(
+        output.status.success(),
+        "stdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("unresolved_ingest_errors: 1"));
+    assert!(stdout.contains(CORRUPT_FIXTURE_SESSION_ID));
+    assert!(stdout.contains("line: 2"));
+    assert!(stdout.contains("kind: invalid_json"));
+    assert!(stdout.contains("message: "));
+
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn ingest_records_corrupt_jsonl_without_blocking_unrelated_files() {
+    let root = temp_root("ingest-corrupt-nonblocking");
+    let data_dir = root.join(".jottrace");
+    let corrupt_file =
+        install_claude_fixture(&root, CORRUPT_FIXTURE_SESSION_ID, CORRUPT_FIXTURE_SESSION);
+    install_primary_claude_fixture(&root);
+
+    let ingest = run_ingest(&root, &data_dir);
+    assert!(ingest.contains("sessions: 2"));
+    assert!(ingest.contains("events: 13"));
+    assert!(ingest.contains("inserted_events: 13"));
+    assert!(ingest.contains("unresolved_ingest_errors: 1"));
+
+    let status = Command::new(binary())
+        .arg("status")
+        .env("JOTTRACE_HOME", &data_dir)
+        .output()
+        .expect("run jottrace status");
+    assert!(
+        status.status.success(),
+        "stdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&status.stdout),
+        String::from_utf8_lossy(&status.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&status.stdout);
+    assert!(stdout.contains("sessions: 2"));
+    assert!(stdout.contains("events: 13"));
+    assert!(stdout.contains("unresolved_ingest_errors: 1"));
+
+    let conn = Connection::open(db_path(&data_dir)).expect("open preserved db");
+    let valid_event_count: i64 = conn
+        .query_row(
+            "SELECT event_count
+             FROM sessions
+             WHERE source_session_id = ?1",
+            [CLAUDE_FIXTURE_SESSION_ID],
+            |row| row.get(0),
+        )
+        .expect("valid session event count");
+    assert_eq!(valid_event_count, 12);
+
+    let errors = jottrace::storage::unresolved_ingest_errors_for_path(&db_path(&data_dir), 10)
+        .expect("unresolved ingest errors");
+    assert_eq!(errors.len(), 1);
+    let error = &errors[0];
+    let byte_offset = error.byte_offset.expect("error byte offset");
+    assert_eq!(error.source, "claude_cli");
+    assert_eq!(
+        error.source_session_id.as_deref(),
+        Some(CORRUPT_FIXTURE_SESSION_ID)
+    );
+    assert_eq!(error.file_path, corrupt_file);
+    assert!(byte_offset > 0);
+    assert_eq!(error.line_number, Some(2));
+    assert_eq!(error.error_kind, "invalid_json");
+    assert!(!error.message.is_empty());
+    assert!(!error.first_seen_at.is_empty());
+    assert!(!error.last_seen_at.is_empty());
+    assert_eq!(error.occurrence_count, 1);
+
+    let next_read_offset: i64 = conn
+        .query_row(
+            "SELECT next_read_offset
+             FROM sessions
+             WHERE source_session_id = ?1",
+            [CORRUPT_FIXTURE_SESSION_ID],
+            |row| row.get(0),
+        )
+        .expect("corrupt session offset");
+    assert_eq!(next_read_offset, byte_offset);
+
+    let _ = fs::remove_dir_all(root);
+}
+
+#[cfg(unix)]
+#[test]
+fn ingest_records_unreadable_file_without_blocking_unrelated_files() {
+    let root = temp_root("ingest-unreadable-nonblocking");
+    let data_dir = root.join(".jottrace");
+    let unreadable_file =
+        install_claude_fixture(&root, UNREADABLE_FIXTURE_SESSION_ID, CLAUDE_FIXTURE_SESSION);
+    install_primary_claude_fixture(&root);
+    fs::set_permissions(&unreadable_file, fs::Permissions::from_mode(0o000))
+        .expect("make fixture unreadable");
+
+    if fs::File::open(&unreadable_file).is_ok() {
+        let _ = fs::remove_dir_all(root);
+        return;
+    }
+
+    let ingest = run_ingest(&root, &data_dir);
+    assert!(ingest.contains("sessions: 2"));
+    assert!(ingest.contains("events: 12"));
+    assert!(ingest.contains("inserted_events: 12"));
+    assert!(ingest.contains("unresolved_ingest_errors: 1"));
+
+    let errors = jottrace::storage::unresolved_ingest_errors_for_path(&db_path(&data_dir), 10)
+        .expect("unresolved ingest errors");
+    assert_eq!(errors.len(), 1);
+    let error = &errors[0];
+    assert_eq!(error.source, "claude_cli");
+    assert_eq!(
+        error.source_session_id.as_deref(),
+        Some(UNREADABLE_FIXTURE_SESSION_ID)
+    );
+    assert_eq!(error.file_path, unreadable_file);
+    assert_eq!(error.byte_offset, None);
+    assert_eq!(error.line_number, None);
+    assert_eq!(error.error_kind, "read_error");
+    assert!(!error.message.is_empty());
+
+    let valid_event_count: i64 = Connection::open(db_path(&data_dir))
+        .expect("open preserved db")
+        .query_row(
+            "SELECT event_count
+             FROM sessions
+             WHERE source_session_id = ?1",
+            [CLAUDE_FIXTURE_SESSION_ID],
+            |row| row.get(0),
+        )
+        .expect("valid session event count");
+    assert_eq!(valid_event_count, 12);
 
     let _ = fs::remove_dir_all(root);
 }

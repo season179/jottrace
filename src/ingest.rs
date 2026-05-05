@@ -77,10 +77,10 @@ struct SessionUpdate<'a> {
 
 struct IngestErrorRecord<'a> {
     source_file: &'a SourceFile,
-    session_id: i64,
-    generation: i64,
-    byte_offset: i64,
-    line_number: i64,
+    session_id: Option<i64>,
+    generation: Option<i64>,
+    byte_offset: Option<i64>,
+    line_number: Option<i64>,
     error_kind: &'a str,
     message: &'a str,
 }
@@ -122,7 +122,13 @@ pub fn run_ingest() -> Result<IngestReport> {
     let mut inserted_event_count = 0;
 
     for source_file in &source_files {
-        inserted_event_count += ingest_jsonl_file(&mut conn, source_file)?;
+        match ingest_jsonl_file(&mut conn, source_file) {
+            Ok(inserted) => inserted_event_count += inserted,
+            Err(error) if is_source_file_ingest_error(&error) => {
+                record_source_file_ingest_error(&mut conn, source_file, &error)?;
+            }
+            Err(error) => return Err(error),
+        }
     }
 
     let status = status_from_connection(&db_path, &conn)?;
@@ -362,10 +368,10 @@ fn import_committed_lines(
                     tx,
                     IngestErrorRecord {
                         source_file,
-                        session_id,
-                        generation,
-                        byte_offset: byte_offset as i64,
-                        line_number: seq,
+                        session_id: Some(session_id),
+                        generation: Some(generation),
+                        byte_offset: Some(byte_offset as i64),
+                        line_number: Some(seq + 1),
                         error_kind: "invalid_json",
                         message: &error.to_string(),
                     },
@@ -383,6 +389,45 @@ fn import_committed_lines(
         next_read_offset,
         metadata,
     })
+}
+
+fn record_source_file_ingest_error(
+    conn: &mut Connection,
+    source_file: &SourceFile,
+    error: &JottraceError,
+) -> Result<()> {
+    let tx = conn
+        .transaction()
+        .map_err(|source| sqlite_error(&source_file.path, source))?;
+    insert_session_if_missing(&tx, source_file)?;
+    let stored = load_session(&tx, source_file)?.expect("session row should exist after insert");
+    let message = error.to_string();
+    record_ingest_error(
+        &tx,
+        IngestErrorRecord {
+            source_file,
+            session_id: Some(stored.id),
+            generation: Some(stored.current_generation),
+            byte_offset: None,
+            line_number: None,
+            error_kind: source_file_error_kind(error),
+            message: &message,
+        },
+    )?;
+    tx.commit()
+        .map_err(|source| sqlite_error(&source_file.path, source))
+}
+
+fn is_source_file_ingest_error(error: &JottraceError) -> bool {
+    matches!(error, JottraceError::Io { .. } | JottraceError::NotFile(_))
+}
+
+fn source_file_error_kind(error: &JottraceError) -> &'static str {
+    match error {
+        JottraceError::Io { .. } => "read_error",
+        JottraceError::NotFile(_) => "not_file",
+        _ => "ingest_error",
+    }
 }
 
 fn insert_session_if_missing(tx: &Transaction<'_>, source_file: &SourceFile) -> Result<()> {
@@ -519,18 +564,20 @@ fn record_ingest_error(tx: &Transaction<'_>, record: IngestErrorRecord<'_>) -> R
     let updated = tx
         .execute(
             "UPDATE ingest_errors
-             SET message = ?1,
+             SET session_id = ?1,
+                 message = ?2,
                  last_seen_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now'),
                  occurrence_count = occurrence_count + 1
-             WHERE source = ?2
-               AND source_session_id = ?3
-               AND file_path = ?4
-               AND generation = ?5
-               AND byte_offset = ?6
-               AND line_number = ?7
-               AND error_kind = ?8
+             WHERE source = ?3
+               AND source_session_id = ?4
+               AND file_path = ?5
+               AND generation IS ?6
+               AND byte_offset IS ?7
+               AND line_number IS ?8
+               AND error_kind = ?9
                AND resolved_at IS NULL",
             params![
+                record.session_id,
                 record.message,
                 record.source_file.source,
                 record.source_file.source_session_id.as_str(),
