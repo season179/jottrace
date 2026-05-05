@@ -51,6 +51,42 @@ fn doctor_creates_private_data_dir() {
     let _ = fs::remove_dir_all(root);
 }
 
+#[test]
+fn status_reports_empty_fresh_database() {
+    let root = temp_root("status-empty");
+    let data_dir = root.join(".jottrace");
+
+    let output = Command::new(binary())
+        .arg("status")
+        .env("JOTTRACE_HOME", &data_dir)
+        .output()
+        .expect("run jottrace status");
+
+    assert!(
+        output.status.success(),
+        "stdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("jottrace status"));
+    assert!(stdout.contains("sessions: 0"));
+    assert!(stdout.contains("events: 0"));
+    assert!(stdout.contains("unresolved_ingest_errors: 0"));
+
+    let db_path = data_dir.join("db.sqlite");
+    assert!(
+        db_path.exists(),
+        "status should initialize the local database"
+    );
+
+    #[cfg(unix)]
+    assert_eq!(mode(&db_path), 0o600);
+
+    let _ = fs::remove_dir_all(root);
+}
+
 #[cfg(unix)]
 #[test]
 fn doctor_rejects_insecure_existing_data_dir() {

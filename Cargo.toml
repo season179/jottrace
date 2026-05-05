@@ -6,3 +6,4 @@ license = "MIT"
 description = "Preserve AI coding-session transcripts into a local journal"
 
 [dependencies]
+rusqlite = { version = "0.39.0", default-features = false, features = ["bundled"] }
