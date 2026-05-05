@@ -70,8 +70,8 @@ order) are not surprises later.
   performance on large JSONL files, and a strong SQLite ecosystem.
 - **Storage:** SQLite at `~/.jottrace/db.sqlite`. The DB is the contract
   between stages, not in-process function calls.
-- **MVP command surface:** `jottrace ingest`, `jottrace status`, and
-  `jottrace doctor`.
+- **MVP command surface:** `jottrace ingest`, `jottrace status`,
+  `jottrace doctor`, and `jottrace web`.
 - Specific crate choices (rusqlite vs. sqlx, sync vs. async, CLI framework,
   config loader) are not yet decided — see Open seams.
 
@@ -85,6 +85,9 @@ The first executable surface is intentionally small:
   ingest errors from the local DB.
 - `jottrace doctor` — checks the install, data directory permissions,
   source path visibility, and basic runtime health.
+- `jottrace web` — starts a read-only web UI bound to `127.0.0.1` for browsing
+  preserved sessions, events, raw payload previews, and unresolved ingest
+  errors from the local SQLite journal.
 
 Processor, writer, scheduler, and recall commands come later.
 
@@ -144,6 +147,10 @@ migrations, ingest, processor, or writer work. Read-only commands can skip
 the lock. SQLite's write lock still protects the DB file, but the process
 lock gives clearer contention errors and protects source-scan/offset
 decisions from racing.
+
+The web UI is also read-only. It opens the existing SQLite journal without
+running migrations, binds only to loopback by default, renders server-side HTML
+from local data, and does not send transcript payloads to external services.
 
 ## Reader contract
 

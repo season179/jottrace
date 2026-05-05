@@ -6,7 +6,9 @@ use std::io::{self, Read};
 use std::path::{Path, PathBuf};
 use std::time::UNIX_EPOCH;
 
-use crate::storage::{DB_FILE_NAME, open_database, sqlite_error, status_from_connection};
+use crate::storage::{
+    DB_FILE_NAME, RAW_CODEC, open_database, sqlite_error, status_from_connection,
+};
 use crate::{JottraceError, Result};
 
 const CLAUDE_SOURCE: &str = "claude_cli";
@@ -17,7 +19,6 @@ const CLAUDE_INSTALL_DIRS: &[&str] = &[
     ".claude-m2",
     ".claude-zai",
 ];
-const RAW_CODEC: &str = "raw";
 const FNV_OFFSET_BASIS: u64 = 0xcbf29ce484222325;
 const FNV_PRIME: u64 = 0x100000001b3;
 
