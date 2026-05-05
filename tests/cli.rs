@@ -5,7 +5,7 @@ use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use rusqlite::Connection;
 
@@ -207,6 +207,135 @@ fn ingest_defers_unterminated_claude_cli_tail() {
 }
 
 #[test]
+fn ingest_preserves_truncated_claude_cli_file_as_next_generation() {
+    let root = temp_root("ingest-truncation-generation");
+    let data_dir = root.join(".jottrace");
+    let session_file = install_claude_fixture(
+        &root,
+        "issue-25-truncation",
+        "edge-cases/truncation-before.jsonl",
+    );
+
+    let first = run_ingest(&root, &data_dir);
+    assert!(first.contains("events: 4"));
+    assert!(first.contains("inserted_events: 4"));
+
+    replace_with_fixture(&session_file, "edge-cases/truncation-after.jsonl");
+
+    let second = run_ingest(&root, &data_dir);
+    assert!(second.contains("events: 6"));
+    assert!(second.contains("inserted_events: 2"));
+
+    let conn = Connection::open(db_path(&data_dir)).expect("open preserved db");
+    let (current_generation, event_count, file_size, next_read_offset): (i64, i64, i64, i64) = conn
+        .query_row(
+            "SELECT current_generation, event_count, file_size, next_read_offset
+             FROM sessions
+             WHERE source = 'claude_cli'",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+        )
+        .expect("session rewrite state");
+    let rewritten_len = fs::metadata(&session_file)
+        .expect("rewritten metadata")
+        .len() as i64;
+    assert_eq!(current_generation, 1);
+    assert_eq!(event_count, 2);
+    assert_eq!(file_size, rewritten_len);
+    assert_eq!(next_read_offset, rewritten_len);
+    assert_eq!(generation_counts(&conn), vec![(0, 4), (1, 2)]);
+    assert!(event_payload(&conn, 0, 3).contains("Complete before truncation."));
+    assert!(event_payload(&conn, 1, 1).contains("Line one after truncation."));
+
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn ingest_preserves_same_size_claude_cli_rewrite_as_next_generation() {
+    let root = temp_root("ingest-same-size-rewrite");
+    let data_dir = root.join(".jottrace");
+    let session_file = install_claude_fixture(
+        &root,
+        "issue-25-same-size",
+        "edge-cases/same-size-rewrite-before.jsonl",
+    );
+    set_modified(&session_file, 1_700_000_000);
+
+    let first = run_ingest(&root, &data_dir);
+    assert!(first.contains("events: 2"));
+    assert!(first.contains("inserted_events: 2"));
+    let original_len = fs::metadata(&session_file)
+        .expect("original metadata")
+        .len();
+
+    replace_with_fixture(&session_file, "edge-cases/same-size-rewrite-after.jsonl");
+    set_modified(&session_file, 1_700_000_100);
+
+    assert_eq!(
+        fs::metadata(&session_file)
+            .expect("rewritten metadata")
+            .len(),
+        original_len
+    );
+    let second = run_ingest(&root, &data_dir);
+    assert!(second.contains("events: 4"));
+    assert!(second.contains("inserted_events: 2"));
+
+    let conn = Connection::open(db_path(&data_dir)).expect("open preserved db");
+    let current_generation: i64 = conn
+        .query_row(
+            "SELECT current_generation FROM sessions WHERE source = 'claude_cli'",
+            [],
+            |row| row.get(0),
+        )
+        .expect("current generation");
+    assert_eq!(current_generation, 1);
+    assert_eq!(generation_counts(&conn), vec![(0, 2), (1, 2)]);
+    assert!(event_payload(&conn, 0, 1).contains("alpha"));
+    assert!(event_payload(&conn, 1, 1).contains("bravo"));
+
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn ingest_skips_unchanged_same_size_claude_cli_file_after_fingerprint_check() {
+    let root = temp_root("ingest-same-size-unchanged");
+    let data_dir = root.join(".jottrace");
+    let session_file = install_claude_fixture(
+        &root,
+        "issue-25-same-size-unchanged",
+        "edge-cases/same-size-rewrite-before.jsonl",
+    );
+    set_modified(&session_file, 1_700_000_000);
+
+    let first = run_ingest(&root, &data_dir);
+    assert!(first.contains("events: 2"));
+    assert!(first.contains("inserted_events: 2"));
+
+    set_modified(&session_file, 1_700_000_100);
+
+    let second = run_ingest(&root, &data_dir);
+    assert!(second.contains("events: 2"));
+    assert!(second.contains("inserted_events: 0"));
+
+    let conn = Connection::open(db_path(&data_dir)).expect("open preserved db");
+    let (current_generation, file_mtime): (i64, i64) = conn
+        .query_row(
+            "SELECT current_generation, file_mtime
+             FROM sessions
+             WHERE source = 'claude_cli'",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .expect("same-size skip state");
+    assert_eq!(current_generation, 0);
+    assert_eq!(file_mtime, 1_700_000_100);
+    assert_eq!(generation_counts(&conn), vec![(0, 2)]);
+
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
 fn ingest_reports_lock_contention_as_clear_cli_failure() {
     let root = temp_root("ingest-lock-held");
     let data_dir = root.join(".jottrace");
@@ -377,14 +506,61 @@ fn db_path(data_dir: &Path) -> PathBuf {
 }
 
 fn install_primary_claude_fixture(root: &Path) -> PathBuf {
+    install_claude_fixture(root, CLAUDE_FIXTURE_SESSION_ID, CLAUDE_FIXTURE_SESSION)
+}
+
+fn install_claude_fixture(root: &Path, session_id: &str, fixture_relative: &str) -> PathBuf {
     let session_file = root
         .join(".claude/projects/-Users-fixture-Workspace-jottrace")
-        .join(format!("{CLAUDE_FIXTURE_SESSION_ID}.jsonl"));
+        .join(format!("{session_id}.jsonl"));
     if let Some(parent) = session_file.parent() {
         fs::create_dir_all(parent).expect("create fixture destination parent");
     }
-    fs::copy(reader_fixture(CLAUDE_FIXTURE_SESSION), &session_file).expect("copy fixture");
+    fs::copy(reader_fixture(fixture_relative), &session_file).expect("copy fixture");
     session_file
+}
+
+fn replace_with_fixture(path: &Path, fixture_relative: &str) {
+    fs::copy(reader_fixture(fixture_relative), path).expect("replace fixture");
+}
+
+fn set_modified(path: &Path, unix_seconds: u64) {
+    let file = fs::OpenOptions::new()
+        .write(true)
+        .open(path)
+        .expect("open fixture for mtime update");
+    let times = fs::FileTimes::new()
+        .set_modified(SystemTime::UNIX_EPOCH + Duration::from_secs(unix_seconds));
+    file.set_times(times).expect("set fixture mtime");
+}
+
+fn generation_counts(conn: &Connection) -> Vec<(i64, i64)> {
+    let mut statement = conn
+        .prepare(
+            "SELECT generation, COUNT(*)
+             FROM events
+             GROUP BY generation
+             ORDER BY generation",
+        )
+        .expect("prepare generation counts");
+    statement
+        .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
+        .expect("query generation counts")
+        .map(|row| row.expect("generation count"))
+        .collect()
+}
+
+fn event_payload(conn: &Connection, generation: i64, seq: i64) -> String {
+    let payload: Vec<u8> = conn
+        .query_row(
+            "SELECT payload
+             FROM events
+             WHERE generation = ?1 AND seq = ?2",
+            [generation, seq],
+            |row| row.get(0),
+        )
+        .expect("event payload");
+    String::from_utf8(payload).expect("fixture payload should be utf-8")
 }
 
 fn temp_root(name: &str) -> PathBuf {
