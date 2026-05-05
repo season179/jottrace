@@ -17,6 +17,7 @@ fn main() -> ExitCode {
             ExitCode::SUCCESS
         }
         Some("doctor") => run_doctor_command(),
+        Some("ingest") => run_ingest_command(),
         Some("status") => run_status_command(),
         Some(command) => {
             eprintln!("unknown command: {command}");
@@ -24,6 +25,28 @@ fn main() -> ExitCode {
             // A distinct usage-error code lets scripts tell "bad command" apart
             // from runtime failures such as permission or filesystem errors.
             ExitCode::from(2)
+        }
+    }
+}
+
+fn run_ingest_command() -> ExitCode {
+    match jottrace::run_ingest() {
+        Ok(report) => {
+            println!("jottrace ingest");
+            println!("db: {}", report.db_path.display());
+            println!("files: {}", report.file_count);
+            println!("sessions: {}", report.session_count);
+            println!("events: {}", report.event_count);
+            println!("inserted_events: {}", report.inserted_event_count);
+            println!(
+                "unresolved_ingest_errors: {}",
+                report.unresolved_ingest_error_count
+            );
+            ExitCode::SUCCESS
+        }
+        Err(error) => {
+            eprintln!("jottrace ingest failed: {error}");
+            ExitCode::FAILURE
         }
     }
 }
@@ -74,6 +97,7 @@ fn print_help() {
     println!();
     println!("Usage:");
     println!("  jottrace doctor");
+    println!("  jottrace ingest");
     println!("  jottrace status");
     println!("  jottrace --version");
 }

@@ -1,9 +1,18 @@
+mod common;
+
+use common::reader_fixture;
 use std::fs;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use rusqlite::Connection;
+
 #[cfg(unix)]
 use std::os::unix::fs::{MetadataExt, PermissionsExt};
+
+const CLAUDE_FIXTURE_SESSION: &str = "claude-cli/projects/-Users-fixture-Workspace-jottrace/00000000-0000-4000-8000-000000000021.jsonl";
+const CLAUDE_FIXTURE_SESSION_ID: &str = "00000000-0000-4000-8000-000000000021";
 
 #[test]
 fn version_prints_package_version() {
@@ -87,6 +96,137 @@ fn status_reports_empty_fresh_database() {
     let _ = fs::remove_dir_all(root);
 }
 
+#[test]
+fn ingest_is_idempotent_for_unchanged_claude_cli_fixture() {
+    let root = temp_root("ingest-idempotent");
+    let data_dir = root.join(".jottrace");
+    install_primary_claude_fixture(&root);
+
+    for _ in 0..2 {
+        let output = Command::new(binary())
+            .arg("ingest")
+            .env("HOME", &root)
+            .env("JOTTRACE_HOME", &data_dir)
+            .output()
+            .expect("run jottrace ingest");
+        assert!(
+            output.status.success(),
+            "stdout:\n{}\nstderr:\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    let status = Command::new(binary())
+        .arg("status")
+        .env("JOTTRACE_HOME", &data_dir)
+        .output()
+        .expect("run jottrace status");
+
+    let stdout = String::from_utf8_lossy(&status.stdout);
+    assert!(stdout.contains("sessions: 1"));
+    assert!(stdout.contains("events: 12"));
+
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn ingest_preserves_claude_cli_fixture_and_status_reports_counts() {
+    let root = temp_root("ingest-claude");
+    let data_dir = root.join(".jottrace");
+    let session_file = install_primary_claude_fixture(&root);
+
+    let ingest = Command::new(binary())
+        .arg("ingest")
+        .env("HOME", &root)
+        .env("JOTTRACE_HOME", &data_dir)
+        .output()
+        .expect("run jottrace ingest");
+
+    assert!(
+        ingest.status.success(),
+        "stdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&ingest.stdout),
+        String::from_utf8_lossy(&ingest.stderr)
+    );
+
+    let status = Command::new(binary())
+        .arg("status")
+        .env("JOTTRACE_HOME", &data_dir)
+        .output()
+        .expect("run jottrace status");
+
+    assert!(
+        status.status.success(),
+        "stdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&status.stdout),
+        String::from_utf8_lossy(&status.stderr)
+    );
+
+    let stdout = String::from_utf8_lossy(&status.stdout);
+    assert!(stdout.contains("sessions: 1"));
+    assert!(stdout.contains("events: 12"));
+    assert!(stdout.contains("unresolved_ingest_errors: 0"));
+
+    let conn = Connection::open(data_dir.join("db.sqlite")).expect("open preserved db");
+    let (source_session_id, cwd, started_at, ended_at, event_count, file_size, file_mtime): (
+        String,
+        String,
+        String,
+        String,
+        i64,
+        i64,
+        Option<i64>,
+    ) = conn
+        .query_row(
+            "SELECT source_session_id, cwd, started_at, ended_at, event_count, file_size, file_mtime
+             FROM sessions
+             WHERE source = 'claude_cli'",
+            [],
+            |row| {
+                Ok((
+                    row.get(0)?,
+                    row.get(1)?,
+                    row.get(2)?,
+                    row.get(3)?,
+                    row.get(4)?,
+                    row.get(5)?,
+                    row.get(6)?,
+                ))
+            },
+        )
+        .expect("session metadata");
+    assert_eq!(source_session_id, CLAUDE_FIXTURE_SESSION_ID);
+    assert_eq!(cwd, "/Users/fixture/Workspace/jottrace");
+    assert_eq!(started_at, "2026-05-05T01:00:00.000Z");
+    assert_eq!(ended_at, "2026-05-05T01:00:08.000Z");
+    assert_eq!(event_count, 12);
+    assert_eq!(
+        file_size,
+        fs::metadata(&session_file).expect("fixture metadata").len() as i64
+    );
+    assert!(file_mtime.is_some());
+
+    let event_ts: String = conn
+        .query_row("SELECT ts FROM events WHERE seq = 1", [], |row| row.get(0))
+        .expect("snapshot event timestamp");
+    assert_eq!(event_ts, "2026-05-05T01:00:00.000Z");
+
+    let (payload, codec): (Vec<u8>, String) = conn
+        .query_row(
+            "SELECT payload, codec
+             FROM events
+             WHERE seq = 0",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .expect("first event payload");
+    assert_eq!(codec, "raw");
+    assert_eq!(payload, first_fixture_line());
+
+    let _ = fs::remove_dir_all(root);
+}
+
 #[cfg(unix)]
 #[test]
 fn doctor_rejects_insecure_existing_data_dir() {
@@ -116,7 +256,27 @@ fn binary() -> &'static str {
     env!("CARGO_BIN_EXE_jottrace")
 }
 
-fn temp_root(name: &str) -> std::path::PathBuf {
+fn first_fixture_line() -> Vec<u8> {
+    fs::read(reader_fixture(CLAUDE_FIXTURE_SESSION))
+        .expect("read fixture")
+        .split(|byte| *byte == b'\n')
+        .next()
+        .expect("first line")
+        .to_vec()
+}
+
+fn install_primary_claude_fixture(root: &Path) -> PathBuf {
+    let session_file = root
+        .join(".claude/projects/-Users-fixture-Workspace-jottrace")
+        .join(format!("{CLAUDE_FIXTURE_SESSION_ID}.jsonl"));
+    if let Some(parent) = session_file.parent() {
+        fs::create_dir_all(parent).expect("create fixture destination parent");
+    }
+    fs::copy(reader_fixture(CLAUDE_FIXTURE_SESSION), &session_file).expect("copy fixture");
+    session_file
+}
+
+fn temp_root(name: &str) -> PathBuf {
     // Cargo can run tests concurrently, so the temp path needs more entropy
     // than the test name alone.
     let unique = SystemTime::now()
