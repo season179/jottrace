@@ -2,8 +2,8 @@
 
 Jottrace preserves local AI coding-session transcripts into a journal you
 control. The first CLI surface is intentionally small: install the binary,
-check the version, and run `doctor` to verify the local data directory is
-private enough for transcript data.
+check the version, run `doctor` to verify the local data directory is private
+enough for transcript data, and run `status` to inspect the local database.
 
 ## Install
 
@@ -33,11 +33,15 @@ After installing, run:
 ```sh
 jottrace --version
 jottrace doctor
+jottrace status
 ```
 
 `jottrace doctor` creates or checks the local data directory at `~/.jottrace`
 and reports whether its permissions are private. On Unix systems, the directory
 is expected to use mode `0700`.
+
+`jottrace status` initializes `~/.jottrace/db.sqlite` if needed and reports
+session, event, and unresolved ingest-error counts.
 
 ## Update
 
@@ -58,6 +62,7 @@ Run the development binary with:
 
 ```sh
 cargo run -- doctor
+cargo run -- status
 ```
 
 ## Maintainer Release

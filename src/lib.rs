@@ -7,6 +7,9 @@ use std::path::{Path, PathBuf};
 #[cfg(unix)]
 use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt, PermissionsExt};
 
+pub mod storage;
+pub use storage::{StatusReport, run_status};
+
 /// Default per-user data directory name for the current MVP.
 pub const APP_DIR_NAME: &str = ".jottrace";
 /// Session transcripts may contain private code, prompts, and paths, so the
@@ -28,12 +31,26 @@ pub enum JottraceError {
     /// Refuse to reuse a path with the right name but the wrong kind; treating
     /// it as a directory would make later writes fail in surprising ways.
     NotDirectory(PathBuf),
+    /// Refuse to reuse a filesystem node as a state file unless it is a regular
+    /// file. SQLite needs a durable file path, not a directory or special file.
+    NotFile(PathBuf),
     /// Existing loose permissions are surfaced instead of silently chmodded so
     /// the user can notice and decide whether the location is trustworthy.
     InsecureMode {
         path: PathBuf,
         expected: u32,
         actual: u32,
+    },
+    /// The local database was created by a newer Jottrace than this binary
+    /// knows how to read safely.
+    UnsupportedSchemaVersion {
+        path: PathBuf,
+        actual: i64,
+        supported: i64,
+    },
+    Sqlite {
+        path: PathBuf,
+        source: rusqlite::Error,
     },
 }
 
@@ -45,6 +62,7 @@ impl fmt::Display for JottraceError {
             Self::NotDirectory(path) => {
                 write!(f, "{} exists but is not a directory", path.display())
             }
+            Self::NotFile(path) => write!(f, "{} exists but is not a file", path.display()),
             Self::InsecureMode {
                 path,
                 expected,
@@ -56,6 +74,18 @@ impl fmt::Display for JottraceError {
                 actual,
                 expected
             ),
+            Self::UnsupportedSchemaVersion {
+                path,
+                actual,
+                supported,
+            } => write!(
+                f,
+                "{} has schema version {}; this binary supports up to {}",
+                path.display(),
+                actual,
+                supported
+            ),
+            Self::Sqlite { path, source } => write!(f, "{}: {}", path.display(), source),
         }
     }
 }
@@ -64,6 +94,7 @@ impl std::error::Error for JottraceError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
             Self::Io { source, .. } => Some(source),
+            Self::Sqlite { source, .. } => Some(source),
             _ => None,
         }
     }
@@ -141,6 +172,30 @@ pub fn create_private_file(path: &Path) -> Result<File> {
     Ok(file)
 }
 
+/// Ensure a regular file exists and is private enough for local state.
+pub fn ensure_private_file(path: &Path) -> Result<()> {
+    if let Some(parent) = path.parent() {
+        ensure_private_dir(parent)?;
+    }
+
+    match fs::metadata(path) {
+        Ok(metadata) => {
+            if !metadata.is_file() {
+                return Err(JottraceError::NotFile(path.to_path_buf()));
+            }
+            ensure_file_mode(path)
+        }
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {
+            drop(create_private_file(path)?);
+            Ok(())
+        }
+        Err(source) => Err(JottraceError::Io {
+            path: path.to_path_buf(),
+            source,
+        }),
+    }
+}
+
 #[cfg(unix)]
 fn create_private_dir(path: &Path) -> Result<()> {
     let mut builder = fs::DirBuilder::new();
@@ -180,6 +235,24 @@ fn ensure_dir_mode(path: &Path) -> Result<()> {
 fn ensure_dir_mode(_path: &Path) -> Result<()> {
     // The numeric Unix mode contract does not apply on Windows; platform-
     // specific ACL hardening can be added behind this same check later.
+    Ok(())
+}
+
+#[cfg(unix)]
+fn ensure_file_mode(path: &Path) -> Result<()> {
+    let actual = mode(path)?;
+    if actual != PRIVATE_FILE_MODE {
+        return Err(JottraceError::InsecureMode {
+            path: path.to_path_buf(),
+            expected: PRIVATE_FILE_MODE,
+            actual,
+        });
+    }
+    Ok(())
+}
+
+#[cfg(not(unix))]
+fn ensure_file_mode(_path: &Path) -> Result<()> {
     Ok(())
 }
 

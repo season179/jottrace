@@ -17,6 +17,7 @@ fn main() -> ExitCode {
             ExitCode::SUCCESS
         }
         Some("doctor") => run_doctor_command(),
+        Some("status") => run_status_command(),
         Some(command) => {
             eprintln!("unknown command: {command}");
             eprintln!("run `jottrace --help` for usage");
@@ -44,6 +45,27 @@ fn run_doctor_command() -> ExitCode {
     }
 }
 
+fn run_status_command() -> ExitCode {
+    match jottrace::run_status() {
+        Ok(report) => {
+            println!("jottrace status");
+            println!("db: {}", report.db_path.display());
+            println!("schema_version: {}", report.schema_version);
+            println!("sessions: {}", report.session_count);
+            println!("events: {}", report.event_count);
+            println!(
+                "unresolved_ingest_errors: {}",
+                report.unresolved_ingest_error_count
+            );
+            ExitCode::SUCCESS
+        }
+        Err(error) => {
+            eprintln!("jottrace status failed: {error}");
+            ExitCode::FAILURE
+        }
+    }
+}
+
 fn print_help() {
     // Cargo exposes package metadata at compile time, so --version and help
     // cannot drift away from Cargo.toml.
@@ -52,5 +74,6 @@ fn print_help() {
     println!();
     println!("Usage:");
     println!("  jottrace doctor");
+    println!("  jottrace status");
     println!("  jottrace --version");
 }
