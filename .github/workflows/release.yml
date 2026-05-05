@@ -1,0 +1,103 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: Build ${{ matrix.artifact }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - artifact: linux-x86_64
+            os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+          - artifact: linux-arm64
+            os: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-gnu
+          - artifact: darwin-arm64
+            os: macos-14
+            target: aarch64-apple-darwin
+          - artifact: darwin-x86_64
+            os: macos-15-intel
+            target: x86_64-apple-darwin
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Build release binary
+        run: cargo build --release --locked --target "${{ matrix.target }}"
+
+      - name: Package artifact
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p dist package
+          cp "target/${{ matrix.target }}/release/jottrace" package/jottrace
+          chmod 0755 package/jottrace
+          tar -C package -czf "dist/jottrace-${{ matrix.artifact }}.tar.gz" jottrace
+          (cd dist && shasum -a 256 "jottrace-${{ matrix.artifact }}.tar.gz" > "jottrace-${{ matrix.artifact }}.tar.gz.sha256")
+
+      - name: Upload release artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-${{ matrix.artifact }}
+          path: dist/*
+          if-no-files-found: error
+
+  installer-smoke:
+    name: Installer smoke
+    runs-on: ubuntu-latest
+    needs: build
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Download Linux artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: release-linux-x86_64
+          path: ${{ runner.temp }}/jottrace-release/${{ github.ref_name }}
+
+      - name: Install from staged release artifact
+        shell: bash
+        run: |
+          set -euo pipefail
+          export HOME="${RUNNER_TEMP}/jottrace-home"
+          export PATH="${HOME}/.local/bin:${PATH}"
+          export JOTTRACE_VERSION="${GITHUB_REF_NAME}"
+          export JOTTRACE_RELEASE_BASE_URL="file://${RUNNER_TEMP}/jottrace-release"
+          bash install.sh
+          "${HOME}/.local/bin/jottrace" --version
+
+  publish:
+    name: Publish GitHub Release
+    runs-on: ubuntu-latest
+    needs: installer-smoke
+
+    steps:
+      - name: Download release artifacts
+        uses: actions/download-artifact@v4
+        with:
+          pattern: release-*
+          merge-multiple: true
+          path: dist
+
+      - name: Publish release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release create "${GITHUB_REF_NAME}" dist/* --title "${GITHUB_REF_NAME}" --notes "Release ${GITHUB_REF_NAME}" --verify-tag
