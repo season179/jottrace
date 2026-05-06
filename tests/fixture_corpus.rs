@@ -104,6 +104,25 @@ fn reader_source_inventory_names_issue_69_ignored_and_deferred_sources() {
     }
 }
 
+#[test]
+fn reader_source_inventory_documents_pi_agent_fixture_findings() {
+    let inventory = reader_source_inventory();
+
+    for required in [
+        "Pi agent (#64 fixture-confirmed)",
+        "`~/.pi/agent/sessions/<encoded-cwd>/<timestamp>_<session-id>.jsonl`",
+        "`session.id`",
+        "JSONL line number",
+        "`parentId`",
+        "file size, mtime, fingerprint, and next read offset",
+    ] {
+        assert!(
+            inventory.contains(required),
+            "inventory note should document Pi agent fixture finding: {required}"
+        );
+    }
+}
+
 fn reader_source_inventory() -> String {
     fs::read_to_string("docs/reader-source-inventory.md")
         .expect("reader source inventory design note should exist")
@@ -179,6 +198,31 @@ fn reader_fixture_readme_documents_opencode_fixture_status() {
             "fixture README should document OpenCode/Cursor status: {required}"
         );
     }
+}
+
+#[test]
+fn reader_fixture_corpus_has_issue_64_pi_agent_required_shapes() {
+    let fixture_path = "pi-agent/sessions/--Users-fixture-Workspace-jottrace--/2026-05-06T02-00-00-000Z_00000000-0000-4000-8000-000000000064.jsonl";
+    let content = fs::read_to_string(fixture(fixture_path)).expect("read Pi agent fixture");
+    let readme = fs::read_to_string(fixture("README.md")).expect("read fixture README");
+
+    for required in [
+        "\"type\":\"session\"",
+        "\"type\":\"message\"",
+        "\"type\":\"model_change\"",
+        "\"type\":\"thinking_level_change\"",
+        "\"parentId\"",
+        "\"timestamp\"",
+    ] {
+        assert!(
+            content.contains(required),
+            "Pi agent fixture should contain required source shape: {required}"
+        );
+    }
+    assert!(
+        readme.contains("pi-agent/sessions"),
+        "fixture README should document Pi agent fixture coverage"
+    );
 }
 
 #[test]

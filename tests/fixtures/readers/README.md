@@ -1,8 +1,9 @@
 # Reader Fixture Corpus
 
-This corpus is the issue #21 reader-fixture seed set. It is source-shaped
-from local Claude CLI and Codex CLI artifacts inspected on 2026-05-05, but all
-content is synthetic and safe to commit.
+This corpus started as the issue #21 reader-fixture seed set and now includes
+the OpenCode SQLite and issue #64 Pi agent slices. It is source-shaped from
+inspected local agent artifacts, but all content is synthetic and safe to
+commit.
 
 ## Coverage
 
@@ -21,6 +22,9 @@ content is synthetic and safe to commit.
   shape observed on 2026-05-06. The fixture is a SQL rebuild script with
   synthetic rows that preserve session, message, part, and parent-child
   relationship structure without committing the private source database.
+- `pi-agent/sessions/--Users-fixture-Workspace-jottrace--/` captures the Pi
+  agent `~/.pi/agent/sessions/<encoded-cwd>/` JSONL shape with session,
+  message, model-change, and thinking-level-change events.
 - `edge-cases/` contains partial-tail, corrupt-line, truncation, and same-size
   rewrite cases for the shared JSONL ingest core.
 
@@ -37,8 +41,8 @@ content is synthetic and safe to commit.
 
 ## Human Review
 
-Review status: pending human approval for the Claude CLI, Codex CLI, and
-OpenCode SQLite fixtures before they become the baseline for new reader
+Review status: pending human approval for the Claude CLI, Codex CLI, OpenCode
+SQLite, and Pi agent fixtures before they become the baseline for new reader
 implementation. Cursor fixture capture is still pending because no local
 Cursor `state.vscdb` or
 `cursorDiskKV` source was available on this machine during the 2026-05-06

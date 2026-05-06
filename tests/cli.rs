@@ -23,6 +23,8 @@ const CODEX_NESTED_FIXTURE_SESSION_ID: &str = "00000000-0000-4000-8000-000000000
 const CODEX_ARCHIVED_FIXTURE_SESSION: &str = "codex-cli/archived_sessions/rollout-2026-03-28T10-42-29-00000000-0000-4000-8000-000000000021.jsonl";
 const CODEX_ARCHIVED_FIXTURE_SESSION_ID: &str = "00000000-0000-4000-8000-000000000121";
 const CODEX_LEGACY_FIXTURE_SESSION_ID: &str = "22222222-2222-4222-8222-222222222222";
+const PI_AGENT_FIXTURE_SESSION: &str = "pi-agent/sessions/--Users-fixture-Workspace-jottrace--/2026-05-06T02-00-00-000Z_00000000-0000-4000-8000-000000000064.jsonl";
+const PI_AGENT_FIXTURE_SESSION_ID: &str = "00000000-0000-4000-8000-000000000064";
 const CORRUPT_FIXTURE_SESSION: &str = "edge-cases/corrupt-line.jsonl";
 const CORRUPT_FIXTURE_SESSION_ID: &str = "00000000-0000-4000-8000-000000000000";
 const UNREADABLE_FIXTURE_SESSION_ID: &str = "00000000-0000-4000-8000-000000000001";
@@ -933,6 +935,166 @@ fn ingest_updates_codex_file_path_when_rollout_moves_to_archive() {
         )
         .expect("codex moved session file path");
     assert_eq!(PathBuf::from(file_path), archived_file);
+
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn ingest_preserves_pi_agent_fixture_and_status_reports_counts() {
+    let root = temp_root("ingest-pi-agent");
+    let data_dir = root.join(".jottrace");
+    let session_file = install_pi_agent_fixture(&root);
+
+    let ingest = run_ingest(&root, &data_dir);
+    assert!(ingest.contains("sessions: 1"));
+    assert!(ingest.contains("events: 6"));
+    assert!(ingest.contains("inserted_events: 6"));
+    assert!(ingest.contains("unresolved_ingest_errors: 0"));
+
+    let conn = Connection::open(db_path(&data_dir)).expect("open preserved db");
+    let (source_session_id, cwd, started_at, ended_at, event_count, file_path): (
+        String,
+        String,
+        String,
+        String,
+        i64,
+        String,
+    ) = conn
+        .query_row(
+            "SELECT source_session_id, cwd, started_at, ended_at, event_count, file_path
+             FROM sessions
+             WHERE source = 'pi_agent'",
+            [],
+            |row| {
+                Ok((
+                    row.get(0)?,
+                    row.get(1)?,
+                    row.get(2)?,
+                    row.get(3)?,
+                    row.get(4)?,
+                    row.get(5)?,
+                ))
+            },
+        )
+        .expect("pi agent session metadata");
+    assert_eq!(source_session_id, PI_AGENT_FIXTURE_SESSION_ID);
+    assert_eq!(cwd, "/Users/fixture/Workspace/jottrace");
+    assert_eq!(started_at, "2026-05-06T02:00:00.000Z");
+    assert_eq!(ended_at, "2026-05-06T02:00:05.000Z");
+    assert_eq!(event_count, 6);
+    assert_eq!(PathBuf::from(file_path), session_file);
+
+    let event_types = decoded_event_types(&data_dir, "pi_agent", PI_AGENT_FIXTURE_SESSION_ID);
+    assert_eq!(
+        event_types,
+        vec![
+            "session",
+            "model_change",
+            "thinking_level_change",
+            "message",
+            "message",
+            "message"
+        ]
+    );
+
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn ingest_is_idempotent_for_unchanged_pi_agent_fixture() {
+    let root = temp_root("ingest-pi-agent-idempotent");
+    let data_dir = root.join(".jottrace");
+    install_pi_agent_fixture(&root);
+
+    let first = run_ingest(&root, &data_dir);
+    assert!(first.contains("events: 6"));
+    assert!(first.contains("inserted_events: 6"));
+
+    let second = run_ingest(&root, &data_dir);
+    assert!(second.contains("events: 6"));
+    assert!(second.contains("inserted_events: 0"));
+
+    let conn = Connection::open(db_path(&data_dir)).expect("open preserved db");
+    let event_count: i64 = conn
+        .query_row(
+            "SELECT COUNT(*)
+             FROM events
+             JOIN sessions ON sessions.id = events.session_id
+             WHERE sessions.source = 'pi_agent'
+               AND sessions.source_session_id = ?1",
+            [PI_AGENT_FIXTURE_SESSION_ID],
+            |row| row.get(0),
+        )
+        .expect("pi event count");
+    assert_eq!(event_count, 6);
+
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn ingest_records_invalid_pi_agent_session_header_without_blocking_other_files() {
+    let root = temp_root("ingest-pi-agent-invalid-header");
+    let data_dir = root.join(".jottrace");
+    let pi_session_file = install_pi_agent_fixture(&root);
+    let bad_file = pi_session_file
+        .parent()
+        .expect("Pi fixture parent")
+        .join("bad-pi-session.jsonl");
+    write_text_file(
+        &bad_file,
+        "{\"type\":\"message\",\"id\":\"bad-pi-message\",\"timestamp\":\"2026-05-06T02:10:00.000Z\",\"message\":{\"role\":\"user\",\"timestamp\":\"2026-05-06T02:10:00.000Z\",\"content\":[{\"type\":\"text\",\"text\":\"fixture invalid header\"}]}}\n",
+    );
+
+    let ingest = run_ingest(&root, &data_dir);
+    assert!(ingest.contains("sessions: 2"));
+    assert!(ingest.contains("events: 6"));
+    assert!(ingest.contains("inserted_events: 6"));
+    assert!(ingest.contains("unresolved_ingest_errors: 1"));
+
+    let errors = jottrace::storage::unresolved_ingest_errors_for_path(&db_path(&data_dir), 10)
+        .expect("unresolved ingest errors");
+    assert_eq!(errors.len(), 1);
+    let error = &errors[0];
+    assert_eq!(error.source, "pi_agent");
+    assert_eq!(error.source_session_id.as_deref(), Some("bad-pi-session"));
+    assert_eq!(error.file_path, bad_file);
+    assert_eq!(error.error_kind, "invalid_session_meta");
+    assert!(
+        error
+            .message
+            .contains("Pi agent session file does not start with a session event")
+    );
+
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn ingest_records_unterminated_pi_agent_session_header_with_bounded_error() {
+    let root = temp_root("ingest-pi-agent-unterminated-header");
+    let data_dir = root.join(".jottrace");
+    let bad_file = root
+        .join(".pi/agent/sessions")
+        .join("--Users-fixture-Workspace-jottrace--")
+        .join("2026-05-06T02-20-00-000Z_bad-header.jsonl");
+    write_text_file(&bad_file, &"x".repeat(70 * 1024));
+
+    let ingest = run_ingest(&root, &data_dir);
+    assert!(ingest.contains("sessions: 1"));
+    assert!(ingest.contains("events: 0"));
+    assert!(ingest.contains("inserted_events: 0"));
+    assert!(ingest.contains("unresolved_ingest_errors: 1"));
+
+    let errors = jottrace::storage::unresolved_ingest_errors_for_path(&db_path(&data_dir), 10)
+        .expect("unresolved ingest errors");
+    assert_eq!(errors.len(), 1);
+    let error = &errors[0];
+    assert_eq!(error.source, "pi_agent");
+    assert_eq!(error.source_session_id.as_deref(), Some("bad-header"));
+    assert_eq!(error.file_path, bad_file);
+    assert_eq!(error.error_kind, "invalid_session_meta");
+    assert!(error.message.contains(
+        "Pi agent session file has no committed session event line within the header limit"
+    ));
 
     let _ = fs::remove_dir_all(root);
 }
@@ -2516,6 +2678,16 @@ fn install_archived_codex_fixture(root: &Path) -> PathBuf {
     session_file
 }
 
+fn install_pi_agent_fixture(root: &Path) -> PathBuf {
+    let session_file = root.join(".pi/agent").join(
+        PI_AGENT_FIXTURE_SESSION
+            .strip_prefix("pi-agent/")
+            .expect("Pi fixture path should be under pi-agent"),
+    );
+    copy_reader_fixture(PI_AGENT_FIXTURE_SESSION, &session_file);
+    session_file
+}
+
 fn replace_with_fixture(path: &Path, fixture_relative: &str) {
     copy_reader_fixture(fixture_relative, path);
 }
@@ -2597,6 +2769,29 @@ fn event_payload(conn: &Connection, generation: i64, seq: i64) -> String {
         )
         .expect("event payload");
     String::from_utf8(payload).expect("fixture payload should be utf-8")
+}
+
+fn decoded_event_types(data_dir: &Path, source: &str, source_session_id: &str) -> Vec<String> {
+    let mut event_types = Vec::new();
+    jottrace::storage::for_each_decoded_event_payload_for_session(
+        &db_path(data_dir),
+        source,
+        source_session_id,
+        None,
+        |payload| {
+            let value: serde_json::Value =
+                serde_json::from_slice(payload).expect("decoded event payload should be JSON");
+            event_types.push(
+                value["type"]
+                    .as_str()
+                    .expect("decoded event payload should have a type")
+                    .to_string(),
+            );
+            Ok(())
+        },
+    )
+    .expect("decoded event payloads");
+    event_types
 }
 
 fn temp_root(name: &str) -> PathBuf {
