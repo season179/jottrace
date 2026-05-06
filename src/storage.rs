@@ -1,11 +1,11 @@
-use rusqlite::{Connection, Row, params};
+use rusqlite::{Connection, OptionalExtension, Row, params};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use crate::{JottraceError, Result, data_dir_from_env, ensure_private_file};
 
 pub const DB_FILE_NAME: &str = "db.sqlite";
-pub const LATEST_SCHEMA_VERSION: i64 = 3;
+pub const LATEST_SCHEMA_VERSION: i64 = 4;
 pub(crate) const RAW_CODEC: &str = "raw";
 
 const MIGRATIONS: &[Migration] = &[
@@ -20,6 +20,10 @@ const MIGRATIONS: &[Migration] = &[
     Migration {
         version: 3,
         sql: include_str!("migrations/003_claude_sidechain_source_ids.sql"),
+    },
+    Migration {
+        version: 4,
+        sql: include_str!("migrations/004_unsupported_event_codec_index.sql"),
     },
 ];
 const UNRESOLVED_INGEST_ERROR_COUNT_SQL: &str =
@@ -75,6 +79,14 @@ pub fn unresolved_ingest_errors_for_path(
 ) -> Result<Vec<IngestErrorSummary>> {
     let conn = open_database(path)?;
     unresolved_ingest_errors_from_connection(path, &conn, limit)
+}
+
+pub fn decode_event_payload(payload: &[u8], codec: &str) -> Result<Vec<u8>> {
+    if codec == RAW_CODEC {
+        return Ok(payload.to_vec());
+    }
+
+    Err(unsupported_event_payload_codec(codec))
 }
 
 pub fn open_database(path: &Path) -> Result<Connection> {
@@ -169,6 +181,177 @@ pub(crate) fn unresolved_ingest_errors_from_connection(
         .map_err(|source| sqlite_error(path, source))
 }
 
+pub fn for_each_decoded_event_payload_for_session(
+    path: &Path,
+    source: &str,
+    source_session_id: &str,
+    limit: Option<i64>,
+    visit: impl FnMut(&[u8]) -> Result<()>,
+) -> Result<()> {
+    let conn = open_database(path)?;
+    let session_id =
+        event_session_id(path, &conn, source, source_session_id)?.ok_or_else(|| {
+            JottraceError::SessionNotFound {
+                source: source.to_string(),
+                source_session_id: source_session_id.to_string(),
+            }
+        })?;
+    for_each_decoded_event_payload_from_connection(path, &conn, session_id, limit, visit)
+}
+
+fn event_session_id(
+    path: &Path,
+    conn: &Connection,
+    source: &str,
+    source_session_id: &str,
+) -> Result<Option<i64>> {
+    conn.query_row(
+        "SELECT id
+         FROM sessions
+         WHERE source = ?1
+           AND source_session_id = ?2",
+        params![source, source_session_id],
+        |row| row.get(0),
+    )
+    .optional()
+    .map_err(|source| sqlite_error(path, source))
+}
+
+fn for_each_decoded_event_payload_from_connection(
+    path: &Path,
+    conn: &Connection,
+    session_id: i64,
+    limit: Option<i64>,
+    mut visit: impl FnMut(&[u8]) -> Result<()>,
+) -> Result<()> {
+    if let Some(limit) = limit {
+        validate_decoded_event_limit(limit)?;
+    }
+    reject_unsupported_event_codecs(
+        path,
+        conn,
+        session_id,
+        selected_event_upper_bound(path, conn, session_id, limit)?,
+    )?;
+
+    let sql = match limit {
+        Some(_) => {
+            "SELECT events.payload
+             FROM events
+             WHERE events.session_id = ?1
+             ORDER BY events.generation, events.seq
+             LIMIT ?2"
+        }
+        None => {
+            "SELECT events.payload
+             FROM events
+             WHERE events.session_id = ?1
+             ORDER BY events.generation, events.seq"
+        }
+    };
+    let mut statement = conn
+        .prepare(sql)
+        .map_err(|source| sqlite_error(path, source))?;
+    let mut rows = match limit {
+        Some(limit) => statement
+            .query(params![session_id, limit])
+            .map_err(|source| sqlite_error(path, source))?,
+        None => statement
+            .query(params![session_id])
+            .map_err(|source| sqlite_error(path, source))?,
+    };
+
+    while let Some(row) = rows.next().map_err(|source| sqlite_error(path, source))? {
+        let payload: Vec<u8> = row.get(0).map_err(|source| sqlite_error(path, source))?;
+        visit(&payload)?;
+    }
+
+    Ok(())
+}
+
+fn reject_unsupported_event_codecs(
+    path: &Path,
+    conn: &Connection,
+    session_id: i64,
+    upper_bound: Option<(i64, i64)>,
+) -> Result<()> {
+    let codec: Option<String> = match upper_bound {
+        Some((generation, seq)) => conn
+            .query_row(
+                "SELECT events.codec
+                 FROM events
+                 WHERE events.session_id = ?1
+                   AND events.codec != 'raw'
+                   AND (
+                       events.generation < ?2
+                       OR (events.generation = ?2 AND events.seq <= ?3)
+                   )
+                 ORDER BY events.generation, events.seq
+                 LIMIT 1",
+                params![session_id, generation, seq],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(|source| sqlite_error(path, source))?,
+        None => conn
+            .query_row(
+                "SELECT events.codec
+                 FROM events
+                 WHERE events.session_id = ?1
+                   AND events.codec != 'raw'
+                 ORDER BY events.generation, events.seq
+                 LIMIT 1",
+                params![session_id],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(|source| sqlite_error(path, source))?,
+    };
+
+    match codec {
+        Some(codec) => Err(unsupported_event_payload_codec(&codec)),
+        None => Ok(()),
+    }
+}
+
+fn selected_event_upper_bound(
+    path: &Path,
+    conn: &Connection,
+    session_id: i64,
+    limit: Option<i64>,
+) -> Result<Option<(i64, i64)>> {
+    let Some(limit) = limit else {
+        return Ok(None);
+    };
+
+    let offset = limit - 1;
+    conn.query_row(
+        "SELECT generation, seq
+         FROM events
+         WHERE session_id = ?1
+         ORDER BY generation, seq
+         LIMIT 1 OFFSET ?2",
+        params![session_id, offset],
+        |row| Ok((row.get(0)?, row.get(1)?)),
+    )
+    .optional()
+    .map_err(|source| sqlite_error(path, source))
+}
+
+fn unsupported_event_payload_codec(codec: &str) -> JottraceError {
+    JottraceError::UnsupportedEventPayloadCodec {
+        codec: codec.to_string(),
+    }
+}
+
+fn validate_decoded_event_limit(limit: i64) -> Result<()> {
+    if limit >= 1 {
+        return Ok(());
+    }
+
+    Err(JottraceError::InvalidEventLimit { limit })
+}
+
 fn ingest_error_summary_from_row(row: &Row<'_>) -> rusqlite::Result<IngestErrorSummary> {
     let file_path: String = row.get("file_path")?;
     let occurrence_count: i64 = row.get("occurrence_count")?;
@@ -231,6 +414,7 @@ mod tests {
         assert_sql_object(&conn, "index", "idx_events_session_ts");
         assert_sql_object(&conn, "index", "idx_ingest_errors_unresolved");
         assert_sql_object(&conn, "index", "idx_ingest_errors_unresolved_last_seen");
+        assert_sql_object(&conn, "index", "idx_events_unsupported_codec");
 
         assert!(columns(&conn, "sessions").contains(&"id".to_string()));
         assert!(columns(&conn, "sessions").contains(&"source_session_id".to_string()));
@@ -475,6 +659,23 @@ mod tests {
         assert_eq!(report.unresolved_ingest_error_count, 1);
 
         let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn decode_event_payload_returns_raw_payload_bytes() {
+        let payload = br#"{"type":"event_msg"}"#;
+
+        let decoded = decode_event_payload(payload, RAW_CODEC).expect("decode raw payload");
+
+        assert_eq!(decoded, payload);
+    }
+
+    #[test]
+    fn decode_event_payload_rejects_unknown_codec() {
+        let error =
+            decode_event_payload(br#"{"type":"event_msg"}"#, "zstd").expect_err("codec error");
+
+        assert_eq!(error.to_string(), "unsupported event payload codec: zstd");
     }
 
     fn assert_sql_object(conn: &Connection, kind: &str, name: &str) {

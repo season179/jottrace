@@ -614,6 +614,321 @@ fn ingest_preserves_claude_cli_fixture_and_status_reports_counts() {
 }
 
 #[test]
+fn events_prints_decoded_payload_jsonl_for_bounded_session() {
+    let root = temp_root("events-session-limit");
+    let data_dir = root.join(".jottrace");
+    install_primary_claude_fixture(&root);
+
+    run_ingest(&root, &data_dir);
+
+    let output = Command::new(binary())
+        .args([
+            "events",
+            "--source",
+            "claude_cli",
+            "--session",
+            CLAUDE_FIXTURE_SESSION_ID,
+            "--limit",
+            "2",
+        ])
+        .env("JOTTRACE_HOME", &data_dir)
+        .output()
+        .expect("run jottrace events");
+
+    assert!(
+        output.status.success(),
+        "stdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(
+        String::from_utf8(output.stdout).expect("events stdout should be utf-8"),
+        fixture_lines(CLAUDE_FIXTURE_SESSION, 2)
+    );
+
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn events_prints_all_decoded_payload_jsonl_for_session() {
+    let root = temp_root("events-session-all");
+    let data_dir = root.join(".jottrace");
+    install_primary_claude_fixture(&root);
+
+    run_ingest(&root, &data_dir);
+
+    let output = Command::new(binary())
+        .args([
+            "events",
+            "--source",
+            "claude_cli",
+            "--session",
+            CLAUDE_FIXTURE_SESSION_ID,
+            "--all",
+        ])
+        .env("JOTTRACE_HOME", &data_dir)
+        .output()
+        .expect("run jottrace events --all");
+
+    assert!(
+        output.status.success(),
+        "stdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(
+        String::from_utf8(output.stdout).expect("events stdout should be utf-8"),
+        fixture_lines(CLAUDE_FIXTURE_SESSION, 12)
+    );
+
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn events_filters_by_source_and_session_identity() {
+    let root = temp_root("events-source-session-identity");
+    let data_dir = root.join(".jottrace");
+    install_primary_claude_fixture(&root);
+
+    run_ingest(&root, &data_dir);
+    insert_same_session_id_other_source(&data_dir);
+
+    let output = Command::new(binary())
+        .args([
+            "events",
+            "--source",
+            "claude_cli",
+            "--session",
+            CLAUDE_FIXTURE_SESSION_ID,
+            "--limit",
+            "2",
+        ])
+        .env("JOTTRACE_HOME", &data_dir)
+        .output()
+        .expect("run jottrace events");
+
+    assert!(
+        output.status.success(),
+        "stdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(
+        String::from_utf8(output.stdout).expect("events stdout should be utf-8"),
+        fixture_lines(CLAUDE_FIXTURE_SESSION, 2)
+    );
+
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn events_reports_unsupported_payload_codec() {
+    let root = temp_root("events-unsupported-codec");
+    let data_dir = root.join(".jottrace");
+    install_primary_claude_fixture(&root);
+
+    run_ingest(&root, &data_dir);
+    set_event_codec(&data_dir, 1, "zstd");
+
+    let output = Command::new(binary())
+        .args([
+            "events",
+            "--source",
+            "claude_cli",
+            "--session",
+            CLAUDE_FIXTURE_SESSION_ID,
+            "--limit",
+            "2",
+        ])
+        .env("JOTTRACE_HOME", &data_dir)
+        .output()
+        .expect("run jottrace events");
+
+    assert!(!output.status.success());
+    assert!(output.stdout.is_empty());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("jottrace events failed"));
+    assert!(stderr.contains("unsupported event payload codec: zstd"));
+
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn events_limit_ignores_unsupported_codec_outside_selected_range() {
+    let root = temp_root("events-limit-codec-range");
+    let data_dir = root.join(".jottrace");
+    install_primary_claude_fixture(&root);
+
+    run_ingest(&root, &data_dir);
+    set_event_codec(&data_dir, 2, "zstd");
+
+    let output = Command::new(binary())
+        .args([
+            "events",
+            "--source",
+            "claude_cli",
+            "--session",
+            CLAUDE_FIXTURE_SESSION_ID,
+            "--limit",
+            "2",
+        ])
+        .env("JOTTRACE_HOME", &data_dir)
+        .output()
+        .expect("run jottrace events");
+
+    assert!(
+        output.status.success(),
+        "stdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(
+        String::from_utf8(output.stdout).expect("events stdout should be utf-8"),
+        fixture_lines(CLAUDE_FIXTURE_SESSION, 2)
+    );
+
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn events_reports_missing_session_identity() {
+    let root = temp_root("events-missing-session");
+    let data_dir = root.join(".jottrace");
+    install_primary_claude_fixture(&root);
+
+    run_ingest(&root, &data_dir);
+
+    let output = Command::new(binary())
+        .args([
+            "events",
+            "--source",
+            "claude_cli",
+            "--session",
+            "missing-session",
+            "--limit",
+            "2",
+        ])
+        .env("JOTTRACE_HOME", &data_dir)
+        .output()
+        .expect("run jottrace events");
+
+    assert!(!output.status.success());
+    assert!(output.stdout.is_empty());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("jottrace events failed"));
+    assert!(
+        stderr.contains("session not found: source=claude_cli source_session_id=missing-session")
+    );
+
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn events_requires_an_explicit_source() {
+    let root = temp_root("events-requires-source");
+    let data_dir = root.join(".jottrace");
+
+    let output = Command::new(binary())
+        .args([
+            "events",
+            "--session",
+            CLAUDE_FIXTURE_SESSION_ID,
+            "--limit",
+            "1",
+        ])
+        .env("JOTTRACE_HOME", &data_dir)
+        .output()
+        .expect("run jottrace events without source");
+
+    assert!(!output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("events requires --source <source>"));
+    assert!(stderr.contains("jottrace events --help"));
+
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn events_requires_an_explicit_limit() {
+    let root = temp_root("events-requires-limit");
+    let data_dir = root.join(".jottrace");
+
+    let output = Command::new(binary())
+        .args([
+            "events",
+            "--source",
+            "claude_cli",
+            "--session",
+            CLAUDE_FIXTURE_SESSION_ID,
+        ])
+        .env("JOTTRACE_HOME", &data_dir)
+        .output()
+        .expect("run jottrace events without limit");
+
+    assert!(!output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("events requires --limit <n> or --all"));
+    assert!(stderr.contains("jottrace events --help"));
+
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn events_rejects_non_positive_limit() {
+    let root = temp_root("events-rejects-non-positive-limit");
+    let data_dir = root.join(".jottrace");
+
+    let output = Command::new(binary())
+        .args([
+            "events",
+            "--source",
+            "claude_cli",
+            "--session",
+            CLAUDE_FIXTURE_SESSION_ID,
+            "--limit",
+            "0",
+        ])
+        .env("JOTTRACE_HOME", &data_dir)
+        .output()
+        .expect("run jottrace events with zero limit");
+
+    assert!(!output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("invalid limit: 0; expected at least 1"));
+    assert!(stderr.contains("jottrace events --help"));
+
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn events_rejects_limit_and_all_together() {
+    let root = temp_root("events-rejects-limit-and-all");
+    let data_dir = root.join(".jottrace");
+
+    let output = Command::new(binary())
+        .args([
+            "events",
+            "--source",
+            "claude_cli",
+            "--session",
+            CLAUDE_FIXTURE_SESSION_ID,
+            "--limit",
+            "1",
+            "--all",
+        ])
+        .env("JOTTRACE_HOME", &data_dir)
+        .output()
+        .expect("run jottrace events with limit and all");
+
+    assert!(!output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("events accepts either --limit <n> or --all, not both"));
+    assert!(stderr.contains("jottrace events --help"));
+
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
 fn ingest_preserves_claude_cli_sidechain_as_child_session() {
     let root = temp_root("ingest-claude-sidechain");
     let data_dir = root.join(".jottrace");
@@ -855,6 +1170,51 @@ fn first_fixture_line() -> Vec<u8> {
         .next()
         .expect("first line")
         .to_vec()
+}
+
+fn fixture_lines(fixture_relative: &str, count: usize) -> String {
+    let contents = fs::read_to_string(reader_fixture(fixture_relative)).expect("read fixture");
+    let mut selected = contents.lines().take(count).collect::<Vec<_>>().join("\n");
+    selected.push('\n');
+    selected
+}
+
+fn insert_same_session_id_other_source(data_dir: &Path) {
+    let conn = Connection::open(db_path(data_dir)).expect("open preserved db");
+    let payload = br#"{"source":"codex_cli"}"#;
+    conn.execute(
+        "INSERT INTO sessions (source, source_session_id, event_count)
+         VALUES ('codex_cli', ?1, 1)",
+        [CLAUDE_FIXTURE_SESSION_ID],
+    )
+    .expect("insert same source_session_id for another source");
+    conn.execute(
+        "INSERT INTO events (session_id, generation, seq, payload, codec, payload_size)
+         VALUES (last_insert_rowid(), 0, 0, ?1, 'raw', ?2)",
+        rusqlite::params![payload, payload.len() as i64],
+    )
+    .expect("insert other source event");
+}
+
+fn set_event_codec(data_dir: &Path, seq: i64, codec: &str) {
+    let conn = Connection::open(db_path(data_dir)).expect("open preserved db");
+    let updated = conn
+        .execute(
+            "UPDATE events
+         SET codec = ?1
+         WHERE session_id = (
+             SELECT id FROM sessions
+             WHERE source = 'claude_cli' AND source_session_id = ?2
+         )
+           AND generation = 0
+           AND seq = ?3",
+            rusqlite::params![codec, CLAUDE_FIXTURE_SESSION_ID, seq],
+        )
+        .expect("set event codec");
+    assert_eq!(
+        updated, 1,
+        "expected to update one fixture event at seq {seq}"
+    )
 }
 
 fn run_ingest(home: &Path, data_dir: &Path) -> String {

@@ -18,6 +18,7 @@ fn main() -> ExitCode {
             ExitCode::SUCCESS
         }
         Some("doctor") => run_doctor_command(),
+        Some("events") => run_events_command(args),
         Some("ingest") => run_ingest_command(),
         Some("status") => run_status_command(),
         Some("web") => run_web_command(args),
@@ -31,6 +32,25 @@ fn main() -> ExitCode {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct EventsOptions {
+    source: String,
+    source_session_id: String,
+    selection: EventsSelection,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum EventsSelection {
+    All,
+    Limit(i64),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum EventsCommand {
+    Run(EventsOptions),
+    Help,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct WebOptions {
     port: u16,
@@ -41,6 +61,125 @@ struct WebOptions {
 enum WebCommand {
     Run(WebOptions),
     Help,
+}
+
+fn run_events_command(args: impl Iterator<Item = String>) -> ExitCode {
+    let options = match parse_events_command(args) {
+        Ok(EventsCommand::Run(options)) => options,
+        Ok(EventsCommand::Help) => {
+            print_events_help();
+            return ExitCode::SUCCESS;
+        }
+        Err(message) => {
+            eprintln!("{message}");
+            eprintln!("run `jottrace events --help` for usage");
+            return ExitCode::from(2);
+        }
+    };
+
+    let db_path = match jottrace::storage::db_path_from_env() {
+        Ok(db_path) => db_path,
+        Err(error) => {
+            eprintln!("jottrace events failed: {error}");
+            return ExitCode::FAILURE;
+        }
+    };
+    let limit = match options.selection {
+        EventsSelection::All => None,
+        EventsSelection::Limit(limit) => Some(limit),
+    };
+    let stdout = io::stdout();
+    let mut stdout = io::BufWriter::new(stdout.lock());
+    let result = jottrace::storage::for_each_decoded_event_payload_for_session(
+        &db_path,
+        &options.source,
+        &options.source_session_id,
+        limit,
+        |payload| {
+            stdout
+                .write_all(payload)
+                .and_then(|()| stdout.write_all(b"\n"))
+                .map_err(|source| jottrace::JottraceError::Output { source })
+        },
+    );
+
+    let result = result.and_then(|()| {
+        stdout
+            .flush()
+            .map_err(|source| jottrace::JottraceError::Output { source })
+    });
+    if let Err(error) = result {
+        if matches!(
+            &error,
+            jottrace::JottraceError::Output { source }
+                if source.kind() == io::ErrorKind::BrokenPipe
+        ) {
+            return ExitCode::SUCCESS;
+        }
+        eprintln!("jottrace events failed: {error}");
+        return ExitCode::FAILURE;
+    }
+
+    ExitCode::SUCCESS
+}
+
+fn parse_events_command(
+    mut args: impl Iterator<Item = String>,
+) -> std::result::Result<EventsCommand, String> {
+    let mut source_session_id = None;
+    let mut source = None;
+    let mut limit = None;
+    let mut all = false;
+
+    while let Some(arg) = args.next() {
+        match arg.as_str() {
+            "--help" | "-h" => return Ok(EventsCommand::Help),
+            "--all" => all = true,
+            "--source" => {
+                source = Some(
+                    args.next()
+                        .ok_or_else(|| "--source requires a value".to_string())?,
+                );
+            }
+            "--session" => {
+                source_session_id = Some(
+                    args.next()
+                        .ok_or_else(|| "--session requires a value".to_string())?,
+                );
+            }
+            "--limit" => {
+                let value = args
+                    .next()
+                    .ok_or_else(|| "--limit requires a value".to_string())?;
+                let parsed = value
+                    .parse::<i64>()
+                    .map_err(|_| format!("invalid limit: {value}"))?;
+                if parsed < 1 {
+                    return Err(format!("invalid limit: {value}; expected at least 1"));
+                }
+                limit = Some(parsed);
+            }
+            _ => return Err(format!("unknown events option: {arg}")),
+        }
+    }
+
+    let source = source.ok_or_else(|| "events requires --source <source>".to_string())?;
+    let source_session_id = source_session_id
+        .ok_or_else(|| "events requires --session <source_session_id>".to_string())?;
+    let selection = match (all, limit) {
+        (true, Some(_)) => {
+            return Err("events accepts either --limit <n> or --all, not both".to_string());
+        }
+        (true, None) => EventsSelection::All,
+        (false, Some(limit)) => EventsSelection::Limit(limit),
+        (false, None) => return Err("events requires --limit <n> or --all".to_string()),
+    };
+
+    Ok(EventsCommand::Run(EventsOptions {
+        source,
+        source_session_id,
+        selection,
+    }))
 }
 
 fn run_web_command(args: impl Iterator<Item = String>) -> ExitCode {
@@ -220,10 +359,29 @@ fn print_help() {
     println!();
     println!("Usage:");
     println!("  jottrace doctor");
+    println!(
+        "  jottrace events --source <source> --session <source_session_id> (--limit <n>|--all)"
+    );
     println!("  jottrace ingest");
     println!("  jottrace status");
     println!("  jottrace web [--port <port>] [--once]");
     println!("  jottrace --version");
+}
+
+fn print_events_help() {
+    println!("jottrace events");
+    println!("Print decoded event JSONL for one stored session.");
+    println!();
+    println!("Usage:");
+    println!(
+        "  jottrace events --source <source> --session <source_session_id> (--limit <n>|--all)"
+    );
+    println!();
+    println!("Options:");
+    println!("  --all                         Print every event in the selected session");
+    println!("  --source <source>             Stored source, for example claude_cli");
+    println!("  --session <source_session_id>  Stored source session id to inspect");
+    println!("  --limit <n>                   Maximum number of events to print");
 }
 
 fn print_web_help() {
