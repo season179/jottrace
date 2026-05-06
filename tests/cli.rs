@@ -614,6 +614,166 @@ fn ingest_preserves_claude_cli_fixture_and_status_reports_counts() {
 }
 
 #[test]
+fn ingest_compresses_large_payloads_and_events_decodes_original_jsonl() {
+    let root = temp_root("ingest-zstd-large-payload");
+    let data_dir = root.join(".jottrace");
+    let large_line = large_compressible_event_line();
+    let session_file = claude_project_dir(&root).join(format!("{CLAUDE_FIXTURE_SESSION_ID}.jsonl"));
+    write_text_file(&session_file, &format!("{large_line}\n"));
+
+    let ingest = run_ingest(&root, &data_dir);
+    assert!(ingest.contains("events: 1"));
+    assert!(ingest.contains("inserted_events: 1"));
+
+    let conn = Connection::open(db_path(&data_dir)).expect("open preserved db");
+    let (stored_payload, codec, payload_size): (Vec<u8>, String, i64) = conn
+        .query_row(
+            "SELECT payload, codec, payload_size
+             FROM events
+             WHERE seq = 0",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .expect("stored zstd event payload");
+    assert_eq!(codec, "zstd");
+    assert_eq!(payload_size, large_line.len() as i64);
+    assert!(
+        stored_payload.len() < large_line.len(),
+        "compressed payload should be smaller than source line"
+    );
+
+    let output = Command::new(binary())
+        .args([
+            "events",
+            "--source",
+            "claude_cli",
+            "--session",
+            CLAUDE_FIXTURE_SESSION_ID,
+            "--limit",
+            "1",
+        ])
+        .env("JOTTRACE_HOME", &data_dir)
+        .output()
+        .expect("run jottrace events");
+
+    assert!(
+        output.status.success(),
+        "stdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(
+        String::from_utf8(output.stdout).expect("events stdout should be utf-8"),
+        format!("{large_line}\n")
+    );
+
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn ingest_uses_zstd_threshold_and_events_decodes_mixed_raw_and_zstd_rows() {
+    let root = temp_root("ingest-zstd-threshold");
+    let data_dir = root.join(".jottrace");
+    let below_threshold = compressible_event_line_with_len(1023);
+    let at_threshold = compressible_event_line_with_len(1024);
+    let session_file = claude_project_dir(&root).join(format!("{CLAUDE_FIXTURE_SESSION_ID}.jsonl"));
+    write_text_file(
+        &session_file,
+        &format!("{below_threshold}\n{at_threshold}\n"),
+    );
+
+    let ingest = run_ingest(&root, &data_dir);
+    assert!(ingest.contains("events: 2"));
+    assert!(ingest.contains("inserted_events: 2"));
+
+    let conn = Connection::open(db_path(&data_dir)).expect("open preserved db");
+    let codecs = event_codecs(&conn);
+    assert_eq!(
+        codecs,
+        vec![(0, "raw".to_string()), (1, "zstd".to_string())]
+    );
+
+    let output = Command::new(binary())
+        .args([
+            "events",
+            "--source",
+            "claude_cli",
+            "--session",
+            CLAUDE_FIXTURE_SESSION_ID,
+            "--all",
+        ])
+        .env("JOTTRACE_HOME", &data_dir)
+        .output()
+        .expect("run jottrace events --all");
+
+    assert!(
+        output.status.success(),
+        "stdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(
+        String::from_utf8(output.stdout).expect("events stdout should be utf-8"),
+        format!("{below_threshold}\n{at_threshold}\n")
+    );
+
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn ingest_leaves_existing_raw_rows_unchanged_on_idempotent_rerun() {
+    let root = temp_root("ingest-existing-raw-idempotent");
+    let data_dir = root.join(".jottrace");
+    let line = large_compressible_event_line();
+    let session_file = claude_project_dir(&root).join(format!("{CLAUDE_FIXTURE_SESSION_ID}.jsonl"));
+    write_text_file(&session_file, &format!("{line}\n"));
+    set_modified(&session_file, 1_700_000_000);
+    insert_legacy_raw_session(&data_dir, &session_file, &line);
+
+    let ingest = run_ingest(&root, &data_dir);
+    assert!(ingest.contains("events: 1"));
+    assert!(ingest.contains("inserted_events: 0"));
+
+    let conn = Connection::open(db_path(&data_dir)).expect("open preserved db");
+    let (stored_payload, codec): (Vec<u8>, String) = conn
+        .query_row(
+            "SELECT payload, codec FROM events WHERE seq = 0",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .expect("legacy raw event payload");
+    assert_eq!(codec, "raw");
+    assert_eq!(stored_payload, line.as_bytes());
+
+    let output = Command::new(binary())
+        .args([
+            "events",
+            "--source",
+            "claude_cli",
+            "--session",
+            CLAUDE_FIXTURE_SESSION_ID,
+            "--limit",
+            "1",
+        ])
+        .env("JOTTRACE_HOME", &data_dir)
+        .output()
+        .expect("run jottrace events");
+
+    assert!(
+        output.status.success(),
+        "stdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(
+        String::from_utf8(output.stdout).expect("events stdout should be utf-8"),
+        format!("{line}\n")
+    );
+
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
 fn events_prints_decoded_payload_jsonl_for_bounded_session() {
     let root = temp_root("events-session-limit");
     let data_dir = root.join(".jottrace");
@@ -728,7 +888,7 @@ fn events_reports_unsupported_payload_codec() {
     install_primary_claude_fixture(&root);
 
     run_ingest(&root, &data_dir);
-    set_event_codec(&data_dir, 1, "zstd");
+    set_event_codec(&data_dir, 1, "snappy");
 
     let output = Command::new(binary())
         .args([
@@ -748,7 +908,7 @@ fn events_reports_unsupported_payload_codec() {
     assert!(output.stdout.is_empty());
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(stderr.contains("jottrace events failed"));
-    assert!(stderr.contains("unsupported event payload codec: zstd"));
+    assert!(stderr.contains("unsupported event payload codec: snappy"));
 
     let _ = fs::remove_dir_all(root);
 }
@@ -760,7 +920,7 @@ fn events_limit_ignores_unsupported_codec_outside_selected_range() {
     install_primary_claude_fixture(&root);
 
     run_ingest(&root, &data_dir);
-    set_event_codec(&data_dir, 2, "zstd");
+    set_event_codec(&data_dir, 2, "snappy");
 
     let output = Command::new(binary())
         .args([
@@ -1179,6 +1339,59 @@ fn fixture_lines(fixture_relative: &str, count: usize) -> String {
     selected
 }
 
+fn large_compressible_event_line() -> String {
+    compressible_event_line_with_len(1600)
+}
+
+fn compressible_event_line_with_len(len: usize) -> String {
+    let prefix = r#"{"type":"assistant","timestamp":"2026-05-05T01:00:00.000Z","cwd":"/Users/fixture/Workspace/jottrace","message":""#;
+    let suffix = r#""}"#;
+    assert!(len >= prefix.len() + suffix.len());
+    let line = format!(
+        "{prefix}{}{suffix}",
+        "x".repeat(len - prefix.len() - suffix.len())
+    );
+    assert_eq!(line.len(), len);
+    line
+}
+
+fn event_codecs(conn: &Connection) -> Vec<(i64, String)> {
+    let mut statement = conn
+        .prepare("SELECT seq, codec FROM events ORDER BY seq")
+        .expect("prepare event codecs");
+    statement
+        .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
+        .expect("query event codecs")
+        .map(|row| row.expect("event codec"))
+        .collect()
+}
+
+fn insert_legacy_raw_session(data_dir: &Path, session_file: &Path, line: &str) {
+    let conn = jottrace::storage::open_database(&db_path(data_dir)).expect("open database");
+    let file_size = fs::metadata(session_file)
+        .expect("legacy session metadata")
+        .len() as i64;
+    conn.execute(
+        "INSERT INTO sessions
+            (source, source_session_id, file_path, current_generation, file_mtime,
+             file_size, content_fingerprint, next_read_offset, event_count)
+         VALUES ('claude_cli', ?1, ?2, 0, ?3, ?4, 'legacy-raw', ?4, 1)",
+        rusqlite::params![
+            CLAUDE_FIXTURE_SESSION_ID,
+            session_file.to_string_lossy(),
+            1_700_000_000_i64,
+            file_size,
+        ],
+    )
+    .expect("insert legacy raw session");
+    conn.execute(
+        "INSERT INTO events (session_id, generation, seq, ts, payload, codec, payload_size)
+         VALUES (last_insert_rowid(), 0, 0, '2026-05-05T01:00:00.000Z', ?1, 'raw', ?2)",
+        rusqlite::params![line.as_bytes(), line.len() as i64],
+    )
+    .expect("insert legacy raw event");
+}
+
 fn insert_same_session_id_other_source(data_dir: &Path) {
     let conn = Connection::open(db_path(data_dir)).expect("open preserved db");
     let payload = br#"{"source":"codex_cli"}"#;
@@ -1198,6 +1411,8 @@ fn insert_same_session_id_other_source(data_dir: &Path) {
 
 fn set_event_codec(data_dir: &Path, seq: i64, codec: &str) {
     let conn = Connection::open(db_path(data_dir)).expect("open preserved db");
+    conn.execute("PRAGMA ignore_check_constraints = ON", [])
+        .expect("allow unsupported codec fixture");
     let updated = conn
         .execute(
             "UPDATE events

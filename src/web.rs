@@ -6,8 +6,8 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use crate::storage::{
-    IngestErrorSummary, LATEST_SCHEMA_VERSION, RAW_CODEC, sqlite_error,
-    unresolved_ingest_errors_from_connection,
+    IngestErrorSummary, LATEST_SCHEMA_VERSION, RAW_CODEC, ZSTD_CODEC, decode_event_payload_prefix,
+    sqlite_error, unresolved_ingest_errors_from_connection,
 };
 use crate::{JottraceError, Result};
 
@@ -88,7 +88,9 @@ struct LoadedSession {
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct SearchPattern {
     like: Option<String>,
+    payload_needle: Option<String>,
     include_payload: bool,
+    decoded_payload_session_ids: Vec<i64>,
 }
 
 pub struct WebServer {
@@ -229,7 +231,11 @@ impl WebServer {
 
 pub fn journal_view_for_path(path: &Path, query: &JournalQuery) -> Result<JournalView> {
     let conn = open_web_database(path)?;
-    let search = search_pattern(query.search.as_deref(), query.include_payload_search);
+    let mut search = search_pattern(query.search.as_deref(), query.include_payload_search);
+    if search.include_payload {
+        search.decoded_payload_session_ids =
+            decoded_payload_matching_session_ids(path, &conn, &search)?;
+    }
     let session_offset = bounded_offset(query.session_offset);
     let event_offset = bounded_offset(query.event_offset);
     let (loaded_sessions, session_page) = load_sessions(path, &conn, &search, session_offset)?;
@@ -414,29 +420,44 @@ fn load_sessions(
     offset: usize,
 ) -> Result<(Vec<LoadedSession>, PageInfo)> {
     let limit = SESSION_PAGE_SIZE;
+    let mut sql = String::from(
+        "SELECT sessions.id, sessions.source, sessions.source_session_id,
+                sessions.file_path, sessions.cwd, parent.source_session_id,
+                sessions.started_at, sessions.ended_at, sessions.event_count
+         FROM sessions
+         LEFT JOIN sessions AS parent ON parent.id = sessions.parent_session_id
+         WHERE ?1 IS NULL
+            OR sessions.source LIKE ?1 ESCAPE '\\'
+            OR sessions.source_session_id LIKE ?1 ESCAPE '\\'
+            OR COALESCE(sessions.cwd, '') LIKE ?1 ESCAPE '\\'
+            OR COALESCE(sessions.file_path, '') LIKE ?1 ESCAPE '\\'
+            OR (?2 = 1 AND EXISTS (
+                SELECT 1
+                FROM events
+                WHERE events.session_id = sessions.id
+                  AND events.codec = ?3
+                  AND CAST(substr(events.payload, 1, ?4) AS TEXT) LIKE ?1 ESCAPE '\\'
+            ))",
+    );
+    if !search.decoded_payload_session_ids.is_empty() {
+        sql.push_str(" OR sessions.id IN (");
+        for index in 0..search.decoded_payload_session_ids.len() {
+            if index > 0 {
+                sql.push_str(", ");
+            }
+            write!(sql, "{}", search.decoded_payload_session_ids[index])
+                .expect("write SQL session id");
+        }
+        sql.push(')');
+    }
+    sql.push_str(
+        " ORDER BY COALESCE(sessions.started_at, sessions.updated_at) DESC,
+                  sessions.id DESC
+          LIMIT ?5 OFFSET ?6",
+    );
+
     let mut statement = conn
-        .prepare(
-            "SELECT sessions.id, sessions.source, sessions.source_session_id,
-                    sessions.file_path, sessions.cwd, parent.source_session_id,
-                    sessions.started_at, sessions.ended_at, sessions.event_count
-             FROM sessions
-             LEFT JOIN sessions AS parent ON parent.id = sessions.parent_session_id
-             WHERE ?1 IS NULL
-                OR sessions.source LIKE ?1 ESCAPE '\\'
-                OR sessions.source_session_id LIKE ?1 ESCAPE '\\'
-                OR COALESCE(sessions.cwd, '') LIKE ?1 ESCAPE '\\'
-                OR COALESCE(sessions.file_path, '') LIKE ?1 ESCAPE '\\'
-                OR (?2 = 1 AND EXISTS (
-                    SELECT 1
-                    FROM events
-                    WHERE events.session_id = sessions.id
-                      AND events.codec = ?3
-                      AND CAST(substr(events.payload, 1, ?4) AS TEXT) LIKE ?1 ESCAPE '\\'
-                ))
-             ORDER BY COALESCE(sessions.started_at, sessions.updated_at) DESC,
-                      sessions.id DESC
-             LIMIT ?5 OFFSET ?6",
-        )
+        .prepare(&sql)
         .map_err(|source| sqlite_error(path, source))?;
 
     let mut sessions = statement
@@ -570,28 +591,46 @@ fn load_event_payload(
     session_id: i64,
     key: EventKey,
 ) -> Result<Option<JournalEvent>> {
-    conn.query_row(
-        "SELECT generation, seq, ts, codec, payload_size,
+    let row = conn
+        .query_row(
+            "SELECT generation, seq, ts, codec, payload_size,
                 CASE
                     WHEN codec = ?4 THEN substr(payload, 1, ?5)
-                    ELSE x''
+                    ELSE payload
                 END AS payload_preview
          FROM events
          WHERE session_id = ?1
            AND generation = ?2
            AND seq = ?3
          LIMIT 1",
-        params![
-            session_id,
-            key.generation,
-            key.seq,
-            RAW_CODEC,
-            PAYLOAD_PREVIEW_BYTES as i64,
-        ],
-        journal_event_with_payload_from_row,
+            params![
+                session_id,
+                key.generation,
+                key.seq,
+                RAW_CODEC,
+                PAYLOAD_PREVIEW_BYTES as i64,
+            ],
+            |row| {
+                let payload_size: i64 = row.get("payload_size")?;
+                Ok((
+                    row.get("generation")?,
+                    row.get("seq")?,
+                    row.get("ts")?,
+                    row.get("codec")?,
+                    payload_size as u64,
+                    row.get("payload_preview")?,
+                ))
+            },
+        )
+        .optional()
+        .map_err(|source| sqlite_error(path, source))?;
+
+    row.map(
+        |(generation, seq, ts, codec, payload_size, payload_preview)| {
+            journal_event_with_payload(generation, seq, ts, codec, payload_size, payload_preview)
+        },
     )
-    .optional()
-    .map_err(|source| sqlite_error(path, source))
+    .transpose()
 }
 
 fn loaded_session_from_row(row: &Row<'_>) -> rusqlite::Result<LoadedSession> {
@@ -615,13 +654,6 @@ fn journal_event_metadata_from_row(row: &Row<'_>) -> rusqlite::Result<JournalEve
     journal_event_from_row(row, |_, _| String::new())
 }
 
-fn journal_event_with_payload_from_row(row: &Row<'_>) -> rusqlite::Result<JournalEvent> {
-    let preview_bytes: Vec<u8> = row.get("payload_preview")?;
-    journal_event_from_row(row, |codec, payload_size| {
-        payload_preview(codec, payload_size, &preview_bytes)
-    })
-}
-
 fn journal_event_from_row(
     row: &Row<'_>,
     payload_preview_from: impl FnOnce(&str, u64) -> String,
@@ -639,17 +671,40 @@ fn journal_event_from_row(
     })
 }
 
+fn journal_event_with_payload(
+    generation: i64,
+    seq: i64,
+    ts: Option<String>,
+    codec: String,
+    payload_size: u64,
+    payload_preview: Vec<u8>,
+) -> Result<JournalEvent> {
+    Ok(JournalEvent {
+        generation,
+        seq,
+        ts,
+        payload_preview: payload_preview_for_codec(&codec, &payload_preview)?,
+        codec,
+        payload_size,
+    })
+}
+
 fn search_pattern(search: Option<&str>, include_payload_search: bool) -> SearchPattern {
     let Some(search) = search.map(str::trim).filter(|search| !search.is_empty()) else {
         return SearchPattern {
             like: None,
+            payload_needle: None,
             include_payload: false,
+            decoded_payload_session_ids: Vec::new(),
         };
     };
+    let include_payload =
+        include_payload_search && search.chars().count() >= MIN_PAYLOAD_SEARCH_CHARS;
     SearchPattern {
         like: Some(like_contains_pattern(search)),
-        include_payload: include_payload_search
-            && search.chars().count() >= MIN_PAYLOAD_SEARCH_CHARS,
+        payload_needle: include_payload.then(|| search.to_lowercase()),
+        include_payload,
+        decoded_payload_session_ids: Vec::new(),
     }
 }
 
@@ -676,15 +731,48 @@ fn like_contains_pattern(search: &str) -> String {
     pattern
 }
 
-fn payload_preview(codec: &str, payload_size: u64, payload: &[u8]) -> String {
-    if codec != RAW_CODEC {
-        return format!("[{codec} payload: {payload_size} bytes]");
-    }
+fn decoded_payload_matching_session_ids(
+    path: &Path,
+    conn: &Connection,
+    search: &SearchPattern,
+) -> Result<Vec<i64>> {
+    let Some(needle) = search.payload_needle.as_deref() else {
+        return Ok(Vec::new());
+    };
 
-    String::from_utf8_lossy(payload)
+    let mut statement = conn
+        .prepare(
+            "SELECT session_id, payload
+             FROM events
+             WHERE codec = ?1
+             ORDER BY session_id, generation, seq",
+        )
+        .map_err(|source| sqlite_error(path, source))?;
+    let mut rows = statement
+        .query(params![ZSTD_CODEC])
+        .map_err(|source| sqlite_error(path, source))?;
+    let mut session_ids = Vec::new();
+    while let Some(row) = rows.next().map_err(|source| sqlite_error(path, source))? {
+        let session_id: i64 = row.get(0).map_err(|source| sqlite_error(path, source))?;
+        if session_ids.contains(&session_id) {
+            continue;
+        }
+        let payload: Vec<u8> = row.get(1).map_err(|source| sqlite_error(path, source))?;
+        let decoded = decode_event_payload_prefix(&payload, ZSTD_CODEC, PAYLOAD_PREVIEW_BYTES)?;
+        let preview = String::from_utf8_lossy(&decoded).to_lowercase();
+        if preview.contains(needle) {
+            session_ids.push(session_id);
+        }
+    }
+    Ok(session_ids)
+}
+
+fn payload_preview_for_codec(codec: &str, payload: &[u8]) -> Result<String> {
+    let decoded = decode_event_payload_prefix(payload, codec, PAYLOAD_PREVIEW_BYTES)?;
+    Ok(String::from_utf8_lossy(&decoded)
         .chars()
         .take(PAYLOAD_PREVIEW_CHARS)
-        .collect()
+        .collect())
 }
 
 fn render_events(
