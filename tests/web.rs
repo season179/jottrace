@@ -3,7 +3,7 @@ mod common;
 use common::reader_fixture;
 use std::fs;
 use std::io::{BufRead, BufReader, ErrorKind, Read, Write};
-use std::net::{Shutdown, TcpStream};
+use std::net::{Shutdown, SocketAddr, TcpStream};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::thread;
@@ -129,6 +129,10 @@ fn web_home_page_renders_journal_data_and_search_controls() {
     assert!(html.contains("/Users/fixture/Workspace/jottrace"));
     assert!(html.contains("event count"));
     assert!(html.contains("Please implement the sanitized reader fixture corpus."));
+    assert!(html.contains("Export full decoded payload"));
+    assert!(html.contains(&format!(
+        "/payload?source=claude_cli&amp;session={CLAUDE_FIXTURE_SESSION_ID}&amp;event_generation=0&amp;event_seq=2"
+    )));
     assert!(html.contains("Unresolved ingest errors"));
     assert!(html.contains("invalid_json"));
     assert!(!html.contains("<script"));
@@ -206,6 +210,57 @@ fn web_journal_view_searches_and_previews_zstd_payloads() {
             .payload_preview
             .contains("zstd searchable phrase for the web journal")
     );
+
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn web_journal_view_searches_decoded_payloads_without_failing_on_corrupt_payloads() {
+    let root = temp_root("web-payload-search-decode-errors");
+    let data_dir = root.join(".jottrace");
+    let db_path = db_path(&data_dir);
+    jottrace::storage::status_for_path(&db_path).expect("initialize database");
+    insert_raw_payload_session(&db_path);
+    insert_zstd_session(&db_path);
+    insert_corrupt_zstd_session(&db_path);
+
+    assert_eq!(
+        payload_matching_session_ids(&db_path, "raw decoded search phrase"),
+        vec!["raw-payload-session".to_string()]
+    );
+    assert_eq!(
+        payload_matching_session_ids(&db_path, "zstd searchable phrase"),
+        vec!["zstd-session".to_string()]
+    );
+
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn web_home_page_renders_payload_decode_errors_without_hiding_session() {
+    let root = temp_root("web-payload-error");
+    let data_dir = root.join(".jottrace");
+    let db_path = db_path(&data_dir);
+    jottrace::storage::status_for_path(&db_path).expect("initialize database");
+    insert_unsupported_codec_session(&db_path);
+
+    let query = jottrace::web::JournalQuery {
+        selected_source: Some("claude_cli".to_string()),
+        selected_source_session_id: Some("unsupported-codec-session".to_string()),
+        expanded_event: Some(jottrace::web::EventKey {
+            generation: 0,
+            seq: 0,
+        }),
+        ..Default::default()
+    };
+    let view = jottrace::web::journal_view_for_path(&db_path, &query)
+        .expect("load web journal view with unsupported payload codec");
+    let html = jottrace::web::render_home_page(&view, &query);
+
+    assert!(html.contains("unsupported-codec-session"));
+    assert!(html.contains("Inspect 25 bytes snappy"));
+    assert!(html.contains("Payload unavailable"));
+    assert!(html.contains("unsupported event payload codec: snappy"));
 
     let _ = fs::remove_dir_all(root);
 }
@@ -418,27 +473,13 @@ fn web_server_serves_local_journal_html() {
     let address = server.local_addr().expect("local address");
     let handle = thread::spawn(move || server.serve_once().expect("serve one request"));
 
-    let mut stream = TcpStream::connect(address).expect("connect to web server");
-    write!(
-        stream,
-        "GET /?session={CLAUDE_FIXTURE_SESSION_ID}&q=sanitized%20reader&payload=1&event_generation=0&event_seq=2 HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n"
-    )
-    .expect("write http request");
-    stream
-        .shutdown(Shutdown::Write)
-        .expect("finish http request");
-    let mut response_bytes = Vec::new();
-    let mut buffer = [0; 1024];
-    loop {
-        match stream.read(&mut buffer) {
-            Ok(0) => break,
-            Ok(len) => response_bytes.extend_from_slice(&buffer[..len]),
-            Err(error) if error.kind() == ErrorKind::ConnectionReset => break,
-            Err(error) => panic!("read http response: {error}"),
-        }
-    }
+    let response = read_http_response(
+        address,
+        &format!(
+            "/?session={CLAUDE_FIXTURE_SESSION_ID}&q=sanitized%20reader&payload=1&event_generation=0&event_seq=2"
+        ),
+    );
     handle.join().expect("web server thread");
-    let response = String::from_utf8(response_bytes).expect("response should be utf-8");
 
     assert!(response.starts_with("HTTP/1.1 200 OK"));
     assert!(response.contains("Content-Type: text/html; charset=utf-8"));
@@ -447,6 +488,33 @@ fn web_server_serves_local_journal_html() {
         "response:\n{response}"
     );
     assert!(response.contains("Please implement the sanitized reader fixture corpus."));
+
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn web_server_exports_full_decoded_payload_text() {
+    let root = temp_root("web-server-payload-export");
+    let data_dir = root.join(".jottrace");
+    install_primary_claude_fixture(&root);
+    run_ingest(&root, &data_dir);
+
+    let server = jottrace::web::WebServer::bind(db_path(&data_dir), 0).expect("bind web server");
+    let address = server.local_addr().expect("local address");
+    let handle = thread::spawn(move || server.serve_once().expect("serve one request"));
+
+    let response = read_http_response(
+        address,
+        &format!(
+            "/payload?source=claude_cli&session={CLAUDE_FIXTURE_SESSION_ID}&event_generation=0&event_seq=2"
+        ),
+    );
+    handle.join().expect("web server thread");
+
+    assert!(response.starts_with("HTTP/1.1 200 OK"));
+    assert!(response.contains("Content-Type: text/plain; charset=utf-8"));
+    assert!(response.contains("Please implement the sanitized reader fixture corpus."));
+    assert!(!response.contains("<!doctype html>"));
 
     let _ = fs::remove_dir_all(root);
 }
@@ -540,6 +608,29 @@ fn payload_matching_session_ids(db_path: &Path, search: &str) -> Vec<String> {
         .collect()
 }
 
+fn read_http_response(address: SocketAddr, target: &str) -> String {
+    let mut stream = TcpStream::connect(address).expect("connect to web server");
+    write!(
+        stream,
+        "GET {target} HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n"
+    )
+    .expect("write http request");
+    stream
+        .shutdown(Shutdown::Write)
+        .expect("finish http request");
+    let mut response_bytes = Vec::new();
+    let mut buffer = [0; 1024];
+    loop {
+        match stream.read(&mut buffer) {
+            Ok(0) => break,
+            Ok(len) => response_bytes.extend_from_slice(&buffer[..len]),
+            Err(error) if error.kind() == ErrorKind::ConnectionReset => break,
+            Err(error) => panic!("read http response: {error}"),
+        }
+    }
+    String::from_utf8(response_bytes).expect("response should be utf-8")
+}
+
 fn run_ingest(home: &Path, data_dir: &Path) {
     let output = Command::new(binary())
         .arg("ingest")
@@ -628,22 +719,80 @@ fn populate_large_journal(db_path: &Path) {
 }
 
 fn insert_zstd_session(db_path: &Path) {
-    let conn = Connection::open(db_path).expect("open zstd web database");
     let payload =
         r#"{"message":"zstd searchable phrase for the web journal with decoded preview"}"#;
     let compressed = zstd::stream::encode_all(payload.as_bytes(), 0).expect("compress payload");
+    insert_payload_session(
+        db_path,
+        "zstd-session",
+        &compressed,
+        "zstd",
+        payload.len(),
+        false,
+    );
+}
+
+fn insert_raw_payload_session(db_path: &Path) {
+    let payload = r#"{"message":"raw decoded search phrase for the web journal"}"#;
+    insert_payload_session(
+        db_path,
+        "raw-payload-session",
+        payload.as_bytes(),
+        "raw",
+        payload.len(),
+        false,
+    );
+}
+
+fn insert_corrupt_zstd_session(db_path: &Path) {
+    let payload = b"not a zstd frame";
+    insert_payload_session(
+        db_path,
+        "corrupt-zstd-session",
+        payload.as_slice(),
+        "zstd",
+        payload.len(),
+        false,
+    );
+}
+
+fn insert_unsupported_codec_session(db_path: &Path) {
+    let payload = br#"{"message":"unsupported"}"#;
+    insert_payload_session(
+        db_path,
+        "unsupported-codec-session",
+        payload.as_slice(),
+        "snappy",
+        payload.len(),
+        true,
+    );
+}
+
+fn insert_payload_session(
+    db_path: &Path,
+    source_session_id: &str,
+    payload: &[u8],
+    codec: &str,
+    payload_size: usize,
+    ignore_check_constraints: bool,
+) {
+    let conn = Connection::open(db_path).expect("open payload fixture database");
+    if ignore_check_constraints {
+        conn.execute("PRAGMA ignore_check_constraints = ON", [])
+            .expect("allow unsupported codec fixture");
+    }
     conn.execute(
         "INSERT INTO sessions (source, source_session_id, event_count, started_at)
-         VALUES ('claude_cli', 'zstd-session', 1, '2026-05-05T01:00:00Z')",
-        [],
+         VALUES ('claude_cli', ?1, 1, '2026-05-05T01:00:00Z')",
+        [source_session_id],
     )
-    .expect("insert zstd session");
+    .expect("insert payload fixture session");
     conn.execute(
         "INSERT INTO events (session_id, generation, seq, ts, payload, codec, payload_size)
-         VALUES (last_insert_rowid(), 0, 0, '2026-05-05T01:00:00Z', ?1, 'zstd', ?2)",
-        params![compressed, payload.len() as i64],
+         VALUES (last_insert_rowid(), 0, 0, '2026-05-05T01:00:00Z', ?1, ?2, ?3)",
+        params![payload, codec, payload_size as i64],
     )
-    .expect("insert zstd event");
+    .expect("insert payload fixture event");
 }
 
 fn fixture_timestamp(start_hour: usize, index: usize, second: usize) -> String {
