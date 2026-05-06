@@ -311,6 +311,63 @@ fn upgrade_is_an_update_alias() {
     let _ = fs::remove_dir_all(root);
 }
 
+#[test]
+fn update_help_aliases_print_usage_without_update_environment() {
+    for command in ["update", "upgrade"] {
+        let long = Command::new(binary())
+            .args([command, "--help"])
+            .output()
+            .unwrap_or_else(|error| panic!("run jottrace {command} --help: {error}"));
+        let short = Command::new(binary())
+            .args([command, "-h"])
+            .output()
+            .unwrap_or_else(|error| panic!("run jottrace {command} -h: {error}"));
+
+        assert!(
+            long.status.success(),
+            "{command} --help stdout:\n{}\nstderr:\n{}",
+            String::from_utf8_lossy(&long.stdout),
+            String::from_utf8_lossy(&long.stderr)
+        );
+        assert!(
+            short.status.success(),
+            "{command} -h stdout:\n{}\nstderr:\n{}",
+            String::from_utf8_lossy(&short.stdout),
+            String::from_utf8_lossy(&short.stderr)
+        );
+        assert_eq!(
+            long.stdout, short.stdout,
+            "{command} help aliases should match"
+        );
+        assert!(long.stderr.is_empty(), "{command} help should not warn");
+
+        let stdout = String::from_utf8_lossy(&long.stdout);
+        assert!(stdout.contains("jottrace update"));
+        assert!(stdout.contains("Usage:"));
+        assert!(stdout.contains("jottrace upgrade"));
+    }
+}
+
+#[test]
+fn update_rejects_unknown_options_before_running_update() {
+    let output = Command::new(binary())
+        .args(["update", "--definitely-not-an-option"])
+        .output()
+        .expect("run jottrace update with unknown option");
+
+    assert_eq!(
+        output.status.code(),
+        Some(2),
+        "stdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(output.stdout.is_empty());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("unknown update option: --definitely-not-an-option"));
+    assert!(stderr.contains("jottrace update --help"));
+}
+
 fn create_invalid_release_artifact(
     root: &std::path::Path,
     releases: &std::path::Path,

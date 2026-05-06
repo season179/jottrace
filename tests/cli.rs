@@ -44,6 +44,154 @@ fn version_prints_package_version() {
 }
 
 #[test]
+fn top_level_help_aliases_print_the_same_usage() {
+    let long = Command::new(binary())
+        .arg("--help")
+        .output()
+        .expect("run jottrace --help");
+    let short = Command::new(binary())
+        .arg("-h")
+        .output()
+        .expect("run jottrace -h");
+
+    assert!(long.status.success());
+    assert!(short.status.success());
+    assert!(long.stderr.is_empty());
+    assert!(short.stderr.is_empty());
+    assert_eq!(long.stdout, short.stdout);
+
+    let stdout = String::from_utf8_lossy(&long.stdout);
+    assert!(stdout.contains("Usage:"));
+    assert!(stdout.contains("jottrace doctor"));
+    assert!(stdout.contains("jottrace web [--port <port>] [--once]"));
+    assert!(stdout.contains("jottrace <command> --help"));
+}
+
+#[test]
+fn doctor_help_aliases_print_command_help_without_initializing_database() {
+    let root = temp_root("doctor-help");
+    let data_dir = root.join(".jottrace");
+
+    for help_arg in ["-h", "--help"] {
+        let output = Command::new(binary())
+            .args(["doctor", help_arg])
+            .env("JOTTRACE_HOME", &data_dir)
+            .output()
+            .expect("run jottrace doctor help");
+
+        assert!(
+            output.status.success(),
+            "stdout:\n{}\nstderr:\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(stdout.contains("jottrace doctor"));
+        assert!(stdout.contains("Usage:"));
+        assert!(stdout.contains("Check the journal directory"));
+        assert!(
+            !db_path(&data_dir).exists(),
+            "help should not initialize the local database"
+        );
+    }
+
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn subcommand_help_aliases_print_command_specific_usage() {
+    let cases = [
+        ("doctor", "Check the journal directory"),
+        ("ingest", "Preserve Claude and Codex JSONL sessions"),
+        ("status", "Print journal schema"),
+        ("compact", "--batch-size <n>"),
+        ("events", "--source <source>"),
+        ("web", "--port <port>"),
+    ];
+
+    for (command, expected_detail) in cases {
+        let long = Command::new(binary())
+            .args([command, "--help"])
+            .output()
+            .unwrap_or_else(|error| panic!("run jottrace {command} --help: {error}"));
+        let short = Command::new(binary())
+            .args([command, "-h"])
+            .output()
+            .unwrap_or_else(|error| panic!("run jottrace {command} -h: {error}"));
+
+        assert!(
+            long.status.success(),
+            "{command} --help stdout:\n{}\nstderr:\n{}",
+            String::from_utf8_lossy(&long.stdout),
+            String::from_utf8_lossy(&long.stderr)
+        );
+        assert!(
+            short.status.success(),
+            "{command} -h stdout:\n{}\nstderr:\n{}",
+            String::from_utf8_lossy(&short.stdout),
+            String::from_utf8_lossy(&short.stderr)
+        );
+        assert_eq!(
+            long.stdout, short.stdout,
+            "{command} help aliases should match"
+        );
+        assert!(long.stderr.is_empty(), "{command} help should not warn");
+
+        let stdout = String::from_utf8_lossy(&long.stdout);
+        assert!(stdout.contains(&format!("jottrace {command}")));
+        assert!(stdout.contains("Usage:"));
+        assert!(
+            stdout.contains(expected_detail),
+            "{command} help:\n{stdout}"
+        );
+    }
+}
+
+#[test]
+fn unknown_subcommand_options_exit_with_targeted_help_hint() {
+    for command in ["doctor", "ingest", "status", "compact", "events", "web"] {
+        let root = temp_root(&format!("{command}-unknown-option"));
+        let data_dir = root.join(".jottrace");
+        let output = Command::new(binary())
+            .args([command, "--definitely-not-an-option"])
+            .env("JOTTRACE_HOME", &data_dir)
+            .output()
+            .unwrap_or_else(|error| {
+                panic!("run jottrace {command} --definitely-not-an-option: {error}")
+            });
+
+        assert_eq!(
+            output.status.code(),
+            Some(2),
+            "{command} unknown option stdout:\n{}\nstderr:\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(
+            output.stdout.is_empty(),
+            "{command} should not print stdout"
+        );
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            stderr.contains(&format!(
+                "unknown {command} option: --definitely-not-an-option"
+            )),
+            "{command} stderr:\n{stderr}"
+        );
+        assert!(
+            stderr.contains(&format!("jottrace {command} --help")),
+            "{command} stderr:\n{stderr}"
+        );
+        assert!(
+            !db_path(&data_dir).exists(),
+            "usage errors should not initialize the database"
+        );
+
+        let _ = fs::remove_dir_all(root);
+    }
+}
+
+#[test]
 fn doctor_creates_private_data_dir() {
     let root = temp_root("doctor-ok");
     let data_dir = root.join(".jottrace");

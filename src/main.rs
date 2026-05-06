@@ -18,10 +18,10 @@ fn main() -> ExitCode {
             ExitCode::SUCCESS
         }
         Some("compact") => run_compact_command(args),
-        Some("doctor") => run_doctor_command(),
+        Some("doctor") => run_doctor_command(args),
         Some("events") => run_events_command(args),
-        Some("ingest") => run_ingest_command(),
-        Some("status") => run_status_command(),
+        Some("ingest") => run_ingest_command(args),
+        Some("status") => run_status_command(args),
         Some("update") | Some("upgrade") => run_update_command(args),
         Some("web") => run_web_command(args),
         Some(command) => {
@@ -32,12 +32,6 @@ fn main() -> ExitCode {
             ExitCode::from(2)
         }
     }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum UpdateCommand {
-    Run,
-    Help,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -74,6 +68,12 @@ enum WebCommand {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum CompactCommand {
     Run(jottrace::CompactOptions),
+    Help,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SimpleCommand {
+    Run,
     Help,
 }
 
@@ -273,7 +273,20 @@ fn parse_web_command(
     Ok(WebCommand::Run(options))
 }
 
-fn run_ingest_command() -> ExitCode {
+fn run_ingest_command(args: impl Iterator<Item = String>) -> ExitCode {
+    match parse_simple_command("ingest", args) {
+        Ok(SimpleCommand::Help) => {
+            print_ingest_help();
+            return ExitCode::SUCCESS;
+        }
+        Ok(SimpleCommand::Run) => {}
+        Err(message) => {
+            eprintln!("{message}");
+            eprintln!("run `jottrace ingest --help` for usage");
+            return ExitCode::from(2);
+        }
+    }
+
     match jottrace::run_ingest() {
         Ok(report) => {
             println!("jottrace ingest");
@@ -295,13 +308,24 @@ fn run_ingest_command() -> ExitCode {
     }
 }
 
+fn parse_simple_command(
+    command: &str,
+    mut args: impl Iterator<Item = String>,
+) -> std::result::Result<SimpleCommand, String> {
+    match args.next() {
+        None => Ok(SimpleCommand::Run),
+        Some(arg) if arg == "--help" || arg == "-h" => Ok(SimpleCommand::Help),
+        Some(arg) => Err(format!("unknown {command} option: {arg}")),
+    }
+}
+
 fn run_update_command(args: impl Iterator<Item = String>) -> ExitCode {
-    match parse_update_command(args) {
-        Ok(UpdateCommand::Help) => {
+    match parse_simple_command("update", args) {
+        Ok(SimpleCommand::Help) => {
             print_update_help();
             ExitCode::SUCCESS
         }
-        Ok(UpdateCommand::Run) => match jottrace::run_update() {
+        Ok(SimpleCommand::Run) => match jottrace::run_update() {
             Ok(report) => {
                 println!("jottrace update");
                 println!("current_version: {}", report.current_version);
@@ -320,16 +344,6 @@ fn run_update_command(args: impl Iterator<Item = String>) -> ExitCode {
             eprintln!("run `jottrace update --help` for usage");
             ExitCode::from(2)
         }
-    }
-}
-
-fn parse_update_command(
-    mut args: impl Iterator<Item = String>,
-) -> std::result::Result<UpdateCommand, String> {
-    match args.next() {
-        None => Ok(UpdateCommand::Run),
-        Some(arg) if arg == "--help" || arg == "-h" => Ok(UpdateCommand::Help),
-        Some(arg) => Err(format!("unknown update option: {arg}")),
     }
 }
 
@@ -471,7 +485,20 @@ fn compact_mode_name(mode: jottrace::CompactMode) -> &'static str {
     }
 }
 
-fn run_doctor_command() -> ExitCode {
+fn run_doctor_command(args: impl Iterator<Item = String>) -> ExitCode {
+    match parse_simple_command("doctor", args) {
+        Ok(SimpleCommand::Help) => {
+            print_doctor_help();
+            return ExitCode::SUCCESS;
+        }
+        Ok(SimpleCommand::Run) => {}
+        Err(message) => {
+            eprintln!("{message}");
+            eprintln!("run `jottrace doctor --help` for usage");
+            return ExitCode::from(2);
+        }
+    }
+
     // Keep the CLI responsible for presentation while the library owns the
     // filesystem checks. That makes future commands easier to test directly.
     match jottrace::run_doctor() {
@@ -520,7 +547,20 @@ fn run_doctor_command() -> ExitCode {
     }
 }
 
-fn run_status_command() -> ExitCode {
+fn run_status_command(args: impl Iterator<Item = String>) -> ExitCode {
+    match parse_simple_command("status", args) {
+        Ok(SimpleCommand::Help) => {
+            print_status_help();
+            return ExitCode::SUCCESS;
+        }
+        Ok(SimpleCommand::Run) => {}
+        Err(message) => {
+            eprintln!("{message}");
+            eprintln!("run `jottrace status --help` for usage");
+            return ExitCode::from(2);
+        }
+    }
+
     match jottrace::run_status() {
         Ok(report) => {
             println!("jottrace status");
@@ -559,6 +599,7 @@ fn print_help() {
     println!("  jottrace upgrade");
     println!("  jottrace web [--port <port>] [--once]");
     println!("  jottrace --version");
+    println!("  jottrace <command> --help");
 }
 
 fn print_compact_help() {
@@ -588,6 +629,30 @@ fn print_events_help() {
     println!("  --source <source>             Stored source, for example claude_cli");
     println!("  --session <source_session_id>  Stored source session id to inspect");
     println!("  --limit <n>                   Maximum number of events to print");
+}
+
+fn print_doctor_help() {
+    println!("jottrace doctor");
+    println!("Check the journal directory, database, permissions, and ingest errors.");
+    println!();
+    println!("Usage:");
+    println!("  jottrace doctor");
+}
+
+fn print_ingest_help() {
+    println!("jottrace ingest");
+    println!("Preserve Claude and Codex JSONL sessions into the local journal.");
+    println!();
+    println!("Usage:");
+    println!("  jottrace ingest");
+}
+
+fn print_status_help() {
+    println!("jottrace status");
+    println!("Print journal schema, session, event, and ingest-error counts.");
+    println!();
+    println!("Usage:");
+    println!("  jottrace status");
 }
 
 fn print_update_help() {
