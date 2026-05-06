@@ -6,7 +6,7 @@ use std::time::Duration;
 use crate::{JottraceError, Result, data_dir_from_env, ensure_private_file};
 
 pub const DB_FILE_NAME: &str = "db.sqlite";
-pub const LATEST_SCHEMA_VERSION: i64 = 5;
+pub const LATEST_SCHEMA_VERSION: i64 = 6;
 pub(crate) const RAW_CODEC: &str = "raw";
 pub(crate) const ZSTD_CODEC: &str = "zstd";
 /// Minimum source payload size considered for zstd. Keeping this named makes
@@ -33,6 +33,10 @@ const MIGRATIONS: &[Migration] = &[
     Migration {
         version: 5,
         sql: include_str!("migrations/005_supported_zstd_codec_index.sql"),
+    },
+    Migration {
+        version: 6,
+        sql: include_str!("migrations/006_raw_event_compaction_index.sql"),
     },
 ];
 const UNRESOLVED_INGEST_ERROR_COUNT_SQL: &str =
@@ -504,10 +508,12 @@ mod tests {
         assert_sql_object(&conn, "index", "idx_ingest_errors_unresolved");
         assert_sql_object(&conn, "index", "idx_ingest_errors_unresolved_last_seen");
         assert_sql_object(&conn, "index", "idx_events_unsupported_codec");
+        assert_sql_object(&conn, "index", "idx_events_raw_compaction");
         assert!(
             index_sql(&conn, "idx_events_unsupported_codec")
                 .contains("codec NOT IN ('raw', 'zstd')")
         );
+        assert!(index_sql(&conn, "idx_events_raw_compaction").contains("codec = 'raw'"));
 
         assert!(columns(&conn, "sessions").contains(&"id".to_string()));
         assert!(columns(&conn, "sessions").contains(&"source_session_id".to_string()));
@@ -751,6 +757,53 @@ mod tests {
             index_sql(&conn, "idx_events_unsupported_codec")
                 .contains("codec NOT IN ('raw', 'zstd')")
         );
+        assert!(index_sql(&conn, "idx_events_raw_compaction").contains("codec = 'raw'"));
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn migrates_v5_database_to_add_raw_compaction_index() {
+        let root = temp_root("storage-upgrade-v5-raw-compaction-index");
+        let db_path = root.join(DB_FILE_NAME);
+        ensure_private_file(&db_path).expect("create db file");
+
+        {
+            let conn = Connection::open(&db_path).expect("open v5 db");
+            conn.execute_batch(include_str!("migrations/001_initial_schema.sql"))
+                .expect("create v1 schema");
+            conn.execute_batch(include_str!(
+                "migrations/002_ingest_error_recency_index.sql"
+            ))
+            .expect("create v2 schema");
+            conn.execute_batch(include_str!(
+                "migrations/003_claude_sidechain_source_ids.sql"
+            ))
+            .expect("create v3 schema");
+            conn.execute_batch(include_str!(
+                "migrations/004_unsupported_event_codec_index.sql"
+            ))
+            .expect("create v4 schema");
+            conn.execute_batch(include_str!(
+                "migrations/005_supported_zstd_codec_index.sql"
+            ))
+            .expect("create v5 schema");
+            assert!(!sql_object_exists(
+                &conn,
+                "index",
+                "idx_events_raw_compaction"
+            ));
+            conn.pragma_update(None, "user_version", 5)
+                .expect("set user_version");
+        }
+
+        let conn = open_database(&db_path).expect("migrate db");
+
+        assert_eq!(
+            user_version(&db_path, &conn).expect("user_version"),
+            LATEST_SCHEMA_VERSION
+        );
+        assert!(index_sql(&conn, "idx_events_raw_compaction").contains("codec = 'raw'"));
 
         let _ = fs::remove_dir_all(root);
     }
@@ -883,6 +936,13 @@ mod tests {
     }
 
     fn assert_sql_object(conn: &Connection, kind: &str, name: &str) {
+        assert!(
+            sql_object_exists(conn, kind, name),
+            "{kind} {name} should exist"
+        );
+    }
+
+    fn sql_object_exists(conn: &Connection, kind: &str, name: &str) -> bool {
         let found: i64 = conn
             .query_row(
                 "SELECT COUNT(*) FROM sqlite_master WHERE type = ?1 AND name = ?2",
@@ -890,7 +950,7 @@ mod tests {
                 |row| row.get(0),
             )
             .expect("query sqlite_master");
-        assert_eq!(found, 1, "{kind} {name} should exist");
+        found == 1
     }
 
     fn columns(conn: &Connection, table: &str) -> Vec<String> {

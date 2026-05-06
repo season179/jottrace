@@ -17,6 +17,7 @@ fn main() -> ExitCode {
             println!("jottrace {}", env!("CARGO_PKG_VERSION"));
             ExitCode::SUCCESS
         }
+        Some("compact") => run_compact_command(args),
         Some("doctor") => run_doctor_command(),
         Some("events") => run_events_command(args),
         Some("ingest") => run_ingest_command(),
@@ -60,6 +61,12 @@ struct WebOptions {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum WebCommand {
     Run(WebOptions),
+    Help,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CompactCommand {
+    Run(jottrace::CompactOptions),
     Help,
 }
 
@@ -281,6 +288,144 @@ fn run_ingest_command() -> ExitCode {
     }
 }
 
+fn run_compact_command(args: impl Iterator<Item = String>) -> ExitCode {
+    let options = match parse_compact_command(args) {
+        Ok(CompactCommand::Run(options)) => options,
+        Ok(CompactCommand::Help) => {
+            print_compact_help();
+            return ExitCode::SUCCESS;
+        }
+        Err(message) => {
+            eprintln!("{message}");
+            eprintln!("run `jottrace compact --help` for usage");
+            return ExitCode::from(2);
+        }
+    };
+
+    match jottrace::run_compact(options) {
+        Ok(report) => {
+            println!("jottrace compact");
+            println!("db: {}", report.db_path.display());
+            println!("mode: {}", compact_mode_name(report.mode));
+            if report.mode != jottrace::CompactMode::Vacuum {
+                println!("batch_size: {}", report.batch_size);
+            }
+            println!("raw_events_before: {}", report.raw_events_before);
+            println!("zstd_events_before: {}", report.zstd_events_before);
+            println!("raw_events_after: {}", report.raw_events_after);
+            println!("zstd_events_after: {}", report.zstd_events_after);
+            println!(
+                "unsupported_codec_events: {}",
+                report.unsupported_codec_events
+            );
+            println!("eligible_raw_events: {}", report.eligible_raw_events);
+            println!("converted_events: {}", report.converted_events);
+            println!("skipped_raw_events: {}", report.skipped_raw_events);
+            println!("skipped_small_events: {}", report.skipped_small_events);
+            println!(
+                "skipped_not_smaller_events: {}",
+                report.skipped_not_smaller_events
+            );
+            println!(
+                "skipped_round_trip_failed_events: {}",
+                report.skipped_round_trip_failed_events
+            );
+            println!("stored_bytes_before: {}", report.stored_bytes_before);
+            println!("stored_bytes_after: {}", report.stored_bytes_after);
+            println!("estimated_bytes_saved: {}", report.estimated_bytes_saved);
+            println!(
+                "sqlite_reclaimable_bytes_before: {}",
+                report.sqlite_reclaimable_bytes_before
+            );
+            println!(
+                "sqlite_reclaimable_bytes: {}",
+                report.sqlite_reclaimable_bytes
+            );
+            println!(
+                "unresolved_ingest_errors: {}",
+                report.unresolved_ingest_errors
+            );
+            if report.mode == jottrace::CompactMode::DryRun {
+                println!(
+                    "next: rerun with `jottrace compact --apply` to rewrite eligible payloads"
+                );
+            }
+            println!(
+                "disk_reclaim: after applying, run `jottrace compact --vacuum` to reclaim free SQLite pages"
+            );
+            ExitCode::SUCCESS
+        }
+        Err(error) => {
+            eprintln!("jottrace compact failed: {error}");
+            ExitCode::FAILURE
+        }
+    }
+}
+
+fn parse_compact_command(
+    mut args: impl Iterator<Item = String>,
+) -> std::result::Result<CompactCommand, String> {
+    let mut options = jottrace::CompactOptions::default();
+    let mut explicit_mode = false;
+    let mut batch_size_provided = false;
+
+    while let Some(arg) = args.next() {
+        match arg.as_str() {
+            "--help" | "-h" => return Ok(CompactCommand::Help),
+            "--apply" => {
+                if explicit_mode {
+                    return Err("compact accepts only one of --apply or --vacuum".to_string());
+                }
+                explicit_mode = true;
+                options.mode = jottrace::CompactMode::Apply;
+            }
+            "--vacuum" => {
+                if explicit_mode {
+                    return Err("compact accepts only one of --apply or --vacuum".to_string());
+                }
+                if batch_size_provided {
+                    return Err("compact --vacuum does not accept --batch-size".to_string());
+                }
+                explicit_mode = true;
+                options.mode = jottrace::CompactMode::Vacuum;
+            }
+            "--batch-size" => {
+                if options.mode == jottrace::CompactMode::Vacuum {
+                    return Err("compact --vacuum does not accept --batch-size".to_string());
+                }
+                let value = args
+                    .next()
+                    .ok_or_else(|| "--batch-size requires a value".to_string())?;
+                let parsed = value
+                    .parse::<usize>()
+                    .map_err(|_| format!("invalid batch size: {value}"))?;
+                if parsed < 1 {
+                    return Err(format!("invalid batch size: {value}; expected at least 1"));
+                }
+                if parsed > jottrace::compact::MAX_COMPACT_BATCH_SIZE {
+                    return Err(format!(
+                        "invalid batch size: {value}; expected at most {}",
+                        jottrace::compact::MAX_COMPACT_BATCH_SIZE
+                    ));
+                }
+                options.batch_size = parsed;
+                batch_size_provided = true;
+            }
+            _ => return Err(format!("unknown compact option: {arg}")),
+        }
+    }
+
+    Ok(CompactCommand::Run(options))
+}
+
+fn compact_mode_name(mode: jottrace::CompactMode) -> &'static str {
+    match mode {
+        jottrace::CompactMode::DryRun => "dry-run",
+        jottrace::CompactMode::Apply => "apply",
+        jottrace::CompactMode::Vacuum => "vacuum",
+    }
+}
+
 fn run_doctor_command() -> ExitCode {
     // Keep the CLI responsible for presentation while the library owns the
     // filesystem checks. That makes future commands easier to test directly.
@@ -358,6 +503,7 @@ fn print_help() {
     println!("Preserve AI coding-session transcripts into a local journal.");
     println!();
     println!("Usage:");
+    println!("  jottrace compact [--apply|--vacuum] [--batch-size <n>]");
     println!("  jottrace doctor");
     println!(
         "  jottrace events --source <source> --session <source_session_id> (--limit <n>|--all)"
@@ -366,6 +512,19 @@ fn print_help() {
     println!("  jottrace status");
     println!("  jottrace web [--port <port>] [--once]");
     println!("  jottrace --version");
+}
+
+fn print_compact_help() {
+    println!("jottrace compact");
+    println!("Report or rewrite eligible raw event payloads as zstd.");
+    println!();
+    println!("Usage:");
+    println!("  jottrace compact [--apply|--vacuum] [--batch-size <n>]");
+    println!();
+    println!("Options:");
+    println!("  --apply           Rewrite eligible raw payload rows in bounded batches");
+    println!("  --vacuum          Reclaim free SQLite pages after compaction");
+    println!("  --batch-size <n>  Raw rows to inspect per batch (default: 1000, max: 10000)");
 }
 
 fn print_events_help() {
