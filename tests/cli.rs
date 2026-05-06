@@ -774,6 +774,218 @@ fn ingest_leaves_existing_raw_rows_unchanged_on_idempotent_rerun() {
 }
 
 #[test]
+fn compact_dry_run_reports_savings_without_mutating_payloads() {
+    let root = temp_root("compact-dry-run");
+    let data_dir = root.join(".jottrace");
+    let line = large_compressible_event_line();
+    let session_file = claude_project_dir(&root).join(format!("{CLAUDE_FIXTURE_SESSION_ID}.jsonl"));
+    write_text_file(&session_file, &format!("{line}\n"));
+    set_modified(&session_file, 1_700_000_000);
+    insert_legacy_raw_session(&data_dir, &session_file, &line);
+
+    let output = Command::new(binary())
+        .arg("compact")
+        .env("JOTTRACE_HOME", &data_dir)
+        .output()
+        .expect("run jottrace compact");
+
+    assert!(
+        output.status.success(),
+        "stdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8(output.stdout).expect("compact stdout should be utf-8");
+    assert!(stdout.contains("jottrace compact"));
+    assert!(stdout.contains("mode: dry-run"));
+    assert!(stdout.contains("raw_events_before: 1"));
+    assert!(stdout.contains("zstd_events_before: 0"));
+    assert!(stdout.contains("eligible_raw_events: 1"));
+    assert!(stdout.contains("converted_events: 0"));
+    assert!(stdout.contains("unresolved_ingest_errors: 0"));
+    assert!(
+        compact_metric(&stdout, "estimated_bytes_saved") > 0,
+        "{stdout}"
+    );
+    assert!(
+        compact_metric(&stdout, "stored_bytes_after")
+            < compact_metric(&stdout, "stored_bytes_before"),
+        "{stdout}"
+    );
+
+    let conn = Connection::open(db_path(&data_dir)).expect("open preserved db");
+    let (stored_payload, codec): (Vec<u8>, String) = conn
+        .query_row(
+            "SELECT payload, codec FROM events WHERE seq = 0",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .expect("legacy raw event payload");
+    assert_eq!(codec, "raw");
+    assert_eq!(stored_payload, line.as_bytes());
+
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn compact_apply_rewrites_only_eligible_raw_rows_and_is_idempotent() {
+    let root = temp_root("compact-apply");
+    let data_dir = root.join(".jottrace");
+    let fixture = insert_compaction_fixture(&data_dir);
+    let conn = Connection::open(db_path(&data_dir)).expect("open preserved db");
+    let before_identity = event_identity_at_seq(&conn, 0);
+    drop(conn);
+
+    let output = Command::new(binary())
+        .args(["compact", "--apply", "--batch-size", "2"])
+        .env("JOTTRACE_HOME", &data_dir)
+        .output()
+        .expect("run jottrace compact --apply");
+
+    assert!(
+        output.status.success(),
+        "stdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8(output.stdout).expect("compact stdout should be utf-8");
+    assert!(stdout.contains("mode: apply"));
+    assert!(stdout.contains("batch_size: 2"));
+    assert!(stdout.contains("raw_events_before: 3"));
+    assert!(stdout.contains("zstd_events_before: 1"));
+    assert!(stdout.contains("unsupported_codec_events: 1"));
+    assert!(stdout.contains("eligible_raw_events: 1"));
+    assert!(stdout.contains("converted_events: 1"));
+    assert!(stdout.contains("skipped_small_events: 1"));
+    assert!(stdout.contains("skipped_not_smaller_events: 1"));
+    assert!(stdout.contains("raw_events_after: 2"));
+    assert!(stdout.contains("zstd_events_after: 2"));
+    assert!(
+        compact_metric(&stdout, "stored_bytes_after")
+            < compact_metric(&stdout, "stored_bytes_before"),
+        "{stdout}"
+    );
+
+    let conn = Connection::open(db_path(&data_dir)).expect("open compacted db");
+    let (stored_payload, codec, payload_size) = event_payload_record(&conn, 0);
+    assert_eq!(codec, "zstd");
+    assert_eq!(payload_size, fixture.eligible_payload.len() as i64);
+    assert_eq!(
+        jottrace::storage::decode_event_payload(&stored_payload, &codec)
+            .expect("decode compacted event"),
+        fixture.eligible_payload
+    );
+    assert_eq!(event_identity_at_seq(&conn, 0), before_identity);
+    assert_eq!(event_payload_record(&conn, 1).1, "raw");
+    assert_eq!(event_payload_record(&conn, 2).1, "raw");
+    assert_eq!(event_payload_record(&conn, 3).1, "zstd");
+    assert_eq!(event_payload_record(&conn, 4).1, "snappy");
+    drop(conn);
+
+    let second = Command::new(binary())
+        .args(["compact", "--apply"])
+        .env("JOTTRACE_HOME", &data_dir)
+        .output()
+        .expect("rerun jottrace compact --apply");
+    assert!(
+        second.status.success(),
+        "stdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&second.stdout),
+        String::from_utf8_lossy(&second.stderr)
+    );
+    let second_stdout = String::from_utf8(second.stdout).expect("compact stdout should be utf-8");
+    assert!(second_stdout.contains("converted_events: 0"));
+    assert!(second_stdout.contains("eligible_raw_events: 0"));
+
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn compact_vacuum_reclaims_free_sqlite_pages_after_apply() {
+    let root = temp_root("compact-vacuum");
+    let data_dir = root.join(".jottrace");
+    let payload = compressible_event_line_with_len(256 * 1024).into_bytes();
+    insert_single_raw_compaction_session(&data_dir, &payload);
+
+    let apply = Command::new(binary())
+        .args(["compact", "--apply"])
+        .env("JOTTRACE_HOME", &data_dir)
+        .output()
+        .expect("run jottrace compact --apply");
+    assert!(
+        apply.status.success(),
+        "stdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&apply.stdout),
+        String::from_utf8_lossy(&apply.stderr)
+    );
+    let apply_stdout = String::from_utf8(apply.stdout).expect("compact stdout should be utf-8");
+    assert!(
+        compact_metric(&apply_stdout, "sqlite_reclaimable_bytes") > 0,
+        "{apply_stdout}"
+    );
+
+    let vacuum = Command::new(binary())
+        .args(["compact", "--vacuum"])
+        .env("JOTTRACE_HOME", &data_dir)
+        .output()
+        .expect("run jottrace compact --vacuum");
+    assert!(
+        vacuum.status.success(),
+        "stdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&vacuum.stdout),
+        String::from_utf8_lossy(&vacuum.stderr)
+    );
+    let vacuum_stdout = String::from_utf8(vacuum.stdout).expect("compact stdout should be utf-8");
+    assert!(vacuum_stdout.contains("mode: vacuum"));
+    assert!(
+        compact_metric(&vacuum_stdout, "sqlite_reclaimable_bytes_before") > 0,
+        "{vacuum_stdout}"
+    );
+    assert_eq!(
+        compact_metric(&vacuum_stdout, "sqlite_reclaimable_bytes"),
+        0
+    );
+
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn compact_rejects_invalid_batch_options_before_opening_database() {
+    let root = temp_root("compact-invalid-batch");
+    let data_dir = root.join(".jottrace");
+
+    let oversized = Command::new(binary())
+        .args(["compact", "--batch-size", "10001"])
+        .env("JOTTRACE_HOME", &data_dir)
+        .output()
+        .expect("run jottrace compact with oversized batch");
+    assert!(!oversized.status.success());
+    let stderr = String::from_utf8_lossy(&oversized.stderr);
+    assert!(stderr.contains("invalid batch size: 10001; expected at most 10000"));
+    assert!(stderr.contains("jottrace compact --help"));
+    assert!(
+        !db_path(&data_dir).exists(),
+        "usage errors should not initialize the database"
+    );
+
+    let vacuum_batch = Command::new(binary())
+        .args(["compact", "--vacuum", "--batch-size", "2"])
+        .env("JOTTRACE_HOME", &data_dir)
+        .output()
+        .expect("run jottrace compact --vacuum with batch size");
+    assert!(!vacuum_batch.status.success());
+    let stderr = String::from_utf8_lossy(&vacuum_batch.stderr);
+    assert!(stderr.contains("compact --vacuum does not accept --batch-size"));
+    assert!(stderr.contains("jottrace compact --help"));
+    assert!(
+        !db_path(&data_dir).exists(),
+        "usage errors should not initialize the database"
+    );
+
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
 fn events_prints_decoded_payload_jsonl_for_bounded_session() {
     let root = temp_root("events-session-limit");
     let data_dir = root.join(".jottrace");
@@ -1364,6 +1576,171 @@ fn event_codecs(conn: &Connection) -> Vec<(i64, String)> {
         .expect("query event codecs")
         .map(|row| row.expect("event codec"))
         .collect()
+}
+
+fn compact_metric(stdout: &str, name: &str) -> u64 {
+    let prefix = format!("{name}: ");
+    stdout
+        .lines()
+        .find_map(|line| line.strip_prefix(&prefix))
+        .unwrap_or_else(|| panic!("missing compact metric {name} in:\n{stdout}"))
+        .parse()
+        .unwrap_or_else(|error| panic!("invalid compact metric {name} in:\n{stdout}\n{error}"))
+}
+
+#[derive(Debug)]
+struct CompactionFixture {
+    eligible_payload: Vec<u8>,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+struct EventIdentity {
+    session_id: i64,
+    generation: i64,
+    seq: i64,
+    ts: Option<String>,
+    created_at: String,
+}
+
+fn insert_compaction_fixture(data_dir: &Path) -> CompactionFixture {
+    let conn = jottrace::storage::open_database(&db_path(data_dir)).expect("open database");
+    conn.execute(
+        "INSERT INTO sessions (source, source_session_id, event_count)
+         VALUES ('claude_cli', 'compact-session', 5)",
+        [],
+    )
+    .expect("insert compact session");
+    let session_id = conn.last_insert_rowid();
+
+    let eligible_payload = large_compressible_event_line().into_bytes();
+    let small_payload = compressible_event_line_with_len(512).into_bytes();
+    let incompressible_payload = deterministic_bytes(2048);
+    let existing_zstd_source = compressible_event_line_with_len(1500).into_bytes();
+    let existing_zstd_payload = zstd::stream::encode_all(&existing_zstd_source[..], 0)
+        .expect("compress existing zstd payload");
+    insert_event_payload(
+        &conn,
+        session_id,
+        0,
+        &eligible_payload,
+        "raw",
+        eligible_payload.len(),
+    );
+    insert_event_payload(
+        &conn,
+        session_id,
+        1,
+        &small_payload,
+        "raw",
+        small_payload.len(),
+    );
+    insert_event_payload(
+        &conn,
+        session_id,
+        2,
+        &incompressible_payload,
+        "raw",
+        incompressible_payload.len(),
+    );
+    insert_event_payload(
+        &conn,
+        session_id,
+        3,
+        &existing_zstd_payload,
+        "zstd",
+        existing_zstd_source.len(),
+    );
+    conn.execute("PRAGMA ignore_check_constraints = ON", [])
+        .expect("allow unsupported codec fixture");
+    let unsupported_payload = br#"{"codec":"snappy"}"#;
+    insert_event_payload(
+        &conn,
+        session_id,
+        4,
+        unsupported_payload,
+        "snappy",
+        unsupported_payload.len(),
+    );
+
+    CompactionFixture { eligible_payload }
+}
+
+fn insert_single_raw_compaction_session(data_dir: &Path, payload: &[u8]) {
+    let conn = jottrace::storage::open_database(&db_path(data_dir)).expect("open database");
+    conn.execute(
+        "INSERT INTO sessions (source, source_session_id, event_count)
+         VALUES ('claude_cli', 'compact-vacuum-session', 1)",
+        [],
+    )
+    .expect("insert compact vacuum session");
+    let session_id = conn.last_insert_rowid();
+    insert_event_payload(&conn, session_id, 0, payload, "raw", payload.len());
+}
+
+fn insert_event_payload(
+    conn: &Connection,
+    session_id: i64,
+    seq: i64,
+    payload: &[u8],
+    codec: &str,
+    payload_size: usize,
+) {
+    conn.execute(
+        "INSERT INTO events (session_id, generation, seq, ts, payload, codec, payload_size)
+         VALUES (?1, 0, ?2, ?3, ?4, ?5, ?6)",
+        rusqlite::params![
+            session_id,
+            seq,
+            format!("2026-05-05T01:00:0{seq}.000Z"),
+            payload,
+            codec,
+            payload_size as i64
+        ],
+    )
+    .expect("insert compact event");
+}
+
+fn event_payload_record(conn: &Connection, seq: i64) -> (Vec<u8>, String, i64) {
+    conn.query_row(
+        "SELECT payload, codec, payload_size
+         FROM events
+         WHERE seq = ?1",
+        [seq],
+        |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+    )
+    .expect("event payload record")
+}
+
+fn event_identity_at_seq(conn: &Connection, seq: i64) -> EventIdentity {
+    conn.query_row(
+        "SELECT session_id, generation, seq, ts, created_at
+         FROM events
+         WHERE seq = ?1",
+        [seq],
+        |row| {
+            Ok(EventIdentity {
+                session_id: row.get(0)?,
+                generation: row.get(1)?,
+                seq: row.get(2)?,
+                ts: row.get(3)?,
+                created_at: row.get(4)?,
+            })
+        },
+    )
+    .expect("event identity")
+}
+
+fn deterministic_bytes(len: usize) -> Vec<u8> {
+    let mut state = 0x1234_5678_9abc_def0_u64;
+    let mut bytes = Vec::with_capacity(len);
+    while bytes.len() < len {
+        state ^= state << 13;
+        state ^= state >> 7;
+        state ^= state << 17;
+        bytes.extend_from_slice(&state.to_le_bytes());
+    }
+    bytes.truncate(len);
+    bytes
 }
 
 fn insert_legacy_raw_session(data_dir: &Path, session_file: &Path, line: &str) {

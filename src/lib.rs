@@ -8,9 +8,11 @@ use std::time::{SystemTime, UNIX_EPOCH};
 #[cfg(unix)]
 use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt, PermissionsExt};
 
+pub mod compact;
 pub mod ingest;
 pub mod storage;
 pub mod web;
+pub use compact::{CompactMode, CompactOptions, CompactReport, run_compact};
 pub use ingest::{IngestReport, run_ingest};
 pub use storage::{IngestErrorSummary, StatusReport, run_status};
 
@@ -68,6 +70,10 @@ pub enum JottraceError {
     },
     InvalidEventLimit {
         limit: i64,
+    },
+    InvalidCompactBatchSize {
+        batch_size: usize,
+        max: usize,
     },
     Output {
         source: io::Error,
@@ -127,6 +133,10 @@ impl fmt::Display for JottraceError {
             Self::InvalidEventLimit { limit } => {
                 write!(f, "event limit must be at least 1; got {limit}")
             }
+            Self::InvalidCompactBatchSize { batch_size, max } => write!(
+                f,
+                "compact batch size must be between 1 and {max}; got {batch_size}"
+            ),
             Self::Output { source } => write!(f, "failed to write output: {source}"),
             Self::LockHeld(path) => write!(
                 f,
