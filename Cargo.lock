@@ -95,7 +95,7 @@ dependencies = [
 
 [[package]]
 name = "jottrace"
-version = "26.5.3"
+version = "26.5.4"
 dependencies = [
  "rusqlite",
  "serde",
