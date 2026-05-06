@@ -4,9 +4,10 @@ Jottrace preserves local AI coding-session transcripts into a private SQLite
 journal you control.
 
 Today it can ingest Claude CLI / Claude Code and Codex CLI JSONL session files,
-including Claude subagent sidechain sessions, and report the local journal
-status from the command line. Cursor, OpenCode, and other readers are tracked
-in the design docs, but are not implemented as user-facing ingest sources yet.
+plus Gemini CLI chat JSON files. It also preserves Claude subagent sidechain
+sessions and reports the local journal status from the command line. Cursor,
+OpenCode, and other readers are tracked in the design docs, but are not
+implemented as user-facing ingest sources yet.
 
 ## Features
 
@@ -14,7 +15,7 @@ in the design docs, but are not implemented as user-facing ingest sources yet.
 - Keep local state in `~/.jottrace/db.sqlite`, or another directory via
   `JOTTRACE_HOME`.
 - Check the data directory and database with `jottrace doctor`.
-- Ingest Claude and Codex session JSONL with `jottrace ingest`.
+- Ingest Claude, Codex, and Gemini session files with `jottrace ingest`.
 - Inspect stored session, event, schema, and ingest-error counts with
   `jottrace status`.
 - Preserve Claude subagent sidechains as distinct child sessions linked to the
@@ -91,9 +92,14 @@ For Codex, Jottrace reads session files under `sessions/` and
 `archived_sessions/`, using each file's committed `session_meta` id as the
 stable session id.
 
-The ingest command stores raw JSONL event payloads and cheap deterministic
-session metadata, then prints the database path, discovered file count, total
-session/event counts, inserted event count, and unresolved ingest-error count.
+For Gemini CLI, Jottrace reads chat JSON files under
+`~/.gemini/tmp/<project-or-hash>/chats/*.json`, using each file's `sessionId`
+as the stable session id and preserving the ordered `messages[]` entries.
+
+The ingest command stores raw source event/message payloads and cheap
+deterministic session metadata, then prints the database path, discovered file
+count, total session/event counts, inserted event count, and unresolved
+ingest-error count.
 
 `jottrace status` initializes `~/.jottrace/db.sqlite` if needed and reports
 the schema version plus session, event, and unresolved ingest-error counts.
