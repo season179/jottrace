@@ -6,7 +6,7 @@ use std::time::Duration;
 use crate::{JottraceError, Result, data_dir_from_env, ensure_private_file};
 
 pub const DB_FILE_NAME: &str = "db.sqlite";
-pub const LATEST_SCHEMA_VERSION: i64 = 7;
+pub const LATEST_SCHEMA_VERSION: i64 = 8;
 pub(crate) const RAW_CODEC: &str = "raw";
 pub(crate) const ZSTD_CODEC: &str = "zstd";
 /// Minimum source payload size considered for zstd. Keeping this named makes
@@ -41,6 +41,10 @@ const MIGRATIONS: &[Migration] = &[
     Migration {
         version: 7,
         sql: include_str!("migrations/007_session_source_file_path_index.sql"),
+    },
+    Migration {
+        version: 8,
+        sql: include_str!("migrations/008_session_source_metadata.sql"),
     },
 ];
 const UNRESOLVED_INGEST_ERROR_COUNT_SQL: &str =
@@ -513,14 +517,19 @@ mod tests {
         assert_sql_object(&conn, "index", "idx_ingest_errors_unresolved_last_seen");
         assert_sql_object(&conn, "index", "idx_events_unsupported_codec");
         assert_sql_object(&conn, "index", "idx_events_raw_compaction");
+        assert_sql_object(&conn, "index", "idx_sessions_source_file_path");
         assert!(
             index_sql(&conn, "idx_events_unsupported_codec")
                 .contains("codec NOT IN ('raw', 'zstd')")
         );
         assert!(index_sql(&conn, "idx_events_raw_compaction").contains("codec = 'raw'"));
+        assert!(
+            index_sql(&conn, "idx_sessions_source_file_path").contains("file_path IS NOT NULL")
+        );
 
         assert!(columns(&conn, "sessions").contains(&"id".to_string()));
         assert!(columns(&conn, "sessions").contains(&"source_session_id".to_string()));
+        assert!(columns(&conn, "sessions").contains(&"source_metadata".to_string()));
         assert!(columns(&conn, "events").contains(&"generation".to_string()));
         assert!(columns(&conn, "events").contains(&"payload".to_string()));
         assert!(columns(&conn, "events").contains(&"codec".to_string()));
@@ -732,20 +741,7 @@ mod tests {
 
         {
             let conn = Connection::open(&db_path).expect("open v4 db");
-            conn.execute_batch(include_str!("migrations/001_initial_schema.sql"))
-                .expect("create v1 schema");
-            conn.execute_batch(include_str!(
-                "migrations/002_ingest_error_recency_index.sql"
-            ))
-            .expect("create v2 schema");
-            conn.execute_batch(include_str!(
-                "migrations/003_claude_sidechain_source_ids.sql"
-            ))
-            .expect("create v3 schema");
-            conn.execute_batch(include_str!(
-                "migrations/004_unsupported_event_codec_index.sql"
-            ))
-            .expect("create v4 schema");
+            apply_migrations_through(&conn, 4);
             assert!(index_sql(&conn, "idx_events_unsupported_codec").contains("codec != 'raw'"));
             conn.pragma_update(None, "user_version", 4)
                 .expect("set user_version");
@@ -774,24 +770,7 @@ mod tests {
 
         {
             let conn = Connection::open(&db_path).expect("open v5 db");
-            conn.execute_batch(include_str!("migrations/001_initial_schema.sql"))
-                .expect("create v1 schema");
-            conn.execute_batch(include_str!(
-                "migrations/002_ingest_error_recency_index.sql"
-            ))
-            .expect("create v2 schema");
-            conn.execute_batch(include_str!(
-                "migrations/003_claude_sidechain_source_ids.sql"
-            ))
-            .expect("create v3 schema");
-            conn.execute_batch(include_str!(
-                "migrations/004_unsupported_event_codec_index.sql"
-            ))
-            .expect("create v4 schema");
-            conn.execute_batch(include_str!(
-                "migrations/005_supported_zstd_codec_index.sql"
-            ))
-            .expect("create v5 schema");
+            apply_migrations_through(&conn, 5);
             assert!(!sql_object_exists(
                 &conn,
                 "index",
@@ -820,28 +799,7 @@ mod tests {
 
         {
             let conn = Connection::open(&db_path).expect("open v6 db");
-            conn.execute_batch(include_str!("migrations/001_initial_schema.sql"))
-                .expect("create v1 schema");
-            conn.execute_batch(include_str!(
-                "migrations/002_ingest_error_recency_index.sql"
-            ))
-            .expect("create v2 schema");
-            conn.execute_batch(include_str!(
-                "migrations/003_claude_sidechain_source_ids.sql"
-            ))
-            .expect("create v3 schema");
-            conn.execute_batch(include_str!(
-                "migrations/004_unsupported_event_codec_index.sql"
-            ))
-            .expect("create v4 schema");
-            conn.execute_batch(include_str!(
-                "migrations/005_supported_zstd_codec_index.sql"
-            ))
-            .expect("create v5 schema");
-            conn.execute_batch(include_str!(
-                "migrations/006_raw_event_compaction_index.sql"
-            ))
-            .expect("create v6 schema");
+            apply_migrations_through(&conn, 6);
             assert!(!sql_object_exists(
                 &conn,
                 "index",
@@ -860,6 +818,34 @@ mod tests {
         assert!(
             index_sql(&conn, "idx_sessions_source_file_path").contains("file_path IS NOT NULL")
         );
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn migrates_v7_database_to_add_session_source_metadata() {
+        let root = temp_root("storage-upgrade-v7-source-metadata");
+        let db_path = root.join(DB_FILE_NAME);
+        ensure_private_file(&db_path).expect("create db file");
+
+        {
+            let conn = Connection::open(&db_path).expect("open v7 db");
+            apply_migrations_through(&conn, 7);
+            assert!(
+                index_sql(&conn, "idx_sessions_source_file_path").contains("file_path IS NOT NULL")
+            );
+            assert!(!columns(&conn, "sessions").contains(&"source_metadata".to_string()));
+            conn.pragma_update(None, "user_version", 7)
+                .expect("set user_version");
+        }
+
+        let conn = open_database(&db_path).expect("migrate db");
+
+        assert_eq!(
+            user_version(&db_path, &conn).expect("user_version"),
+            LATEST_SCHEMA_VERSION
+        );
+        assert!(columns(&conn, "sessions").contains(&"source_metadata".to_string()));
 
         let _ = fs::remove_dir_all(root);
     }
@@ -996,6 +982,16 @@ mod tests {
             sql_object_exists(conn, kind, name),
             "{kind} {name} should exist"
         );
+    }
+
+    fn apply_migrations_through(conn: &Connection, version: i64) {
+        for migration in MIGRATIONS
+            .iter()
+            .filter(|migration| migration.version <= version)
+        {
+            conn.execute_batch(migration.sql)
+                .unwrap_or_else(|error| panic!("apply migration {}: {error}", migration.version));
+        }
     }
 
     fn sql_object_exists(conn: &Connection, kind: &str, name: &str) -> bool {

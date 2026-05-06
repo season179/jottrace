@@ -31,6 +31,10 @@ const PI_AGENT_FIXTURE_SESSION_ID: &str = "00000000-0000-4000-8000-000000000064"
 const GEMINI_FIXTURE_SESSION: &str =
     "gemini-cli/tmp/fixture-project/chats/session-2026-05-06T09-00-gemini000.json";
 const GEMINI_FIXTURE_SESSION_ID: &str = "33333333-3333-4333-8333-333333333333";
+const FACTORY_FIXTURE_SESSION: &str =
+    "factory/sessions/-Users-fixture-Workspace-jottrace/00000000-0000-4000-8000-000000000065.jsonl";
+const FACTORY_FIXTURE_SETTINGS: &str = "factory/sessions/-Users-fixture-Workspace-jottrace/00000000-0000-4000-8000-000000000065.settings.json";
+const FACTORY_FIXTURE_SESSION_ID: &str = "00000000-0000-4000-8000-000000000065";
 const CORRUPT_FIXTURE_SESSION: &str = "edge-cases/corrupt-line.jsonl";
 const CORRUPT_FIXTURE_SESSION_ID: &str = "00000000-0000-4000-8000-000000000000";
 const UNREADABLE_FIXTURE_SESSION_ID: &str = "00000000-0000-4000-8000-000000000001";
@@ -1564,6 +1568,223 @@ fn ingest_records_invalid_gemini_rewrite_against_existing_session() {
 }
 
 #[test]
+fn ingest_preserves_factory_session_events_from_sanitized_fixture() {
+    let root = temp_root("ingest-factory-session");
+    let data_dir = root.join(".jottrace");
+    let session_file = install_factory_fixture(&root);
+
+    let ingest = run_ingest(&root, &data_dir);
+    assert!(ingest.contains("sessions: 1"));
+    assert!(ingest.contains("events: 5"));
+    assert!(ingest.contains("inserted_events: 5"));
+    assert!(ingest.contains("unresolved_ingest_errors: 0"));
+
+    let conn = Connection::open(db_path(&data_dir)).expect("open preserved db");
+    let (source_session_id, cwd, started_at, ended_at, event_count, file_path): (
+        String,
+        String,
+        String,
+        String,
+        i64,
+        String,
+    ) = conn
+        .query_row(
+            "SELECT source_session_id, cwd, started_at, ended_at, event_count, file_path
+             FROM sessions
+             WHERE source = 'factory'",
+            [],
+            |row| {
+                Ok((
+                    row.get(0)?,
+                    row.get(1)?,
+                    row.get(2)?,
+                    row.get(3)?,
+                    row.get(4)?,
+                    row.get(5)?,
+                ))
+            },
+        )
+        .expect("factory session metadata");
+    assert_eq!(source_session_id, FACTORY_FIXTURE_SESSION_ID);
+    assert_eq!(cwd, "/Users/fixture/Workspace/jottrace");
+    assert_eq!(started_at, "2026-05-06T10:00:01.000Z");
+    assert_eq!(ended_at, "2026-05-06T10:00:04.000Z");
+    assert_eq!(event_count, 5);
+    assert_eq!(PathBuf::from(file_path), session_file);
+
+    let mut event_types = Vec::new();
+    jottrace::storage::for_each_decoded_event_payload_for_session(
+        &db_path(&data_dir),
+        "factory",
+        FACTORY_FIXTURE_SESSION_ID,
+        None,
+        |payload| {
+            event_types.push(
+                serde_json::from_slice::<serde_json::Value>(payload)
+                    .expect("factory payload should be json")["type"]
+                    .as_str()
+                    .expect("factory event type")
+                    .to_string(),
+            );
+            Ok(())
+        },
+    )
+    .expect("decoded factory payloads");
+    assert_eq!(
+        event_types,
+        vec![
+            "session_start",
+            "message",
+            "message",
+            "todo_state",
+            "compaction_state"
+        ]
+    );
+
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn ingest_links_factory_settings_as_source_metadata() {
+    let root = temp_root("ingest-factory-settings");
+    let data_dir = root.join(".jottrace");
+    let session_file = install_factory_fixture(&root);
+    let settings_file = session_file.with_extension("settings.json");
+
+    run_ingest(&root, &data_dir);
+
+    let source_metadata = factory_source_metadata(&data_dir);
+    assert_eq!(
+        source_metadata["settings_path"].as_str(),
+        Some(settings_file.to_string_lossy().as_ref())
+    );
+    assert_eq!(
+        source_metadata["settings_file_size"].as_i64(),
+        Some(
+            fs::metadata(&settings_file)
+                .expect("settings metadata")
+                .len() as i64
+        )
+    );
+    assert!(
+        source_metadata["settings_content_fingerprint"]
+            .as_str()
+            .is_some_and(|fingerprint| fingerprint.len() == 16)
+    );
+    assert_eq!(
+        source_metadata["settings"]["model"].as_str(),
+        Some("gpt-fixture")
+    );
+    assert_eq!(
+        source_metadata["settings"]["reasoningEffort"].as_str(),
+        Some("medium")
+    );
+    assert_eq!(
+        source_metadata["settings"]["tokenUsage"]["totalTokens"].as_i64(),
+        Some(1440)
+    );
+    assert!(source_metadata["settings_parse_error"].is_null());
+
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn ingest_uses_factory_session_start_id_and_updates_settings_metadata_without_duplicate_events() {
+    let root = temp_root("ingest-factory-settings-update");
+    let data_dir = root.join(".jottrace");
+    let session_file = factory_project_dir(&root).join("renamed-factory-session.jsonl");
+    let settings_file = session_file.with_extension("settings.json");
+    copy_reader_fixture(FACTORY_FIXTURE_SESSION, &session_file);
+    copy_reader_fixture(FACTORY_FIXTURE_SETTINGS, &settings_file);
+    set_modified(&session_file, 1_800_000_000);
+    set_modified(&settings_file, 1_800_000_000);
+
+    let first = run_ingest(&root, &data_dir);
+    assert!(first.contains("sessions: 1"));
+    assert!(first.contains("events: 5"));
+    assert!(first.contains("inserted_events: 5"));
+    let first_metadata = factory_source_metadata(&data_dir);
+
+    write_text_file(
+        &settings_file,
+        "{\"model\":\"gpt-fixture-updated\",\"reasoningEffort\":\"high\"}\n",
+    );
+    set_modified(&settings_file, 1_800_000_100);
+
+    let second = run_ingest(&root, &data_dir);
+    assert!(second.contains("sessions: 1"));
+    assert!(second.contains("events: 5"));
+    assert!(second.contains("inserted_events: 0"));
+
+    let conn = Connection::open(db_path(&data_dir)).expect("open preserved db");
+    let (source_session_id, file_path): (String, String) = conn
+        .query_row(
+            "SELECT source_session_id, file_path
+             FROM sessions
+             WHERE source = 'factory'",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .expect("factory session identity");
+    assert_eq!(source_session_id, FACTORY_FIXTURE_SESSION_ID);
+    assert_eq!(PathBuf::from(file_path), session_file);
+
+    let second_metadata = factory_source_metadata(&data_dir);
+    assert_ne!(
+        first_metadata["settings_content_fingerprint"],
+        second_metadata["settings_content_fingerprint"]
+    );
+    assert_eq!(
+        second_metadata["settings_path"].as_str(),
+        Some(settings_file.to_string_lossy().as_ref())
+    );
+    assert_eq!(
+        second_metadata["settings"]["model"].as_str(),
+        Some("gpt-fixture-updated")
+    );
+    assert_eq!(
+        second_metadata["settings"]["reasoningEffort"].as_str(),
+        Some("high")
+    );
+    assert_eq!(generation_counts(&conn), vec![(0, 5)]);
+
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn ingest_records_invalid_factory_session_start_without_blocking_other_files() {
+    let root = temp_root("ingest-factory-invalid-start");
+    let data_dir = root.join(".jottrace");
+    install_primary_claude_fixture(&root);
+    let bad_file = factory_project_dir(&root).join("bad-factory-session.jsonl");
+    write_text_file(
+        &bad_file,
+        "{\"type\":\"message\",\"timestamp\":\"2026-05-06T10:00:00.000Z\",\"message\":{\"role\":\"user\",\"content\":[{\"type\":\"text\",\"text\":\"bad start\"}]}}\n",
+    );
+
+    let ingest = run_ingest(&root, &data_dir);
+    assert!(ingest.contains("sessions: 2"));
+    assert!(ingest.contains("events: 12"));
+    assert!(ingest.contains("inserted_events: 12"));
+    assert!(ingest.contains("unresolved_ingest_errors: 1"));
+
+    let errors = jottrace::storage::unresolved_ingest_errors_for_path(&db_path(&data_dir), 10)
+        .expect("unresolved ingest errors");
+    assert_eq!(errors.len(), 1);
+    let error = &errors[0];
+    assert_eq!(error.source, "factory");
+    assert_eq!(
+        error.source_session_id.as_deref(),
+        Some("bad-factory-session")
+    );
+    assert_eq!(error.file_path, bad_file);
+    assert_eq!(error.error_kind, "invalid_session_meta");
+    assert!(error.message.contains("session_start"));
+
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
 fn ingest_ignores_empty_codex_rollout_files_without_recording_errors() {
     let root = temp_root("ingest-codex-empty");
     let data_dir = root.join(".jottrace");
@@ -2766,6 +2987,21 @@ fn ingest_error_count(data_dir: &Path) -> i64 {
         .expect("ingest error count")
 }
 
+fn factory_source_metadata(data_dir: &Path) -> serde_json::Value {
+    let conn = Connection::open(db_path(data_dir)).expect("open preserved db");
+    let source_metadata: String = conn
+        .query_row(
+            "SELECT source_metadata
+             FROM sessions
+             WHERE source = 'factory'
+               AND source_session_id = ?1",
+            [FACTORY_FIXTURE_SESSION_ID],
+            |row| row.get(0),
+        )
+        .expect("factory source metadata");
+    serde_json::from_str(&source_metadata).expect("factory source metadata should be json")
+}
+
 fn event_codecs(conn: &Connection) -> Vec<(i64, String)> {
     let mut statement = conn
         .prepare("SELECT seq, codec FROM events ORDER BY seq")
@@ -3141,12 +3377,25 @@ fn install_gemini_fixture(root: &Path) -> PathBuf {
     session_file
 }
 
+fn install_factory_fixture(root: &Path) -> PathBuf {
+    let session_file =
+        factory_project_dir(root).join(format!("{FACTORY_FIXTURE_SESSION_ID}.jsonl"));
+    let settings_file = session_file.with_extension("settings.json");
+    copy_reader_fixture(FACTORY_FIXTURE_SESSION, &session_file);
+    copy_reader_fixture(FACTORY_FIXTURE_SETTINGS, &settings_file);
+    session_file
+}
+
 fn replace_with_fixture(path: &Path, fixture_relative: &str) {
     copy_reader_fixture(fixture_relative, path);
 }
 
 fn claude_project_dir(root: &Path) -> PathBuf {
     root.join(".claude/projects/-Users-fixture-Workspace-jottrace")
+}
+
+fn factory_project_dir(root: &Path) -> PathBuf {
+    root.join(".factory/sessions/-Users-fixture-Workspace-jottrace")
 }
 
 fn sidechain_source_session_id(parent_session_id: &str) -> String {

@@ -59,10 +59,11 @@ triggers the others.
 
 4. **Scheduler** — orchestrates reader, processor, and writer runs.
 
-The Claude CLI reader is the first one to ship. Codex CLI follows
-immediately after. Cursor, OpenCode, and other local-agent stores are tracked
-at inventory level so the schema decisions they expose (in-place SQLite edits,
-JSON-file iteration order, parent/child linkage) are not surprises later.
+The Claude CLI, Codex CLI, and Factory / Droid-style JSONL readers are the
+first implemented sources. Cursor, OpenCode, and other local-agent stores are
+tracked at inventory level so the schema decisions they expose (in-place
+SQLite edits, JSON-file iteration order, parent/child linkage) are not
+surprises later.
 
 ## Implementation
 
@@ -244,6 +245,9 @@ Core tables:
     identity is `(source, source_session_id)`.
   - `file_path` — current path to the source artifact when applicable.
   - `cwd`, `parent_session_id` (nullable), `started_at`, `ended_at`.
+  - `source_metadata` — optional compact JSON for source-adapter metadata that
+    is deterministic and cheap enough to store at session grain, such as a
+    linked settings-file path, fingerprint, and parsed per-session settings.
   - `current_generation` — starts at 0 and increments when a source artifact
     is truncated or rewritten in a way that would otherwise collide with old
     `seq` values.
@@ -465,6 +469,37 @@ numbers are stable within a generation; the events PK shape
 Same as Claude CLI. Reader is read-only on `~/.codex/sessions/` and
 `~/.codex/archived_sessions/`; missing source file does not delete the
 DB row.
+
+## Reader: Factory / Droid-style JSONL
+
+### Source
+
+- Primary location:
+  `~/.factory/sessions/<encoded-cwd>/<session-uuid>.jsonl`
+- Matching per-session settings live beside the transcript as
+  `<session-uuid>.settings.json`.
+- Each JSONL line is one source event. The implemented fixture covers
+  `session_start`, `message`, `todo_state`, and `compaction_state`.
+- Canonical `source_session_id` is the first committed
+  `session_start.id`, not the filename. This keeps dedup stable even if a
+  file is renamed.
+
+### Re-read behavior
+
+Factory uses the shared JSONL generation logic: line number is `seq`, appends
+resume from `next_read_offset`, partial tails are deferred, and truncation or
+same-size rewrite becomes a new generation. Message `parentId` values remain
+inside preserved raw payloads; no first-class child session shape is proven yet.
+
+Sibling settings are linked through `sessions.source_metadata` using the
+settings path, file size, mtime, content fingerprint, and parsed settings JSON
+when the settings file is valid JSON. A settings-only change updates session
+metadata without inserting duplicate event rows.
+
+### Source-file safety
+
+Same as Claude CLI and Codex CLI. Reader access is read-only under
+`~/.factory/sessions/`; missing source files do not delete preserved DB rows.
 
 ## Reader: Cursor (SQLite shape, designed stub)
 
