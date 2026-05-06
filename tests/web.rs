@@ -171,6 +171,46 @@ fn web_journal_view_filters_sessions_by_metadata_and_payload_text() {
 }
 
 #[test]
+fn web_journal_view_searches_and_previews_zstd_payloads() {
+    let root = temp_root("web-zstd-payload");
+    let data_dir = root.join(".jottrace");
+    let db_path = db_path(&data_dir);
+    jottrace::storage::status_for_path(&db_path).expect("initialize database");
+    insert_zstd_session(&db_path);
+
+    let query = jottrace::web::JournalQuery {
+        selected_source: Some("claude_cli".to_string()),
+        selected_source_session_id: Some("zstd-session".to_string()),
+        search: Some("zstd searchable phrase".to_string()),
+        include_payload_search: true,
+        expanded_event: Some(jottrace::web::EventKey {
+            generation: 0,
+            seq: 0,
+        }),
+        ..Default::default()
+    };
+    let view =
+        jottrace::web::journal_view_for_path(&db_path, &query).expect("load zstd web journal");
+
+    assert_eq!(
+        view.sessions
+            .iter()
+            .map(|session| session.source_session_id.as_str())
+            .collect::<Vec<_>>(),
+        vec!["zstd-session"]
+    );
+    let event = view.expanded_event.expect("expanded zstd event");
+    assert_eq!(event.codec, "zstd");
+    assert!(
+        event
+            .payload_preview
+            .contains("zstd searchable phrase for the web journal")
+    );
+
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
 fn web_journal_view_treats_search_wildcards_as_literal_text() {
     let root = temp_root("web-literal-search");
     let data_dir = root.join(".jottrace");
@@ -585,6 +625,25 @@ fn populate_large_journal(db_path: &Path) {
         }
     }
     tx.commit().expect("commit large journal transaction");
+}
+
+fn insert_zstd_session(db_path: &Path) {
+    let conn = Connection::open(db_path).expect("open zstd web database");
+    let payload =
+        r#"{"message":"zstd searchable phrase for the web journal with decoded preview"}"#;
+    let compressed = zstd::stream::encode_all(payload.as_bytes(), 0).expect("compress payload");
+    conn.execute(
+        "INSERT INTO sessions (source, source_session_id, event_count, started_at)
+         VALUES ('claude_cli', 'zstd-session', 1, '2026-05-05T01:00:00Z')",
+        [],
+    )
+    .expect("insert zstd session");
+    conn.execute(
+        "INSERT INTO events (session_id, generation, seq, ts, payload, codec, payload_size)
+         VALUES (last_insert_rowid(), 0, 0, '2026-05-05T01:00:00Z', ?1, 'zstd', ?2)",
+        params![compressed, payload.len() as i64],
+    )
+    .expect("insert zstd event");
 }
 
 fn fixture_timestamp(start_hour: usize, index: usize, second: usize) -> String {

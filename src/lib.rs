@@ -58,6 +58,10 @@ pub enum JottraceError {
     UnsupportedEventPayloadCodec {
         codec: String,
     },
+    EventPayloadCodec {
+        codec: String,
+        source: io::Error,
+    },
     SessionNotFound {
         source: String,
         source_session_id: String,
@@ -110,6 +114,9 @@ impl fmt::Display for JottraceError {
             Self::UnsupportedEventPayloadCodec { codec } => {
                 write!(f, "unsupported event payload codec: {codec}")
             }
+            Self::EventPayloadCodec { codec, source } => {
+                write!(f, "failed to process event payload codec {codec}: {source}")
+            }
             Self::SessionNotFound {
                 source,
                 source_session_id,
@@ -135,6 +142,7 @@ impl std::error::Error for JottraceError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
             Self::Io { source, .. } => Some(source),
+            Self::EventPayloadCodec { source, .. } => Some(source),
             Self::Output { source } => Some(source),
             Self::Sqlite { source, .. } => Some(source),
             _ => None,

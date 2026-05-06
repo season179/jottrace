@@ -7,7 +7,7 @@ use std::path::{Path, PathBuf};
 use std::time::UNIX_EPOCH;
 
 use crate::storage::{
-    DB_FILE_NAME, RAW_CODEC, open_database, sqlite_error, status_from_connection,
+    DB_FILE_NAME, encode_event_payload, open_database, sqlite_error, status_from_connection,
 };
 use crate::{JottraceError, Result};
 
@@ -384,15 +384,16 @@ fn import_committed_lines(
             Ok(header) => {
                 capture_metadata(&mut metadata, &header);
                 let ts = event_timestamp(&header);
+                let encoded = encode_event_payload(line)?;
                 let inserted = event_insert
                     .execute(params![
                         session_id,
                         generation,
                         seq,
                         ts,
-                        line,
-                        RAW_CODEC,
-                        i64_from_usize(line.len(), &source_file.path)?,
+                        encoded.payload,
+                        encoded.codec,
+                        i64_from_usize(encoded.payload_size, &source_file.path)?,
                     ])
                     .map_err(|source| sqlite_error(&source_file.path, source))?;
                 inserted_event_count += inserted as u64;

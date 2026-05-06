@@ -1,12 +1,17 @@
 use rusqlite::{Connection, OptionalExtension, Row, params};
+use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use crate::{JottraceError, Result, data_dir_from_env, ensure_private_file};
 
 pub const DB_FILE_NAME: &str = "db.sqlite";
-pub const LATEST_SCHEMA_VERSION: i64 = 4;
+pub const LATEST_SCHEMA_VERSION: i64 = 5;
 pub(crate) const RAW_CODEC: &str = "raw";
+pub(crate) const ZSTD_CODEC: &str = "zstd";
+/// Minimum source payload size considered for zstd. Keeping this named makes
+/// future corpus/fixture tuning deliberate instead of hidden in insert logic.
+pub(crate) const ZSTD_MIN_PAYLOAD_BYTES: usize = 1024;
 
 const MIGRATIONS: &[Migration] = &[
     Migration {
@@ -24,6 +29,10 @@ const MIGRATIONS: &[Migration] = &[
     Migration {
         version: 4,
         sql: include_str!("migrations/004_unsupported_event_codec_index.sql"),
+    },
+    Migration {
+        version: 5,
+        sql: include_str!("migrations/005_supported_zstd_codec_index.sql"),
     },
 ];
 const UNRESOLVED_INGEST_ERROR_COUNT_SQL: &str =
@@ -59,6 +68,13 @@ pub struct IngestErrorSummary {
     pub occurrence_count: u64,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct EncodedEventPayload {
+    pub payload: Vec<u8>,
+    pub codec: &'static str,
+    pub payload_size: usize,
+}
+
 pub fn db_path_from_env() -> Result<PathBuf> {
     Ok(data_dir_from_env()?.join(DB_FILE_NAME))
 }
@@ -85,8 +101,75 @@ pub fn decode_event_payload(payload: &[u8], codec: &str) -> Result<Vec<u8>> {
     if codec == RAW_CODEC {
         return Ok(payload.to_vec());
     }
+    if codec == ZSTD_CODEC {
+        return zstd::stream::decode_all(payload).map_err(|source| {
+            JottraceError::EventPayloadCodec {
+                codec: ZSTD_CODEC.to_string(),
+                source,
+            }
+        });
+    }
 
     Err(unsupported_event_payload_codec(codec))
+}
+
+pub(crate) fn decode_event_payload_prefix(
+    payload: &[u8],
+    codec: &str,
+    byte_limit: usize,
+) -> Result<Vec<u8>> {
+    if codec == RAW_CODEC {
+        return Ok(payload[..payload.len().min(byte_limit)].to_vec());
+    }
+    if codec == ZSTD_CODEC {
+        let decoder = zstd::stream::read::Decoder::new(payload).map_err(|source| {
+            JottraceError::EventPayloadCodec {
+                codec: ZSTD_CODEC.to_string(),
+                source,
+            }
+        })?;
+        let mut decoder = decoder.take(byte_limit as u64);
+        let mut decoded = Vec::with_capacity(byte_limit);
+        decoder
+            .read_to_end(&mut decoded)
+            .map_err(|source| JottraceError::EventPayloadCodec {
+                codec: ZSTD_CODEC.to_string(),
+                source,
+            })?;
+        return Ok(decoded);
+    }
+
+    Err(unsupported_event_payload_codec(codec))
+}
+
+pub(crate) fn encode_event_payload(payload: &[u8]) -> Result<EncodedEventPayload> {
+    if payload.len() < ZSTD_MIN_PAYLOAD_BYTES {
+        return Ok(raw_event_payload(payload));
+    }
+
+    let compressed = zstd::stream::encode_all(payload, 0).map_err(|source| {
+        JottraceError::EventPayloadCodec {
+            codec: ZSTD_CODEC.to_string(),
+            source,
+        }
+    })?;
+    if compressed.len() < payload.len() {
+        return Ok(EncodedEventPayload {
+            payload: compressed,
+            codec: ZSTD_CODEC,
+            payload_size: payload.len(),
+        });
+    }
+
+    Ok(raw_event_payload(payload))
+}
+
+fn raw_event_payload(payload: &[u8]) -> EncodedEventPayload {
+    EncodedEventPayload {
+        payload: payload.to_vec(),
+        codec: RAW_CODEC,
+        payload_size: payload.len(),
+    }
 }
 
 pub fn open_database(path: &Path) -> Result<Connection> {
@@ -236,14 +319,14 @@ fn for_each_decoded_event_payload_from_connection(
 
     let sql = match limit {
         Some(_) => {
-            "SELECT events.payload
+            "SELECT events.payload, events.codec
              FROM events
              WHERE events.session_id = ?1
              ORDER BY events.generation, events.seq
              LIMIT ?2"
         }
         None => {
-            "SELECT events.payload
+            "SELECT events.payload, events.codec
              FROM events
              WHERE events.session_id = ?1
              ORDER BY events.generation, events.seq"
@@ -263,7 +346,13 @@ fn for_each_decoded_event_payload_from_connection(
 
     while let Some(row) = rows.next().map_err(|source| sqlite_error(path, source))? {
         let payload: Vec<u8> = row.get(0).map_err(|source| sqlite_error(path, source))?;
-        visit(&payload)?;
+        let codec: String = row.get(1).map_err(|source| sqlite_error(path, source))?;
+        if codec == RAW_CODEC {
+            visit(&payload)?;
+        } else {
+            let decoded = decode_event_payload(&payload, &codec)?;
+            visit(&decoded)?;
+        }
     }
 
     Ok(())
@@ -281,14 +370,14 @@ fn reject_unsupported_event_codecs(
                 "SELECT events.codec
                  FROM events
                  WHERE events.session_id = ?1
-                   AND events.codec != 'raw'
+                   AND events.codec NOT IN (?4, ?5)
                    AND (
                        events.generation < ?2
                        OR (events.generation = ?2 AND events.seq <= ?3)
                    )
                  ORDER BY events.generation, events.seq
                  LIMIT 1",
-                params![session_id, generation, seq],
+                params![session_id, generation, seq, RAW_CODEC, ZSTD_CODEC],
                 |row| row.get(0),
             )
             .optional()
@@ -298,10 +387,10 @@ fn reject_unsupported_event_codecs(
                 "SELECT events.codec
                  FROM events
                  WHERE events.session_id = ?1
-                   AND events.codec != 'raw'
+                   AND events.codec NOT IN (?2, ?3)
                  ORDER BY events.generation, events.seq
                  LIMIT 1",
-                params![session_id],
+                params![session_id, RAW_CODEC, ZSTD_CODEC],
                 |row| row.get(0),
             )
             .optional()
@@ -415,6 +504,10 @@ mod tests {
         assert_sql_object(&conn, "index", "idx_ingest_errors_unresolved");
         assert_sql_object(&conn, "index", "idx_ingest_errors_unresolved_last_seen");
         assert_sql_object(&conn, "index", "idx_events_unsupported_codec");
+        assert!(
+            index_sql(&conn, "idx_events_unsupported_codec")
+                .contains("codec NOT IN ('raw', 'zstd')")
+        );
 
         assert!(columns(&conn, "sessions").contains(&"id".to_string()));
         assert!(columns(&conn, "sessions").contains(&"source_session_id".to_string()));
@@ -622,6 +715,47 @@ mod tests {
     }
 
     #[test]
+    fn migrates_v4_unsupported_codec_index_to_exclude_supported_zstd_rows() {
+        let root = temp_root("storage-upgrade-v4-codec-index");
+        let db_path = root.join(DB_FILE_NAME);
+        ensure_private_file(&db_path).expect("create db file");
+
+        {
+            let conn = Connection::open(&db_path).expect("open v4 db");
+            conn.execute_batch(include_str!("migrations/001_initial_schema.sql"))
+                .expect("create v1 schema");
+            conn.execute_batch(include_str!(
+                "migrations/002_ingest_error_recency_index.sql"
+            ))
+            .expect("create v2 schema");
+            conn.execute_batch(include_str!(
+                "migrations/003_claude_sidechain_source_ids.sql"
+            ))
+            .expect("create v3 schema");
+            conn.execute_batch(include_str!(
+                "migrations/004_unsupported_event_codec_index.sql"
+            ))
+            .expect("create v4 schema");
+            assert!(index_sql(&conn, "idx_events_unsupported_codec").contains("codec != 'raw'"));
+            conn.pragma_update(None, "user_version", 4)
+                .expect("set user_version");
+        }
+
+        let conn = open_database(&db_path).expect("migrate db");
+
+        assert_eq!(
+            user_version(&db_path, &conn).expect("user_version"),
+            LATEST_SCHEMA_VERSION
+        );
+        assert!(
+            index_sql(&conn, "idx_events_unsupported_codec")
+                .contains("codec NOT IN ('raw', 'zstd')")
+        );
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
     fn status_counts_unresolved_ingest_errors_only() {
         let root = temp_root("storage-status");
         let db_path = root.join(DB_FILE_NAME);
@@ -671,11 +805,81 @@ mod tests {
     }
 
     #[test]
+    fn decode_event_payload_returns_zstd_payload_bytes() {
+        let payload = br#"{"type":"event_msg","message":"compressible payload"}"#;
+        let encoded = zstd::stream::encode_all(&payload[..], 0).expect("encode zstd payload");
+
+        let decoded = decode_event_payload(&encoded, ZSTD_CODEC).expect("decode zstd payload");
+
+        assert_eq!(decoded, payload);
+    }
+
+    #[test]
+    fn decode_event_payload_prefix_returns_bounded_zstd_payload_bytes() {
+        let payload = vec![b'x'; 4096];
+        let encoded = zstd::stream::encode_all(&payload[..], 0).expect("encode zstd payload");
+
+        let decoded =
+            decode_event_payload_prefix(&encoded, ZSTD_CODEC, 1024).expect("decode zstd prefix");
+
+        assert_eq!(decoded, payload[..1024]);
+    }
+
+    #[test]
     fn decode_event_payload_rejects_unknown_codec() {
         let error =
-            decode_event_payload(br#"{"type":"event_msg"}"#, "zstd").expect_err("codec error");
+            decode_event_payload(br#"{"type":"event_msg"}"#, "snappy").expect_err("codec error");
 
-        assert_eq!(error.to_string(), "unsupported event payload codec: zstd");
+        assert_eq!(error.to_string(), "unsupported event payload codec: snappy");
+    }
+
+    #[test]
+    fn encode_event_payload_keeps_subthreshold_payload_raw() {
+        let payload = vec![b'x'; ZSTD_MIN_PAYLOAD_BYTES - 1];
+
+        let encoded = encode_event_payload(&payload).expect("encode event payload");
+
+        assert_eq!(encoded.codec, RAW_CODEC);
+        assert_eq!(encoded.payload, payload);
+        assert_eq!(encoded.payload_size, ZSTD_MIN_PAYLOAD_BYTES - 1);
+    }
+
+    #[test]
+    fn encode_event_payload_uses_zstd_when_compressed_payload_is_smaller() {
+        let payload = vec![b'x'; ZSTD_MIN_PAYLOAD_BYTES];
+
+        let encoded = encode_event_payload(&payload).expect("encode event payload");
+
+        assert_eq!(encoded.codec, ZSTD_CODEC);
+        assert!(encoded.payload.len() < payload.len());
+        assert_eq!(encoded.payload_size, payload.len());
+        assert_eq!(
+            decode_event_payload(&encoded.payload, encoded.codec).expect("decode event payload"),
+            payload
+        );
+    }
+
+    #[test]
+    fn encode_event_payload_keeps_incompressible_payload_raw() {
+        let payload = pseudo_random_bytes(4096);
+
+        let encoded = encode_event_payload(&payload).expect("encode event payload");
+
+        assert_eq!(encoded.codec, RAW_CODEC);
+        assert_eq!(encoded.payload, payload);
+        assert_eq!(encoded.payload_size, 4096);
+    }
+
+    fn pseudo_random_bytes(len: usize) -> Vec<u8> {
+        let mut state = 0x4d59_5df4_d0f3_3173_u64;
+        let mut output = Vec::with_capacity(len);
+        for _ in 0..len {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            output.push(state as u8);
+        }
+        output
     }
 
     fn assert_sql_object(conn: &Connection, kind: &str, name: &str) {
@@ -698,6 +902,15 @@ mod tests {
             .expect("query columns")
             .map(|row| row.expect("column name"))
             .collect()
+    }
+
+    fn index_sql(conn: &Connection, name: &str) -> String {
+        conn.query_row(
+            "SELECT sql FROM sqlite_master WHERE type = 'index' AND name = ?1",
+            [name],
+            |row| row.get(0),
+        )
+        .expect("index sql")
     }
 
     fn temp_root(name: &str) -> PathBuf {
