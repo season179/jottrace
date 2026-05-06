@@ -6,7 +6,7 @@ use std::time::Duration;
 use crate::{JottraceError, Result, data_dir_from_env, ensure_private_file};
 
 pub const DB_FILE_NAME: &str = "db.sqlite";
-pub const LATEST_SCHEMA_VERSION: i64 = 6;
+pub const LATEST_SCHEMA_VERSION: i64 = 7;
 pub(crate) const RAW_CODEC: &str = "raw";
 pub(crate) const ZSTD_CODEC: &str = "zstd";
 /// Minimum source payload size considered for zstd. Keeping this named makes
@@ -37,6 +37,10 @@ const MIGRATIONS: &[Migration] = &[
     Migration {
         version: 6,
         sql: include_str!("migrations/006_raw_event_compaction_index.sql"),
+    },
+    Migration {
+        version: 7,
+        sql: include_str!("migrations/007_session_source_file_path_index.sql"),
     },
 ];
 const UNRESOLVED_INGEST_ERROR_COUNT_SQL: &str =
@@ -804,6 +808,58 @@ mod tests {
             LATEST_SCHEMA_VERSION
         );
         assert!(index_sql(&conn, "idx_events_raw_compaction").contains("codec = 'raw'"));
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn migrates_v6_database_to_add_session_source_file_path_index() {
+        let root = temp_root("storage-upgrade-v6-session-file-path-index");
+        let db_path = root.join(DB_FILE_NAME);
+        ensure_private_file(&db_path).expect("create db file");
+
+        {
+            let conn = Connection::open(&db_path).expect("open v6 db");
+            conn.execute_batch(include_str!("migrations/001_initial_schema.sql"))
+                .expect("create v1 schema");
+            conn.execute_batch(include_str!(
+                "migrations/002_ingest_error_recency_index.sql"
+            ))
+            .expect("create v2 schema");
+            conn.execute_batch(include_str!(
+                "migrations/003_claude_sidechain_source_ids.sql"
+            ))
+            .expect("create v3 schema");
+            conn.execute_batch(include_str!(
+                "migrations/004_unsupported_event_codec_index.sql"
+            ))
+            .expect("create v4 schema");
+            conn.execute_batch(include_str!(
+                "migrations/005_supported_zstd_codec_index.sql"
+            ))
+            .expect("create v5 schema");
+            conn.execute_batch(include_str!(
+                "migrations/006_raw_event_compaction_index.sql"
+            ))
+            .expect("create v6 schema");
+            assert!(!sql_object_exists(
+                &conn,
+                "index",
+                "idx_sessions_source_file_path"
+            ));
+            conn.pragma_update(None, "user_version", 6)
+                .expect("set user_version");
+        }
+
+        let conn = open_database(&db_path).expect("migrate db");
+
+        assert_eq!(
+            user_version(&db_path, &conn).expect("user_version"),
+            LATEST_SCHEMA_VERSION
+        );
+        assert!(
+            index_sql(&conn, "idx_sessions_source_file_path").contains("file_path IS NOT NULL")
+        );
 
         let _ = fs::remove_dir_all(root);
     }

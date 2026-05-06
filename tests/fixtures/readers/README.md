@@ -1,9 +1,9 @@
 # Reader Fixture Corpus
 
 This corpus started as the issue #21 reader-fixture seed set and now includes
-the OpenCode SQLite and issue #64 Pi agent slices. It is source-shaped from
-inspected local agent artifacts, but all content is synthetic and safe to
-commit.
+the Claude local-agent, OpenCode SQLite, and issue #64 Pi agent slices. It is
+source-shaped from inspected local agent artifacts, but all content is
+synthetic and safe to commit.
 
 ## Coverage
 
@@ -25,6 +25,11 @@ commit.
 - `pi-agent/sessions/--Users-fixture-Workspace-jottrace--/` captures the Pi
   agent `~/.pi/agent/sessions/<encoded-cwd>/` JSONL shape with session,
   message, model-change, and thinking-level-change events.
+- `claude-local-agent/local-agent-mode-sessions/` captures the Claude Desktop
+  local-agent metadata plus audit JSONL shape. The audit covers sanitized user,
+  assistant, system, result, tool-summary, and rate-limit events. Browser
+  session storage, app caches, uploads, outputs, and audit keys are
+  intentionally not part of the fixture.
 - `edge-cases/` contains partial-tail, corrupt-line, truncation, and same-size
   rewrite cases for the shared JSONL ingest core.
 
@@ -41,9 +46,9 @@ commit.
 
 ## Human Review
 
-Review status: pending human approval for the Claude CLI, Codex CLI, OpenCode
-SQLite, and Pi agent fixtures before they become the baseline for new reader
-implementation. Cursor fixture capture is still pending because no local
-Cursor `state.vscdb` or
+Review status: pending human approval for the Claude CLI, Claude local-agent,
+Codex CLI, OpenCode SQLite, and Pi agent fixtures before they become the
+baseline for new reader implementation. Cursor fixture capture is still pending
+because no local Cursor `state.vscdb` or
 `cursorDiskKV` source was available on this machine during the 2026-05-06
 fixture pass.
