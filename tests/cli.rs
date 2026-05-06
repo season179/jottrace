@@ -18,6 +18,10 @@ const CLAUDE_SIDECHAIN_FIXTURE_SESSION: &str = "claude-cli/projects/-Users-fixtu
 const CLAUDE_SIDECHAIN_FIXTURE_META: &str = "claude-cli/projects/-Users-fixture-Workspace-jottrace/00000000-0000-4000-8000-000000000021/subagents/agent-a000000000000021.meta.json";
 const CLAUDE_SIDECHAIN_FIXTURE_SESSION_ID: &str = "agent-a000000000000021";
 const OTHER_CLAUDE_FIXTURE_SESSION_ID: &str = "11111111-1111-4111-8111-111111111111";
+const CODEX_NESTED_FIXTURE_SESSION: &str = "codex-cli/sessions/2026/05/05/rollout-2026-05-05T09-00-00-00000000-0000-4000-8000-000000000021.jsonl";
+const CODEX_NESTED_FIXTURE_SESSION_ID: &str = "00000000-0000-4000-8000-000000000021";
+const CODEX_ARCHIVED_FIXTURE_SESSION: &str = "codex-cli/archived_sessions/rollout-2026-03-28T10-42-29-00000000-0000-4000-8000-000000000021.jsonl";
+const CODEX_ARCHIVED_FIXTURE_SESSION_ID: &str = "00000000-0000-4000-8000-000000000121";
 const CORRUPT_FIXTURE_SESSION: &str = "edge-cases/corrupt-line.jsonl";
 const CORRUPT_FIXTURE_SESSION_ID: &str = "00000000-0000-4000-8000-000000000000";
 const UNREADABLE_FIXTURE_SESSION_ID: &str = "00000000-0000-4000-8000-000000000001";
@@ -609,6 +613,209 @@ fn ingest_preserves_claude_cli_fixture_and_status_reports_counts() {
         .expect("first event payload");
     assert_eq!(codec, "raw");
     assert_eq!(payload, first_fixture_line());
+
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn ingest_preserves_nested_codex_cli_session() {
+    let root = temp_root("ingest-codex-nested");
+    let data_dir = root.join(".jottrace");
+    let session_file = install_nested_codex_fixture(&root);
+
+    let ingest = run_ingest(&root, &data_dir);
+    assert!(ingest.contains("sessions: 1"));
+    assert!(ingest.contains("events: 13"));
+    assert!(ingest.contains("inserted_events: 13"));
+    assert!(ingest.contains("unresolved_ingest_errors: 0"));
+
+    let conn = Connection::open(db_path(&data_dir)).expect("open preserved db");
+    let (source_session_id, cwd, started_at, ended_at, event_count, file_path): (
+        String,
+        String,
+        String,
+        String,
+        i64,
+        String,
+    ) = conn
+        .query_row(
+            "SELECT source_session_id, cwd, started_at, ended_at, event_count, file_path
+             FROM sessions
+             WHERE source = 'codex_cli'",
+            [],
+            |row| {
+                Ok((
+                    row.get(0)?,
+                    row.get(1)?,
+                    row.get(2)?,
+                    row.get(3)?,
+                    row.get(4)?,
+                    row.get(5)?,
+                ))
+            },
+        )
+        .expect("codex session metadata");
+    assert_eq!(source_session_id, CODEX_NESTED_FIXTURE_SESSION_ID);
+    assert_eq!(cwd, "/Users/fixture/Workspace/jottrace");
+    assert_eq!(started_at, "2026-05-05T09:00:00.000Z");
+    assert_eq!(ended_at, "2026-05-05T09:00:12.000Z");
+    assert_eq!(event_count, 13);
+    assert_eq!(PathBuf::from(file_path), session_file);
+
+    let max_seq: i64 = conn
+        .query_row(
+            "SELECT MAX(seq)
+             FROM events
+             JOIN sessions ON sessions.id = events.session_id
+             WHERE sessions.source = 'codex_cli'",
+            [],
+            |row| row.get(0),
+        )
+        .expect("codex max seq");
+    assert_eq!(max_seq, 12);
+
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn ingest_preserves_archived_codex_cli_session() {
+    let root = temp_root("ingest-codex-archived");
+    let data_dir = root.join(".jottrace");
+    let session_file = install_archived_codex_fixture(&root);
+
+    let ingest = run_ingest(&root, &data_dir);
+    assert!(ingest.contains("sessions: 1"));
+    assert!(ingest.contains("events: 6"));
+    assert!(ingest.contains("inserted_events: 6"));
+    assert!(ingest.contains("unresolved_ingest_errors: 0"));
+
+    let conn = Connection::open(db_path(&data_dir)).expect("open preserved db");
+    let (source_session_id, event_count, file_path): (String, i64, String) = conn
+        .query_row(
+            "SELECT source_session_id, event_count, file_path
+             FROM sessions
+             WHERE source = 'codex_cli'",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .expect("archived codex session metadata");
+    assert_eq!(source_session_id, CODEX_ARCHIVED_FIXTURE_SESSION_ID);
+    assert_eq!(event_count, 6);
+    assert_eq!(PathBuf::from(file_path), session_file);
+
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn ingest_uses_codex_session_meta_id_not_rollout_filename() {
+    let root = temp_root("ingest-codex-meta-id");
+    let data_dir = root.join(".jottrace");
+    let session_file = install_nested_codex_fixture_at(
+        &root,
+        "rollout-2026-05-05T09-00-00-99999999-9999-4999-8999-999999999999.jsonl",
+    );
+
+    let ingest = run_ingest(&root, &data_dir);
+    assert!(ingest.contains("sessions: 1"));
+    assert!(ingest.contains("events: 13"));
+
+    let conn = Connection::open(db_path(&data_dir)).expect("open preserved db");
+    let (source_session_id, file_path): (String, String) = conn
+        .query_row(
+            "SELECT source_session_id, file_path
+             FROM sessions
+             WHERE source = 'codex_cli'",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .expect("codex session identity");
+    assert_eq!(source_session_id, CODEX_NESTED_FIXTURE_SESSION_ID);
+    assert_eq!(PathBuf::from(file_path), session_file);
+
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn ingest_updates_codex_file_path_when_rollout_moves_to_archive() {
+    let root = temp_root("ingest-codex-archive-move");
+    let data_dir = root.join(".jottrace");
+    let live_file = install_nested_codex_fixture(&root);
+
+    let first = run_ingest(&root, &data_dir);
+    assert!(first.contains("sessions: 1"));
+    assert!(first.contains("events: 13"));
+    assert!(first.contains("inserted_events: 13"));
+
+    let archived_file = root
+        .join(".codex/archived_sessions")
+        .join("rollout-2026-05-05T09-00-00-00000000-0000-4000-8000-000000000021.jsonl");
+    fs::create_dir_all(archived_file.parent().expect("archived parent"))
+        .expect("create archived parent");
+    fs::rename(&live_file, &archived_file).expect("move rollout to archive");
+
+    let second = run_ingest(&root, &data_dir);
+    assert!(second.contains("sessions: 1"));
+    assert!(second.contains("events: 13"));
+    assert!(second.contains("inserted_events: 0"));
+
+    let conn = Connection::open(db_path(&data_dir)).expect("open preserved db");
+    let (session_count, event_count): (i64, i64) = conn
+        .query_row(
+            "SELECT COUNT(DISTINCT sessions.id), COUNT(events.seq)
+             FROM sessions
+             JOIN events ON events.session_id = sessions.id
+             WHERE sessions.source = 'codex_cli'
+               AND sessions.source_session_id = ?1",
+            [CODEX_NESTED_FIXTURE_SESSION_ID],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .expect("codex moved session counts");
+    assert_eq!(session_count, 1);
+    assert_eq!(event_count, 13);
+
+    let file_path: String = conn
+        .query_row(
+            "SELECT file_path
+             FROM sessions
+             WHERE source = 'codex_cli'
+               AND source_session_id = ?1",
+            [CODEX_NESTED_FIXTURE_SESSION_ID],
+            |row| row.get(0),
+        )
+        .expect("codex moved session file path");
+    assert_eq!(PathBuf::from(file_path), archived_file);
+
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn ingest_records_invalid_codex_session_meta_without_blocking_other_files() {
+    let root = temp_root("ingest-codex-invalid-meta");
+    let data_dir = root.join(".jottrace");
+    install_primary_claude_fixture(&root);
+    let bad_file = root
+        .join(".codex/sessions/2026/05/05")
+        .join("rollout-bad-meta.jsonl");
+    write_text_file(
+        &bad_file,
+        "{\"timestamp\":\"2026-05-05T09:00:00.000Z\",\"type\":\"event_msg\",\"payload\":{\"type\":\"task_started\"}}\n",
+    );
+
+    let ingest = run_ingest(&root, &data_dir);
+    assert!(ingest.contains("sessions: 2"));
+    assert!(ingest.contains("events: 12"));
+    assert!(ingest.contains("inserted_events: 12"));
+    assert!(ingest.contains("unresolved_ingest_errors: 1"));
+
+    let errors = jottrace::storage::unresolved_ingest_errors_for_path(&db_path(&data_dir), 10)
+        .expect("unresolved ingest errors");
+    assert_eq!(errors.len(), 1);
+    let error = &errors[0];
+    assert_eq!(error.source, "codex_cli");
+    assert_eq!(error.source_session_id.as_deref(), Some("rollout-bad-meta"));
+    assert_eq!(error.file_path, bad_file);
+    assert_eq!(error.error_kind, "invalid_session_meta");
+    assert!(error.message.contains("session_meta"));
 
     let _ = fs::remove_dir_all(root);
 }
@@ -1888,6 +2095,27 @@ fn install_claude_sidechain_fixture_for_parent(root: &Path, parent_session_id: &
 fn install_claude_fixture(root: &Path, session_id: &str, fixture_relative: &str) -> PathBuf {
     let session_file = claude_project_dir(root).join(format!("{session_id}.jsonl"));
     copy_reader_fixture(fixture_relative, &session_file);
+    session_file
+}
+
+fn install_nested_codex_fixture(root: &Path) -> PathBuf {
+    install_nested_codex_fixture_at(
+        root,
+        "rollout-2026-05-05T09-00-00-00000000-0000-4000-8000-000000000021.jsonl",
+    )
+}
+
+fn install_nested_codex_fixture_at(root: &Path, file_name: &str) -> PathBuf {
+    let session_file = root.join(".codex/sessions/2026/05/05").join(file_name);
+    copy_reader_fixture(CODEX_NESTED_FIXTURE_SESSION, &session_file);
+    session_file
+}
+
+fn install_archived_codex_fixture(root: &Path) -> PathBuf {
+    let session_file = root
+        .join(".codex/archived_sessions")
+        .join("rollout-2026-03-28T10-42-29-00000000-0000-4000-8000-000000000021.jsonl");
+    copy_reader_fixture(CODEX_ARCHIVED_FIXTURE_SESSION, &session_file);
     session_file
 }
 
