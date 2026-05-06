@@ -240,8 +240,8 @@ fn web_journal_view_pages_large_journal_and_expands_one_event_payload() {
     let view =
         jottrace::web::journal_view_for_path(&db_path, &query).expect("load second session page");
     assert_eq!(view.sessions.len(), 30);
-    assert_eq!(view.session_page.has_previous, true);
-    assert_eq!(view.session_page.has_next, false);
+    assert!(view.session_page.has_previous);
+    assert!(!view.session_page.has_next);
     assert_eq!(view.sessions[0].source_session_id, "session-029");
 
     let query = jottrace::web::JournalQuery {
@@ -273,7 +273,7 @@ fn web_journal_view_pages_large_journal_and_expands_one_event_payload() {
             .as_ref()
             .is_some_and(|event| event.payload_preview.contains("event 026"))
     );
-    assert_eq!(view.event_page.expect("event page").has_previous, true);
+    assert!(view.event_page.expect("event page").has_previous);
     let html = jottrace::web::render_home_page(&view, &query);
     assert!(html.contains("Previous events"));
     assert!(html.contains("Next events"));

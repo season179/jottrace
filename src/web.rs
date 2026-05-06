@@ -821,7 +821,7 @@ fn explicit_selected_session_key<'a>(
     query
         .selected_source_session_id
         .as_ref()
-        .and_then(|_| view.selected_session.as_ref())
+        .and(view.selected_session.as_ref())
         .map(SelectedSessionKey::from)
 }
 
