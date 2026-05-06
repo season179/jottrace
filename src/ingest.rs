@@ -1,5 +1,6 @@
 use rusqlite::{Connection, OptionalExtension, Transaction, named_params, params};
 use serde::Deserialize;
+use std::collections::HashSet;
 use std::env;
 use std::fs::{self, File, Metadata};
 use std::io::{self, BufRead, BufReader, Read};
@@ -24,6 +25,12 @@ const CODEX_INSTALL_DIRS: &[&str] = &[".codex", ".codex-local"];
 const MAX_CODEX_SESSION_META_BYTES: u64 = 64 * 1024;
 const FNV_OFFSET_BASIS: u64 = 0xcbf29ce484222325;
 const FNV_PRIME: u64 = 0x100000001b3;
+const INVALID_JSON_ERROR_KIND: &str = "invalid_json";
+const INVALID_SESSION_META_ERROR_KIND: &str = "invalid_session_meta";
+const READ_ERROR_KIND: &str = "read_error";
+const NOT_FILE_ERROR_KIND: &str = "not_file";
+const SOURCE_FILE_INGESTED_SUCCESSFULLY_NOTE: &str = "source file ingested successfully";
+const EMPTY_CODEX_SESSION_FILE_SKIPPED_NOTE: &str = "empty Codex session file skipped";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct IngestReport {
@@ -33,6 +40,11 @@ pub struct IngestReport {
     pub event_count: u64,
     pub inserted_event_count: u64,
     pub unresolved_ingest_error_count: u64,
+}
+
+#[derive(Debug, Default)]
+struct IngestState {
+    unresolved_invalid_session_meta_paths: HashSet<(String, String)>,
 }
 
 #[derive(Debug, Clone)]
@@ -61,6 +73,7 @@ struct StoredSession {
     file_mtime: Option<i64>,
     content_fingerprint: Option<String>,
     next_read_offset: i64,
+    event_count: i64,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -143,16 +156,31 @@ struct EventPayloadHeader<'a> {
     timestamp: Option<&'a str>,
 }
 
+#[derive(Debug, Deserialize)]
+struct LegacyCodexHeader<'a> {
+    #[serde(default, borrow)]
+    id: Option<&'a str>,
+    #[serde(default, borrow)]
+    timestamp: Option<&'a str>,
+}
+
 pub fn run_ingest() -> Result<IngestReport> {
     let data_dir = crate::data_dir_from_env()?;
     let _lock = crate::acquire_data_lock(&data_dir)?;
     let source_files = discover_session_files()?;
     let db_path = data_dir.join(DB_FILE_NAME);
     let mut conn = open_database(&db_path)?;
+    let mut ingest_state = IngestState {
+        unresolved_invalid_session_meta_paths: unresolved_source_file_error_paths(
+            &db_path,
+            &conn,
+            INVALID_SESSION_META_ERROR_KIND,
+        )?,
+    };
     let mut inserted_event_count = 0;
 
     for source_file in &source_files {
-        match ingest_jsonl_file(&mut conn, source_file) {
+        match ingest_jsonl_file(&mut conn, &mut ingest_state, source_file) {
             Ok(inserted) => inserted_event_count += inserted,
             Err(error) if is_source_file_ingest_error(&error) => {
                 record_source_file_ingest_error(&mut conn, source_file, &error)?;
@@ -298,7 +326,11 @@ fn collect_flat_session_files(root: &Path, paths: &mut Vec<PathBuf>) -> Result<(
     Ok(())
 }
 
-fn ingest_jsonl_file(conn: &mut Connection, source_file: &SourceFile) -> Result<u64> {
+fn ingest_jsonl_file(
+    conn: &mut Connection,
+    ingest_state: &mut IngestState,
+    source_file: &SourceFile,
+) -> Result<u64> {
     let metadata = fs::metadata(&source_file.path).map_err(|source| JottraceError::Io {
         path: source_file.path.clone(),
         source,
@@ -311,7 +343,27 @@ fn ingest_jsonl_file(conn: &mut Connection, source_file: &SourceFile) -> Result<
     let pass_size = i64_from_u64(pass_size_bytes, &source_file.path)?;
     let file_mtime = file_mtime(&metadata);
 
-    let source_file = resolve_source_file(conn, source_file, pass_size, file_mtime)?;
+    let source_file = if source_file.source == CODEX_SOURCE && pass_size_bytes == 0 {
+        match load_session_by_source_file_path(conn, source_file)? {
+            Some(stored) if !is_empty_source_file_placeholder(&stored) => SourceFile {
+                source_session_id: stored.source_session_id,
+                source_session_id_kind: SourceSessionIdKind::Known,
+                ..source_file.clone()
+            },
+            stored => {
+                resolve_invalid_session_meta_error(
+                    conn,
+                    ingest_state,
+                    source_file,
+                    EMPTY_CODEX_SESSION_FILE_SKIPPED_NOTE,
+                )?;
+                remove_empty_source_file_placeholder(conn, stored.as_ref(), source_file)?;
+                return Ok(0);
+            }
+        }
+    } else {
+        resolve_source_file(conn, source_file, pass_size, file_mtime)?
+    };
 
     if let Some(stored) = load_session(conn, &source_file)?
         && unchanged_by_mtime(&stored, pass_size, file_mtime)
@@ -320,6 +372,12 @@ fn ingest_jsonl_file(conn: &mut Connection, source_file: &SourceFile) -> Result<
             stored.file_path.as_deref() == Some(source_file.path.to_string_lossy().as_ref());
         let parent_session_id = resolve_parent_session_id(conn, &source_file)?;
         if path_is_current && stored.parent_session_id == parent_session_id {
+            resolve_invalid_session_meta_error(
+                conn,
+                ingest_state,
+                &source_file,
+                SOURCE_FILE_INGESTED_SUCCESSFULLY_NOTE,
+            )?;
             return Ok(0);
         }
 
@@ -334,6 +392,12 @@ fn ingest_jsonl_file(conn: &mut Connection, source_file: &SourceFile) -> Result<
                 parent_session_id,
                 checked_file: None,
             },
+        )?;
+        resolve_invalid_session_meta_error(
+            &tx,
+            ingest_state,
+            &source_file,
+            SOURCE_FILE_INGESTED_SUCCESSFULLY_NOTE,
         )?;
         tx.commit()
             .map_err(|source| sqlite_error(&source_file.path, source))?;
@@ -365,6 +429,12 @@ fn ingest_jsonl_file(conn: &mut Connection, source_file: &SourceFile) -> Result<
                     content_fingerprint: &content_fingerprint,
                 }),
             },
+        )?;
+        resolve_invalid_session_meta_error(
+            &tx,
+            ingest_state,
+            &source_file,
+            SOURCE_FILE_INGESTED_SUCCESSFULLY_NOTE,
         )?;
         tx.commit()
             .map_err(|source| sqlite_error(&source_file.path, source))?;
@@ -408,6 +478,12 @@ fn ingest_jsonl_file(conn: &mut Connection, source_file: &SourceFile) -> Result<
             metadata: &imported.metadata,
         },
     )?;
+    resolve_invalid_session_meta_error(
+        &tx,
+        ingest_state,
+        &source_file,
+        SOURCE_FILE_INGESTED_SUCCESSFULLY_NOTE,
+    )?;
 
     tx.commit()
         .map_err(|source| sqlite_error(&source_file.path, source))?;
@@ -424,18 +500,27 @@ fn resolve_source_file(
         return Ok(source_file.clone());
     }
 
-    if let Some(stored) = load_session_by_source_file_path(conn, source_file)?
-        && unchanged_by_mtime(&stored, pass_size, file_mtime)
+    let stored_by_path = load_session_by_source_file_path(conn, source_file)?;
+    if let Some(stored) = &stored_by_path
+        && unchanged_by_mtime(stored, pass_size, file_mtime)
     {
         return Ok(SourceFile {
-            source_session_id: stored.source_session_id,
+            source_session_id: stored.source_session_id.clone(),
             source_session_id_kind: SourceSessionIdKind::Known,
             ..source_file.clone()
         });
     }
 
+    let source_session_id = codex_source_session_id_from_file(&source_file.path)?;
+    reuse_source_file_session_identity(
+        conn,
+        stored_by_path.as_ref(),
+        source_file,
+        &source_session_id,
+    )?;
+
     Ok(SourceFile {
-        source_session_id: codex_source_session_id_from_file(&source_file.path)?,
+        source_session_id,
         source_session_id_kind: SourceSessionIdKind::Known,
         ..source_file.clone()
     })
@@ -502,7 +587,7 @@ fn import_committed_lines(
                         generation: Some(generation),
                         byte_offset: Some(byte_offset as i64),
                         line_number: Some(seq + 1),
-                        error_kind: "invalid_json",
+                        error_kind: INVALID_JSON_ERROR_KIND,
                         message: &error.to_string(),
                     },
                 )?;
@@ -559,9 +644,9 @@ fn is_source_file_ingest_error(error: &JottraceError) -> bool {
 
 fn source_file_error_kind(error: &JottraceError) -> &'static str {
     match error {
-        JottraceError::InvalidSessionMeta { .. } => "invalid_session_meta",
-        JottraceError::Io { .. } => "read_error",
-        JottraceError::NotFile(_) => "not_file",
+        JottraceError::InvalidSessionMeta { .. } => INVALID_SESSION_META_ERROR_KIND,
+        JottraceError::Io { .. } => READ_ERROR_KIND,
+        JottraceError::NotFile(_) => NOT_FILE_ERROR_KIND,
         _ => "ingest_error",
     }
 }
@@ -597,7 +682,7 @@ fn load_session_by_source_session_id(
 ) -> Result<Option<StoredSession>> {
     conn.query_row(
         "SELECT id, source_session_id, file_path, parent_session_id, current_generation, file_size, file_mtime,
-                content_fingerprint, next_read_offset
+                content_fingerprint, next_read_offset, event_count
          FROM sessions
          WHERE source = ?1 AND source_session_id = ?2",
         params![source, source_session_id],
@@ -612,6 +697,7 @@ fn load_session_by_source_session_id(
                 file_mtime: row.get(6)?,
                 content_fingerprint: row.get(7)?,
                 next_read_offset: row.get(8)?,
+                event_count: row.get(9)?,
             })
         },
     )
@@ -625,7 +711,7 @@ fn load_session_by_source_file_path(
 ) -> Result<Option<StoredSession>> {
     conn.query_row(
         "SELECT id, source_session_id, file_path, parent_session_id, current_generation, file_size, file_mtime,
-                content_fingerprint, next_read_offset
+                content_fingerprint, next_read_offset, event_count
          FROM sessions
          WHERE source = ?1 AND file_path = ?2",
         params![
@@ -643,6 +729,7 @@ fn load_session_by_source_file_path(
                 file_mtime: row.get(6)?,
                 content_fingerprint: row.get(7)?,
                 next_read_offset: row.get(8)?,
+                event_count: row.get(9)?,
             })
         },
     )
@@ -764,6 +851,43 @@ fn update_session_after_import(tx: &Transaction<'_>, update: SessionUpdate<'_>) 
     Ok(())
 }
 
+fn reuse_source_file_session_identity(
+    conn: &Connection,
+    stored_by_path: Option<&StoredSession>,
+    source_file: &SourceFile,
+    source_session_id: &str,
+) -> Result<()> {
+    let Some(stored) = stored_by_path else {
+        return Ok(());
+    };
+    if stored.source_session_id == source_session_id {
+        return Ok(());
+    }
+    if !is_empty_source_file_placeholder(stored) {
+        return Ok(());
+    }
+    if load_session_by_source_session_id(
+        conn,
+        &source_file.path,
+        source_file.source,
+        source_session_id,
+    )?
+    .is_some()
+    {
+        return Ok(());
+    }
+
+    conn.execute(
+        "UPDATE sessions
+         SET source_session_id = ?1,
+             updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+         WHERE id = ?2",
+        params![source_session_id, stored.id],
+    )
+    .map_err(|source| sqlite_error(&source_file.path, source))?;
+    Ok(())
+}
+
 fn resolve_parent_session_id(conn: &Connection, source_file: &SourceFile) -> Result<Option<i64>> {
     let Some(parent_source_session_id) = &source_file.parent_source_session_id else {
         return Ok(None);
@@ -776,6 +900,93 @@ fn resolve_parent_session_id(conn: &Connection, source_file: &SourceFile) -> Res
         parent_source_session_id,
     )
     .map(|session| session.map(|session| session.id))
+}
+
+fn is_empty_source_file_placeholder(stored: &StoredSession) -> bool {
+    stored.current_generation == 0
+        && stored.next_read_offset == 0
+        && stored.event_count == 0
+        && stored.content_fingerprint.is_none()
+}
+
+fn unresolved_source_file_error_paths(
+    db_path: &Path,
+    conn: &Connection,
+    error_kind: &str,
+) -> Result<HashSet<(String, String)>> {
+    let mut statement = conn
+        .prepare(
+            "SELECT source, file_path
+             FROM ingest_errors
+             WHERE error_kind = ?1
+               AND resolved_at IS NULL",
+        )
+        .map_err(|source| sqlite_error(db_path, source))?;
+    let rows = statement
+        .query_map([error_kind], |row| Ok((row.get(0)?, row.get(1)?)))
+        .map_err(|source| sqlite_error(db_path, source))?;
+    let mut paths = HashSet::new();
+    for row in rows {
+        paths.insert(row.map_err(|source| sqlite_error(db_path, source))?);
+    }
+    Ok(paths)
+}
+
+fn resolve_invalid_session_meta_error(
+    conn: &Connection,
+    ingest_state: &mut IngestState,
+    source_file: &SourceFile,
+    resolution_note: &str,
+) -> Result<()> {
+    let path_key = source_file_error_path_key(source_file);
+    if !ingest_state
+        .unresolved_invalid_session_meta_paths
+        .remove(&path_key)
+    {
+        return Ok(());
+    }
+
+    conn.execute(
+        "UPDATE ingest_errors
+         SET resolved_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now'),
+             resolution_note = ?1
+         WHERE source = ?2
+           AND file_path = ?3
+           AND error_kind = ?4
+           AND resolved_at IS NULL",
+        params![
+            resolution_note,
+            source_file.source,
+            source_file.path.to_string_lossy(),
+            INVALID_SESSION_META_ERROR_KIND,
+        ],
+    )
+    .map_err(|source| sqlite_error(&source_file.path, source))?;
+    Ok(())
+}
+
+fn source_file_error_path_key(source_file: &SourceFile) -> (String, String) {
+    (
+        source_file.source.to_string(),
+        source_file.path.to_string_lossy().into_owned(),
+    )
+}
+
+fn remove_empty_source_file_placeholder(
+    conn: &Connection,
+    stored_by_path: Option<&StoredSession>,
+    source_file: &SourceFile,
+) -> Result<()> {
+    let Some(stored) = stored_by_path else {
+        return Ok(());
+    };
+    if !is_empty_source_file_placeholder(stored) {
+        return Ok(());
+    }
+
+    conn.execute("DELETE FROM sessions WHERE id = ?1", [stored.id])
+        .map_err(|source| sqlite_error(&source_file.path, source))?;
+    Ok(())
 }
 
 fn record_ingest_error(tx: &Transaction<'_>, record: IngestErrorRecord<'_>) -> Result<()> {
@@ -962,9 +1173,18 @@ fn codex_source_session_id_from_file(path: &Path) -> Result<String> {
     let header = serde_json::from_slice::<EventHeader<'_>>(&first_line)
         .map_err(|source| invalid_session_meta(path, source.to_string()))?;
     if header.event_type != Some("session_meta") {
+        if header.event_type.is_none()
+            && let Ok(legacy_header) = serde_json::from_slice::<LegacyCodexHeader<'_>>(&first_line)
+            && let Some(id) = legacy_header.id
+            && legacy_header.timestamp.is_some()
+            && is_uuid_stem(id)
+        {
+            return Ok(id.to_string());
+        }
+
         return Err(invalid_session_meta(
             path,
-            "codex session file does not start with session_meta",
+            "codex session file does not start with session_meta or legacy id header",
         ));
     }
     header

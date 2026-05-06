@@ -22,6 +22,7 @@ const CODEX_NESTED_FIXTURE_SESSION: &str = "codex-cli/sessions/2026/05/05/rollou
 const CODEX_NESTED_FIXTURE_SESSION_ID: &str = "00000000-0000-4000-8000-000000000021";
 const CODEX_ARCHIVED_FIXTURE_SESSION: &str = "codex-cli/archived_sessions/rollout-2026-03-28T10-42-29-00000000-0000-4000-8000-000000000021.jsonl";
 const CODEX_ARCHIVED_FIXTURE_SESSION_ID: &str = "00000000-0000-4000-8000-000000000121";
+const CODEX_LEGACY_FIXTURE_SESSION_ID: &str = "22222222-2222-4222-8222-222222222222";
 const CORRUPT_FIXTURE_SESSION: &str = "edge-cases/corrupt-line.jsonl";
 const CORRUPT_FIXTURE_SESSION_ID: &str = "00000000-0000-4000-8000-000000000000";
 const UNREADABLE_FIXTURE_SESSION_ID: &str = "00000000-0000-4000-8000-000000000001";
@@ -789,6 +790,165 @@ fn ingest_updates_codex_file_path_when_rollout_moves_to_archive() {
 }
 
 #[test]
+fn ingest_preserves_legacy_codex_session_with_top_level_id_header() {
+    let root = temp_root("ingest-codex-legacy-header");
+    let data_dir = root.join(".jottrace");
+    let session_file = legacy_codex_session_file(&root);
+    write_text_file(&session_file, &legacy_codex_session_contents());
+
+    let ingest = run_ingest(&root, &data_dir);
+    assert!(ingest.contains("sessions: 1"));
+    assert!(ingest.contains("events: 3"));
+    assert!(ingest.contains("inserted_events: 3"));
+    assert!(ingest.contains("unresolved_ingest_errors: 0"));
+
+    let conn = Connection::open(db_path(&data_dir)).expect("open preserved db");
+    let (source_session_id, event_count, started_at, file_path): (String, i64, String, String) =
+        conn.query_row(
+            "SELECT source_session_id, event_count, started_at, file_path
+             FROM sessions
+             WHERE source = 'codex_cli'",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+        )
+        .expect("legacy codex session metadata");
+    assert_eq!(source_session_id, CODEX_LEGACY_FIXTURE_SESSION_ID);
+    assert_eq!(event_count, 3);
+    assert_eq!(started_at, "2025-09-12T09:54:22.802Z");
+    assert_eq!(PathBuf::from(file_path), session_file);
+
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn ingest_ignores_empty_codex_rollout_files_without_recording_errors() {
+    let root = temp_root("ingest-codex-empty");
+    let data_dir = root.join(".jottrace");
+    let session_file = empty_codex_rollout_file(&root);
+    write_text_file(&session_file, "");
+
+    let ingest = run_ingest(&root, &data_dir);
+    assert!(ingest.contains("sessions: 0"));
+    assert!(ingest.contains("events: 0"));
+    assert!(ingest.contains("inserted_events: 0"));
+    assert!(ingest.contains("unresolved_ingest_errors: 0"));
+    assert_eq!(ingest_error_count(&data_dir), 0);
+
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn ingest_drops_prior_empty_codex_placeholder_session() {
+    let root = temp_root("ingest-codex-empty-drops-placeholder");
+    let data_dir = root.join(".jottrace");
+    let session_file = empty_codex_rollout_file(&root);
+    write_text_file(
+        &session_file,
+        &invalid_codex_meta_line("2026-03-28T10:29:07.000Z"),
+    );
+
+    let first = run_ingest(&root, &data_dir);
+    assert!(first.contains("sessions: 1"));
+    assert!(first.contains("unresolved_ingest_errors: 1"));
+
+    write_text_file(&session_file, "");
+
+    let second = run_ingest(&root, &data_dir);
+    assert!(second.contains("sessions: 0"));
+    assert!(second.contains("events: 0"));
+    assert!(second.contains("unresolved_ingest_errors: 0"));
+
+    let session_count: i64 = Connection::open(db_path(&data_dir))
+        .expect("open preserved db")
+        .query_row("SELECT COUNT(*) FROM sessions", [], |row| row.get(0))
+        .expect("session count");
+    assert_eq!(session_count, 0);
+
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn ingest_preserves_existing_codex_session_when_file_truncates_to_empty() {
+    let root = temp_root("ingest-codex-empty-truncation");
+    let data_dir = root.join(".jottrace");
+    let session_file = install_nested_codex_fixture(&root);
+
+    let first = run_ingest(&root, &data_dir);
+    assert!(first.contains("sessions: 1"));
+    assert!(first.contains("events: 13"));
+    assert!(first.contains("inserted_events: 13"));
+
+    write_text_file(&session_file, "");
+
+    let second = run_ingest(&root, &data_dir);
+    assert!(second.contains("sessions: 1"));
+    assert!(second.contains("events: 13"));
+    assert!(second.contains("inserted_events: 0"));
+    assert!(second.contains("unresolved_ingest_errors: 0"));
+
+    let conn = Connection::open(db_path(&data_dir)).expect("open preserved db");
+    let (current_generation, event_count, file_size, next_read_offset): (i64, i64, i64, i64) = conn
+        .query_row(
+            "SELECT current_generation, event_count, file_size, next_read_offset
+             FROM sessions
+             WHERE source = 'codex_cli'",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+        )
+        .expect("empty codex truncation state");
+    assert_eq!(current_generation, 1);
+    assert_eq!(event_count, 0);
+    assert_eq!(file_size, 0);
+    assert_eq!(next_read_offset, 0);
+
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn ingest_resolves_prior_invalid_codex_meta_when_legacy_header_is_recognized() {
+    let root = temp_root("ingest-codex-legacy-resolves-error");
+    let data_dir = root.join(".jottrace");
+    let session_file = legacy_codex_session_file(&root);
+    write_text_file(
+        &session_file,
+        &invalid_codex_meta_line("2025-09-12T09:54:22.802Z"),
+    );
+
+    let first = run_ingest(&root, &data_dir);
+    assert!(first.contains("sessions: 1"));
+    assert!(first.contains("unresolved_ingest_errors: 1"));
+
+    write_text_file(&session_file, &legacy_codex_session_contents());
+
+    let second = run_ingest(&root, &data_dir);
+    assert!(second.contains("sessions: 1"));
+    assert!(second.contains("events: 3"));
+    assert!(second.contains("inserted_events: 3"));
+    assert!(second.contains("unresolved_ingest_errors: 0"));
+
+    let errors = jottrace::storage::unresolved_ingest_errors_for_path(&db_path(&data_dir), 10)
+        .expect("unresolved ingest errors");
+    assert!(errors.is_empty());
+
+    let conn = Connection::open(db_path(&data_dir)).expect("open preserved db");
+    let source_session_ids: Vec<String> = conn
+        .prepare(
+            "SELECT source_session_id
+             FROM sessions
+             WHERE source = 'codex_cli'
+             ORDER BY source_session_id",
+        )
+        .expect("prepare codex session ids")
+        .query_map([], |row| row.get(0))
+        .expect("query codex session ids")
+        .map(|row| row.expect("codex session id"))
+        .collect();
+    assert_eq!(source_session_ids, vec![CODEX_LEGACY_FIXTURE_SESSION_ID]);
+
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
 fn ingest_records_invalid_codex_session_meta_without_blocking_other_files() {
     let root = temp_root("ingest-codex-invalid-meta");
     let data_dir = root.join(".jottrace");
@@ -798,7 +958,7 @@ fn ingest_records_invalid_codex_session_meta_without_blocking_other_files() {
         .join("rollout-bad-meta.jsonl");
     write_text_file(
         &bad_file,
-        "{\"timestamp\":\"2026-05-05T09:00:00.000Z\",\"type\":\"event_msg\",\"payload\":{\"type\":\"task_started\"}}\n",
+        &invalid_codex_meta_line("2026-05-05T09:00:00.000Z"),
     );
 
     let ingest = run_ingest(&root, &data_dir);
@@ -1772,6 +1932,37 @@ fn compressible_event_line_with_len(len: usize) -> String {
     );
     assert_eq!(line.len(), len);
     line
+}
+
+fn legacy_codex_session_contents() -> String {
+    format!(
+        "{{\"id\":\"{CODEX_LEGACY_FIXTURE_SESSION_ID}\",\"timestamp\":\"2025-09-12T09:54:22.802Z\",\"instructions\":\"fixture legacy instructions redacted\"}}\n\
+         {{\"record_type\":\"state\"}}\n\
+         {{\"type\":\"message\",\"role\":\"user\",\"content\":\"legacy Codex message\"}}\n"
+    )
+}
+
+fn legacy_codex_session_file(root: &Path) -> PathBuf {
+    root.join(".codex/sessions/2025/09/12")
+        .join("rollout-2025-09-12T09-54-22-22222222-2222-4222-8222-222222222222.jsonl")
+}
+
+fn empty_codex_rollout_file(root: &Path) -> PathBuf {
+    root.join(".codex/sessions/2026/03/28")
+        .join("rollout-2026-03-28T10-29-07-019d3246-1417-77a0-8b5c-70f9bc4045c0.jsonl")
+}
+
+fn invalid_codex_meta_line(timestamp: &str) -> String {
+    format!(
+        "{{\"timestamp\":\"{timestamp}\",\"type\":\"event_msg\",\"payload\":{{\"type\":\"task_started\"}}}}\n"
+    )
+}
+
+fn ingest_error_count(data_dir: &Path) -> i64 {
+    Connection::open(db_path(data_dir))
+        .expect("open preserved db")
+        .query_row("SELECT COUNT(*) FROM ingest_errors", [], |row| row.get(0))
+        .expect("ingest error count")
 }
 
 fn event_codecs(conn: &Connection) -> Vec<(i64, String)> {
