@@ -1,5 +1,40 @@
 # Changelog
 
+## v26.5.5 - 2026-05-06
+
+### Summary
+
+- Adds Codex CLI session ingestion and a first-class installed-binary update
+  command. Changes since `v26.5.4`.
+
+### Changes
+
+- `jottrace ingest` now discovers Codex CLI session files under `.codex` and
+  `.codex-local`, including archived sessions.
+- Codex sessions use the committed `session_meta.payload.id` as their stable
+  source session id, so moved archived files do not become duplicate sessions.
+- Invalid Codex session metadata is recorded as a non-blocking ingest error so
+  unrelated source files still import.
+- Added `jottrace update`, with `jottrace upgrade` as an alias, to replace the
+  installed binary from GitHub Release artifacts.
+- Update failures leave the existing installed binary usable when the download
+  or release artifact is missing or invalid.
+- Updated README release examples and ingest documentation for `v26.5.5`.
+
+### Commits
+
+- Add first-class update command (07999dd)
+- Add Codex CLI session ingest (0a9d9b7)
+
+### Verification
+
+- `scripts/check-version.sh v26.5.5`
+- `cargo fmt --check`
+- `cargo clippy --all-targets -- -D warnings`
+- `bash -n install.sh scripts/check-version.sh`
+- `cargo test`
+- Release preflight script
+
 ## v26.5.3 - 2026-05-06
 
 Changes since `v26.5.2`.

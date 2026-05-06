@@ -3,10 +3,10 @@
 Jottrace preserves local AI coding-session transcripts into a private SQLite
 journal you control.
 
-Today it can ingest Claude CLI / Claude Code JSONL session files, including
-subagent sidechain sessions, and report the local journal status from the
-command line. Codex, Cursor, OpenCode, and other readers are tracked in the
-design docs, but are not implemented as user-facing ingest sources yet.
+Today it can ingest Claude CLI / Claude Code and Codex CLI JSONL session files,
+including Claude subagent sidechain sessions, and report the local journal
+status from the command line. Cursor, OpenCode, and other readers are tracked
+in the design docs, but are not implemented as user-facing ingest sources yet.
 
 ## Features
 
@@ -14,7 +14,7 @@ design docs, but are not implemented as user-facing ingest sources yet.
 - Keep local state in `~/.jottrace/db.sqlite`, or another directory via
   `JOTTRACE_HOME`.
 - Check the data directory and database with `jottrace doctor`.
-- Ingest Claude session JSONL with `jottrace ingest`.
+- Ingest Claude and Codex session JSONL with `jottrace ingest`.
 - Inspect stored session, event, schema, and ingest-error counts with
   `jottrace status`.
 - Preserve Claude subagent sidechains as distinct child sessions linked to the
@@ -77,6 +77,15 @@ when any exist.
 For each install directory, Jottrace reads Claude project session files under
 `projects/` plus UUID-named flat-root JSONL session files. Source files are
 read-only inputs: Jottrace does not move, edit, or delete Claude artifacts.
+
+It also scans these Codex install directories under `HOME`:
+
+- `~/.codex`
+- `~/.codex-local`
+
+For Codex, Jottrace reads session files under `sessions/` and
+`archived_sessions/`, using each file's committed `session_meta` id as the
+stable session id.
 
 The ingest command stores raw JSONL event payloads and cheap deterministic
 session metadata, then prints the database path, discovered file count, total
@@ -154,7 +163,7 @@ cargo run -- web
 
 Jottrace uses CalVer in `YY.M.PATCH` form. For example, the first release in
 May 2026 is `v26.5.0`; later releases in the same month increment the patch
-segment, such as `v26.5.4`.
+segment, such as `v26.5.5`.
 
 `scripts/check-version.sh` enforces that `Cargo.toml` uses this shape and that
 release tags match the Cargo package version.
@@ -165,8 +174,8 @@ by `install.sh`.
 ```sh
 git checkout main
 git pull --ff-only
-git tag v26.5.4
-git push origin v26.5.4
+git tag v26.5.5
+git push origin v26.5.5
 ```
 
 After the `Release` GitHub Action finishes, the install command above should
