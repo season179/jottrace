@@ -3,7 +3,9 @@ title: "Reader source inventory"
 status: DRAFT
 updated: 2026-05-06
 parent_issue: "#54"
-issue: "#59"
+issues:
+  - "#59"
+  - "#69"
 ---
 
 # Reader Source Inventory
@@ -64,6 +66,26 @@ ordered session content:
   tool, and result events from generic app state.
 - Manual backup/reference copies such as `~/Downloads/CodexSessionBackup-*`;
   they may seed fixtures but are not automatic scan roots.
+
+### Ignored By Default
+
+| Source class | Examples | Why it is out of reader scope |
+| --- | --- | --- |
+| Aider home startup history | Aider home startup history, command history, model/auth/config traces | Thin histories and startup traces do not prove an ordered user/assistant/tool/result session stream. |
+| Electron browser session storage | Browser or Electron `Session Storage`, `Local Storage`, `IndexedDB`, profile cache, and cookie-like state | Browser persistence is app/runtime state, not a transcript contract. It can contain opaque keys, partial UI state, credentials, or cache entries without deterministic session ordering. |
+| skills-manager app state | Skills-manager app state, installed-skill cache, plugin metadata, and generated registry files | These files describe tooling configuration, not preserved coding-agent conversations. |
+| sidecar/cache outputs | Sidecar/cache outputs, MCP/plugin logs, temporary payload mirrors, downloaded model/cache artifacts, and derived indexes | Sidecars may be useful for diagnostics, but they are not authoritative transcript stores and can duplicate or redact the real source. |
+
+### Deferred Until Fixture Proof
+
+These sources stay out of default ingest scope until a future reader issue
+includes sanitized fixtures and the fixture proof required to reconsider them:
+
+| Source class | Fixture proof required to reconsider |
+| --- | --- |
+| Windsurf | A stable session id, ordered event/message rows, role/content/tool/result payloads, and in-place update detection for its VS Code-derived state. |
+| VS Code/Copilot/ChatGPT extension state | Proof that extension state contains intelligible coding-agent sessions rather than editor UI state, account cache, prompts without responses, or partial browser/app persistence. |
+| Antigravity app/protobuf/browser state | A safe textual or decoded fixture showing stable session identity, deterministic ordering, and recoverable event payloads from app/protobuf/browser state without committing opaque private data. |
 
 ## Fixture Requirements And Privacy
 

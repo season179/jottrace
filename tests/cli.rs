@@ -1816,6 +1816,64 @@ fn ingest_ignores_claude_flat_root_non_session_jsonl() {
 }
 
 #[test]
+fn ingest_ignores_issue_69_ignored_and_deferred_source_paths_by_default() {
+    let root = temp_root("ingest-ignore-non-scope-sources");
+    let data_dir = root.join(".jottrace");
+
+    for (path, content) in [
+        (
+            root.join(".aider.chat.history.md"),
+            "Model: test\nCommand: /clear\n",
+        ),
+        (
+            root.join("Library/Application Support/Claude/Session Storage/000003.log"),
+            "{\"role\":\"assistant\",\"content\":\"cached browser state\"}\n",
+        ),
+        (
+            root.join("Library/Application Support/Codex/Session Storage/000003.log"),
+            "{\"role\":\"assistant\",\"content\":\"cached browser state\"}\n",
+        ),
+        (
+            root.join(".agents/skills-manager/state.db"),
+            "skills-manager app state",
+        ),
+        (
+            root.join("Library/Caches/claude-cli-nodejs/mcp-output.jsonl"),
+            "{\"role\":\"tool\",\"content\":\"sidecar cache output\"}\n",
+        ),
+        (
+            root.join("Library/Application Support/Windsurf/User/globalStorage/state.vscdb"),
+            "vscode-derived app state",
+        ),
+        (
+            root.join("Library/Application Support/Code/User/globalStorage/state.vscdb"),
+            "copilot/chatgpt extension app state",
+        ),
+        (
+            root.join(".gemini/antigravity/brain/state.pbtxt"),
+            "protobuf/app/browser state",
+        ),
+    ] {
+        write_text_file(&path, content);
+    }
+
+    let ingest = run_ingest(&root, &data_dir);
+    assert!(ingest.contains("files: 0"));
+    assert!(ingest.contains("sessions: 0"));
+    assert!(ingest.contains("events: 0"));
+    assert!(ingest.contains("inserted_events: 0"));
+    assert!(ingest.contains("unresolved_ingest_errors: 0"));
+
+    let conn = Connection::open(db_path(&data_dir)).expect("open preserved db");
+    let session_count: i64 = conn
+        .query_row("SELECT COUNT(*) FROM sessions", [], |row| row.get(0))
+        .expect("session count");
+    assert_eq!(session_count, 0);
+
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
 fn ingest_preserves_uuid_named_claude_flat_root_session() {
     let root = temp_root("ingest-flat-root-uuid");
     let data_dir = root.join(".jottrace");

@@ -79,6 +79,27 @@ fn reader_source_inventory_documents_deferred_and_privacy_boundaries() {
     }
 }
 
+#[test]
+fn reader_source_inventory_names_issue_69_ignored_and_deferred_sources() {
+    let inventory = reader_source_inventory();
+
+    for required in [
+        "Aider home startup history",
+        "Electron browser session storage",
+        "skills-manager app state",
+        "sidecar/cache outputs",
+        "Windsurf",
+        "VS Code/Copilot/ChatGPT extension state",
+        "Antigravity app/protobuf/browser state",
+        "fixture proof required to reconsider",
+    ] {
+        assert!(
+            inventory.contains(required),
+            "inventory note should explicitly name issue #69 source boundary: {required}"
+        );
+    }
+}
+
 fn reader_source_inventory() -> String {
     fs::read_to_string("docs/reader-source-inventory.md")
         .expect("reader source inventory design note should exist")
