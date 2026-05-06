@@ -25,6 +25,7 @@ design docs, but are not implemented as user-facing ingest sources yet.
   sessions.
 - Browse preserved sessions, events, and unresolved ingest errors locally with
   `jottrace web`.
+- Update the installed binary from GitHub Releases with `jottrace update`.
 
 ## Install
 
@@ -111,7 +112,23 @@ JOTTRACE_HOME=/path/to/private/journal jottrace web
 
 ## Update
 
-To update Jottrace, rerun the installer:
+To update the installed binary in place:
+
+```sh
+jottrace update
+```
+
+`jottrace upgrade` is supported as an alias. The command downloads the matching
+GitHub Release artifact for your OS and CPU, reports the current version,
+target version, install path, and final result. When a newer artifact is
+available, it replaces only the installed binary. It does not read or mutate
+data under `~/.jottrace`.
+
+For deterministic release testing, `jottrace update` honors the same
+`JOTTRACE_VERSION` and `JOTTRACE_RELEASE_BASE_URL` controls as `install.sh`.
+
+If the update command is unavailable or fails before replacing the binary,
+rerun the installer fallback:
 
 ```sh
 curl -fsSL https://raw.githubusercontent.com/season179/jottrace/main/install.sh | bash
