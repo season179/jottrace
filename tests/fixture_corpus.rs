@@ -5,6 +5,86 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 #[test]
+fn reader_source_inventory_documents_fixture_gate() {
+    let inventory = reader_source_inventory();
+
+    for required in [
+        "## Reader Fixture Gate",
+        "Stable `source_session_id`",
+        "deterministic `seq`",
+        "Raw role/content/tool/reasoning/result payloads",
+        "read-only change detection",
+    ] {
+        assert!(
+            inventory.contains(required),
+            "inventory note should document fixture gate requirement: {required}"
+        );
+    }
+}
+
+#[test]
+fn architecture_links_reader_source_inventory_gate() {
+    let design = fs::read_to_string("docs/design.md").expect("read architecture design doc");
+
+    assert!(
+        design.contains("docs/reader-source-inventory.md"),
+        "architecture doc should link to the reader source inventory gate"
+    );
+}
+
+#[test]
+fn reader_source_inventory_documents_known_sources_in_inventory_table() {
+    let inventory = reader_source_inventory();
+    let table = inventory
+        .split("## Known Source Inventory")
+        .nth(1)
+        .and_then(|tail| tail.split("## Deferred And Ignored Sources").next())
+        .expect("reader source inventory note should contain a known source inventory section");
+
+    for source in [
+        "Claude CLI / Claude Code",
+        "Claude Desktop / local agent mode",
+        "Codex CLI",
+        "Hermes native SessionDB",
+        "Pi agent",
+        "Factory / Droid-style agent sessions",
+        "OpenCode",
+        "Gemini CLI",
+    ] {
+        assert!(
+            table.contains(source),
+            "known source inventory table should document source: {source}"
+        );
+    }
+}
+
+#[test]
+fn reader_source_inventory_documents_deferred_and_privacy_boundaries() {
+    let inventory = reader_source_inventory();
+
+    for required in [
+        "## Deferred And Ignored Sources",
+        "Browser and Electron `Session Storage`",
+        "app caches",
+        "opaque state",
+        "Thin command histories",
+        "## Fixture Requirements And Privacy",
+        "human review",
+        "No reader issue should commit raw private transcripts",
+    ] {
+        assert!(
+            inventory.contains(required),
+            "inventory note should document source boundary or privacy requirement: {required}"
+        );
+    }
+}
+
+fn reader_source_inventory() -> String {
+    fs::read_to_string("docs/reader-source-inventory.md")
+        .expect("reader source inventory design note should exist")
+}
+
+#[test]
 fn reader_fixture_corpus_has_issue_21_required_shapes() {
     for path in [
         "claude-cli/projects/-Users-fixture-Workspace-jottrace/00000000-0000-4000-8000-000000000021.jsonl",

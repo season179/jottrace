@@ -1,7 +1,7 @@
 ---
 title: "Jottrace architecture"
 status: DRAFT
-updated: 2026-05-05
+updated: 2026-05-06
 repo: github.com/season179/jottrace
 ---
 
@@ -60,9 +60,9 @@ triggers the others.
 4. **Scheduler** — orchestrates reader, processor, and writer runs.
 
 The Claude CLI reader is the first one to ship. Codex CLI follows
-immediately after. Cursor and OpenCode are designed at stub level so the
-schema decisions they expose (in-place SQLite edits, JSON-file iteration
-order) are not surprises later.
+immediately after. Cursor, OpenCode, and other local-agent stores are tracked
+at inventory level so the schema decisions they expose (in-place SQLite edits,
+JSON-file iteration order, parent/child linkage) are not surprises later.
 
 ## Implementation
 
@@ -198,6 +198,11 @@ Readers do **not** interpret content. They preserve raw source events plus
 cheap deterministic metadata. Anything that requires meaning extraction
 (topics, decisions, dead ends, summaries) is processor work. The reader stays
 dumb on purpose.
+
+New local coding-agent sources must pass the reader fixture gate before they
+enter implementation scope. The current source inventory, deferred-source
+rules, and fixture privacy requirements live in
+`docs/reader-source-inventory.md`.
 
 ### Shared JSONL ingest core
 
@@ -514,38 +519,44 @@ aren't visible from this distance. Goal of including it here: validate
 that the events-table schema and the reader contract handle a non-JSONL
 source without modification.
 
-## Reader: OpenCode (JSON-files shape, designed stub)
+## Reader: OpenCode (SQLite shape, inventory candidate)
 
 ### Source
 
-- macOS CLI: `~/Library/Application Support/opencode/storage/`
-- Linux CLI: `~/.local/share/opencode/storage/`
-- Desktop variants: same parent directory but `ai.opencode.app` instead
-  of `opencode`.
-- Storage format is a directory tree of JSON files (not JSONL). Each
-  session is a subdirectory containing separate files for sessions,
-  messages, and parts, plus Tauri `.dat` files for the desktop variant.
-- Sessions can have parent/child relationships (similar to Claude CLI's
-  subagent sidechains, but folded into the storage tree shape rather
-  than expressed via filenames). The shared `parent_session_id` column
-  on `sessions` carries the link.
+- CLI/XDG path observed on this machine:
+  `~/.local/share/opencode/opencode.db`
+- This machine also has a coexisting JSON storage tree at
+  `~/.local/share/opencode/storage/{session,message,part,project,session_diff}/`.
+- SQLite appears to be the complete current store in the 2026-05-06
+  metadata-only check. The observed database has `session`, `message`, `part`,
+  `session_entry`, `project`, `workspace`, `event`, and `event_sequence`
+  tables; local counts were 62 sessions, 766 messages, and 3,325 parts.
+- The JSON storage tree exists and is source-shaped, but it should stay out of
+  reader scope until sanitized fixtures prove whether it is authoritative,
+  mirrored legacy data, or cache/reference material.
+- Parent/child session relationships live on `session.parent_id`; this machine
+  had 14 parent-linked OpenCode sessions in the metadata check. The shared
+  `parent_session_id` column on Jottrace `sessions` carries the link once a
+  fixture proves the deterministic derivation.
 
 ### Change-detection
 
-Per-file `mtime` over the session's subdirectory is the cheap signal.
-The reader can compute it directly on the relevant subdirectory rather
-than scanning the entire tree.
+SQLite databases can be edited in place, so file metadata is not enough. Use a
+per-session content hash, reliable updated timestamp, or last-seen row strategy
+once fixtures settle the table contract.
 
 ### Ordering key
 
-`seq` is the iteration order over the session's message/part files,
-sorted by some stable key (filename, creation order, or an explicit
-sequence field in the JSON). To be confirmed against a real fixture.
+`seq` derives from `message`, `part`, or `event` ordering. Candidate keys are
+`message.time_created` plus `message.id`, `part.message_id` plus `part.id`, or
+`event.seq` if the source starts populating that event-sourcing table. The
+choice must be stable across re-reads.
 
 ### Status
 
-Designed-stub. Full implementation needs a real fixture to settle the
-file-iteration order question and the parent/child session linkage.
+Inventory candidate. Full implementation needs a sanitized fixture to settle
+whether the SQLite DB or JSON storage tree is authoritative, plus the session
+id, event ordering key, parent/child linkage, and in-place update detection.
 
 ## Other readers (named, not designed)
 
@@ -554,7 +565,7 @@ readers" claim is honest. Each will get its own designed section when
 the user starts using that source or when implementation begins.
 
 - **Continue.** JSON files at `~/.continue/sessions/`. One file per
-  session. Similar to OpenCode's shape, simpler.
+  session. Similar to the JSON-file reader shape, simpler.
 - **Gemini CLI.** JSON files at `~/.gemini/tmp/<hash>/chats/`.
   Workspace-bucketed by hash. Includes "thoughts" (reasoning steps with
   timestamps) alongside conversation.
