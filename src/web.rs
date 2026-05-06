@@ -6,8 +6,8 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use crate::storage::{
-    IngestErrorSummary, LATEST_SCHEMA_VERSION, RAW_CODEC, ZSTD_CODEC, decode_event_payload_prefix,
-    sqlite_error, unresolved_ingest_errors_from_connection,
+    IngestErrorSummary, LATEST_SCHEMA_VERSION, RAW_CODEC, ZSTD_CODEC, decode_event_payload,
+    decode_event_payload_prefix, sqlite_error, unresolved_ingest_errors_from_connection,
 };
 use crate::{JottraceError, Result};
 
@@ -77,6 +77,7 @@ pub struct JournalEvent {
     pub codec: String,
     pub payload_size: u64,
     pub payload_preview: String,
+    pub payload_error: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -89,7 +90,6 @@ struct LoadedSession {
 struct SearchPattern {
     like: Option<String>,
     payload_needle: Option<String>,
-    include_payload: bool,
     decoded_payload_session_ids: Vec<i64>,
 }
 
@@ -167,21 +167,35 @@ impl WebServer {
             );
         }
 
-        if target_path(target) != "/" {
-            return self.write_response(
-                stream,
+        let (status, content_type, body) = match target_path(target) {
+            "/" => {
+                let query = journal_query_from_target(target);
+                let body = match journal_view_for_path(&self.db_path, &query) {
+                    Ok(view) => render_home_page(&view, &query),
+                    Err(error) => render_error_page(&self.db_path, &error),
+                };
+                ("200 OK", "text/html; charset=utf-8", body)
+            }
+            "/payload" => match event_payload_text_for_path(&self.db_path, target) {
+                Ok(Some(payload)) => ("200 OK", "text/plain; charset=utf-8", payload),
+                Ok(None) => (
+                    "404 Not Found",
+                    "text/plain; charset=utf-8",
+                    "payload not found".to_string(),
+                ),
+                Err(error) => (
+                    "500 Internal Server Error",
+                    "text/plain; charset=utf-8",
+                    error.to_string(),
+                ),
+            },
+            _ => (
                 "404 Not Found",
                 "text/plain; charset=utf-8",
-                "not found",
-            );
-        }
-
-        let query = journal_query_from_target(target);
-        let body = match journal_view_for_path(&self.db_path, &query) {
-            Ok(view) => render_home_page(&view, &query),
-            Err(error) => render_error_page(&self.db_path, &error),
+                "not found".to_string(),
+            ),
         };
-        self.write_response(stream, "200 OK", "text/html; charset=utf-8", &body)
+        self.write_response(stream, status, content_type, &body)
     }
 
     fn write_response(
@@ -232,7 +246,7 @@ impl WebServer {
 pub fn journal_view_for_path(path: &Path, query: &JournalQuery) -> Result<JournalView> {
     let conn = open_web_database(path)?;
     let mut search = search_pattern(query.search.as_deref(), query.include_payload_search);
-    if search.include_payload {
+    if search.payload_needle.is_some() {
         search.decoded_payload_session_ids =
             decoded_payload_matching_session_ids(path, &conn, &search)?;
     }
@@ -380,7 +394,7 @@ pub fn render_home_page(view: &JournalView, query: &JournalQuery) -> String {
             html.push_str("</dl><h2>Events</h2>");
             render_events(&mut html, &view.events, query, session);
             if let Some(event) = &view.expanded_event {
-                render_payload_panel(&mut html, event);
+                render_payload_panel(&mut html, event, session);
             }
             if let Some(page) = view.event_page {
                 render_event_pagination(&mut html, page, query, session);
@@ -413,6 +427,29 @@ fn open_web_database(path: &Path) -> Result<Connection> {
     Ok(conn)
 }
 
+fn event_payload_text_for_path(path: &Path, target: &str) -> Result<Option<String>> {
+    let query = journal_query_from_target(target);
+    let Some(source_session_id) = query.selected_source_session_id.as_deref() else {
+        return Ok(None);
+    };
+    let Some(key) = query.expanded_event else {
+        return Ok(None);
+    };
+
+    let conn = open_web_database(path)?;
+    let Some(session) = load_session_by_source_session_id(
+        path,
+        &conn,
+        query.selected_source.as_deref(),
+        source_session_id,
+    )?
+    else {
+        return Ok(None);
+    };
+
+    load_event_payload_text(path, &conn, session.id, key)
+}
+
 fn load_sessions(
     path: &Path,
     conn: &Connection,
@@ -430,14 +467,7 @@ fn load_sessions(
             OR sessions.source LIKE ?1 ESCAPE '\\'
             OR sessions.source_session_id LIKE ?1 ESCAPE '\\'
             OR COALESCE(sessions.cwd, '') LIKE ?1 ESCAPE '\\'
-            OR COALESCE(sessions.file_path, '') LIKE ?1 ESCAPE '\\'
-            OR (?2 = 1 AND EXISTS (
-                SELECT 1
-                FROM events
-                WHERE events.session_id = sessions.id
-                  AND events.codec = ?3
-                  AND CAST(substr(events.payload, 1, ?4) AS TEXT) LIKE ?1 ESCAPE '\\'
-            ))",
+            OR COALESCE(sessions.file_path, '') LIKE ?1 ESCAPE '\\'",
     );
     if !search.decoded_payload_session_ids.is_empty() {
         sql.push_str(" OR sessions.id IN (");
@@ -453,7 +483,7 @@ fn load_sessions(
     sql.push_str(
         " ORDER BY COALESCE(sessions.started_at, sessions.updated_at) DESC,
                   sessions.id DESC
-          LIMIT ?5 OFFSET ?6",
+          LIMIT ?2 OFFSET ?3",
     );
 
     let mut statement = conn
@@ -462,14 +492,7 @@ fn load_sessions(
 
     let mut sessions = statement
         .query_map(
-            params![
-                search.like.as_deref(),
-                search.include_payload as i64,
-                RAW_CODEC,
-                PAYLOAD_PREVIEW_BYTES as i64,
-                (limit + 1) as i64,
-                offset as i64,
-            ],
+            params![search.like.as_deref(), (limit + 1) as i64, offset as i64],
             loaded_session_from_row,
         )
         .map_err(|source| sqlite_error(path, source))?
@@ -489,6 +512,33 @@ fn load_sessions(
             has_next,
         },
     ))
+}
+
+fn load_event_payload_text(
+    path: &Path,
+    conn: &Connection,
+    session_id: i64,
+    key: EventKey,
+) -> Result<Option<String>> {
+    let row = conn
+        .query_row(
+            "SELECT payload, codec
+             FROM events
+             WHERE session_id = ?1
+               AND generation = ?2
+               AND seq = ?3
+             LIMIT 1",
+            params![session_id, key.generation, key.seq],
+            |row| Ok((row.get::<_, Vec<u8>>(0)?, row.get::<_, String>(1)?)),
+        )
+        .optional()
+        .map_err(|source| sqlite_error(path, source))?;
+
+    row.map(|(payload, codec)| {
+        decode_event_payload(&payload, &codec)
+            .map(|decoded| String::from_utf8_lossy(&decoded).into_owned())
+    })
+    .transpose()
 }
 
 fn select_session(
@@ -666,6 +716,7 @@ fn journal_event_from_row(
         seq: row.get("seq")?,
         ts: row.get("ts")?,
         payload_preview: payload_preview_from(&codec, payload_size),
+        payload_error: None,
         codec,
         payload_size,
     })
@@ -677,13 +728,32 @@ fn journal_event_with_payload(
     ts: Option<String>,
     codec: String,
     payload_size: u64,
-    payload_preview: Vec<u8>,
+    payload: Vec<u8>,
 ) -> Result<JournalEvent> {
+    let payload_preview = match decode_event_payload_prefix(&payload, &codec, PAYLOAD_PREVIEW_BYTES)
+    {
+        Ok(decoded) => String::from_utf8_lossy(&decoded)
+            .chars()
+            .take(PAYLOAD_PREVIEW_CHARS)
+            .collect(),
+        Err(error) => {
+            return Ok(JournalEvent {
+                generation,
+                seq,
+                ts,
+                payload_preview: String::new(),
+                payload_error: Some(error.to_string()),
+                codec,
+                payload_size,
+            });
+        }
+    };
     Ok(JournalEvent {
         generation,
         seq,
         ts,
-        payload_preview: payload_preview_for_codec(&codec, &payload_preview)?,
+        payload_preview,
+        payload_error: None,
         codec,
         payload_size,
     })
@@ -694,7 +764,6 @@ fn search_pattern(search: Option<&str>, include_payload_search: bool) -> SearchP
         return SearchPattern {
             like: None,
             payload_needle: None,
-            include_payload: false,
             decoded_payload_session_ids: Vec::new(),
         };
     };
@@ -703,7 +772,6 @@ fn search_pattern(search: Option<&str>, include_payload_search: bool) -> SearchP
     SearchPattern {
         like: Some(like_contains_pattern(search)),
         payload_needle: include_payload.then(|| search.to_lowercase()),
-        include_payload,
         decoded_payload_session_ids: Vec::new(),
     }
 }
@@ -742,37 +810,40 @@ fn decoded_payload_matching_session_ids(
 
     let mut statement = conn
         .prepare(
-            "SELECT session_id, payload
+            "SELECT session_id,
+                    CASE
+                        WHEN codec = ?1 THEN substr(payload, 1, ?3)
+                        ELSE payload
+                    END AS payload_prefix,
+                    codec
              FROM events
-             WHERE codec = ?1
+             WHERE codec IN (?1, ?2)
              ORDER BY session_id, generation, seq",
         )
         .map_err(|source| sqlite_error(path, source))?;
     let mut rows = statement
-        .query(params![ZSTD_CODEC])
+        .query(params![RAW_CODEC, ZSTD_CODEC, PAYLOAD_PREVIEW_BYTES as i64])
         .map_err(|source| sqlite_error(path, source))?;
     let mut session_ids = Vec::new();
+    let mut matched_session_id = None;
     while let Some(row) = rows.next().map_err(|source| sqlite_error(path, source))? {
         let session_id: i64 = row.get(0).map_err(|source| sqlite_error(path, source))?;
-        if session_ids.contains(&session_id) {
+        if matched_session_id == Some(session_id) {
             continue;
         }
         let payload: Vec<u8> = row.get(1).map_err(|source| sqlite_error(path, source))?;
-        let decoded = decode_event_payload_prefix(&payload, ZSTD_CODEC, PAYLOAD_PREVIEW_BYTES)?;
+        let codec: String = row.get(2).map_err(|source| sqlite_error(path, source))?;
+        let Ok(decoded) = decode_event_payload_prefix(&payload, &codec, PAYLOAD_PREVIEW_BYTES)
+        else {
+            continue;
+        };
         let preview = String::from_utf8_lossy(&decoded).to_lowercase();
         if preview.contains(needle) {
+            matched_session_id = Some(session_id);
             session_ids.push(session_id);
         }
     }
     Ok(session_ids)
-}
-
-fn payload_preview_for_codec(codec: &str, payload: &[u8]) -> Result<String> {
-    let decoded = decode_event_payload_prefix(payload, codec, PAYLOAD_PREVIEW_BYTES)?;
-    Ok(String::from_utf8_lossy(&decoded)
-        .chars()
-        .take(PAYLOAD_PREVIEW_CHARS)
-        .collect())
 }
 
 fn render_events(
@@ -804,7 +875,7 @@ fn render_events(
     html.push_str("</tbody></table></div>");
 }
 
-fn render_payload_panel(html: &mut String, event: &JournalEvent) {
+fn render_payload_panel(html: &mut String, event: &JournalEvent, session: &JournalSession) {
     html.push_str(
         "<div class=\"payload-panel\"><h3>Payload preview</h3><div class=\"muted\">generation ",
     );
@@ -814,9 +885,21 @@ fn render_payload_panel(html: &mut String, event: &JournalEvent) {
     html.push_str(" / ");
     write!(html, "{} bytes ", event.payload_size).expect("write html");
     html_escape_into(html, &event.codec);
-    html.push_str("</div><pre>");
+    html.push_str("</div>");
+    if let Some(error) = &event.payload_error {
+        html.push_str("<p class=\"error\">Payload unavailable</p><pre>");
+        html_escape_into(html, error);
+        html.push_str("</pre></div>");
+        return;
+    }
+
+    html.push_str("<pre>");
     html_escape_into(html, &event.payload_preview);
-    html.push_str("</pre></div>");
+    html.push_str("</pre>");
+    html.push_str("<p><a class=\"inspect\" href=\"");
+    html_escape_into(html, &event_payload_export_href(session, event));
+    html.push_str("\">Export full decoded payload</a></p>");
+    html.push_str("</div>");
 }
 
 fn render_ingest_errors(html: &mut String, ingest_errors: &[IngestErrorSummary]) {
@@ -980,6 +1063,21 @@ fn event_payload_href(
             seq: event.seq,
         }),
     )
+}
+
+fn event_payload_export_href(session: &JournalSession, event: &JournalEvent) -> String {
+    let mut href = String::from("/payload");
+    let mut first = true;
+    append_url_param(&mut href, &mut first, "source", &session.source);
+    append_url_param(&mut href, &mut first, "session", &session.source_session_id);
+    append_url_param(
+        &mut href,
+        &mut first,
+        "event_generation",
+        &event.generation.to_string(),
+    );
+    append_url_param(&mut href, &mut first, "event_seq", &event.seq.to_string());
+    href
 }
 
 #[derive(Debug, Clone, Copy)]
