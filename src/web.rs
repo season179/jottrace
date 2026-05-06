@@ -11,9 +11,10 @@ use crate::storage::{
 };
 use crate::{JottraceError, Result};
 
-const MAX_SESSIONS: usize = 200;
-const MAX_EVENTS: usize = 200;
+const SESSION_PAGE_SIZE: usize = 50;
+const EVENT_PAGE_SIZE: usize = 25;
 const MAX_INGEST_ERRORS: usize = 50;
+const MAX_QUERY_OFFSET: usize = 100_000;
 const MIN_PAYLOAD_SEARCH_CHARS: usize = 3;
 const PAYLOAD_PREVIEW_BYTES: usize = 4096;
 const PAYLOAD_PREVIEW_CHARS: usize = 280;
@@ -24,14 +25,35 @@ pub struct JournalQuery {
     pub selected_source: Option<String>,
     pub selected_source_session_id: Option<String>,
     pub search: Option<String>,
+    pub include_payload_search: bool,
+    pub session_offset: usize,
+    pub event_offset: usize,
+    pub expanded_event: Option<EventKey>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct EventKey {
+    pub generation: i64,
+    pub seq: i64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PageInfo {
+    pub offset: usize,
+    pub limit: usize,
+    pub has_previous: bool,
+    pub has_next: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct JournalView {
     pub db_path: PathBuf,
     pub sessions: Vec<JournalSession>,
+    pub session_page: PageInfo,
     pub selected_session: Option<JournalSession>,
     pub events: Vec<JournalEvent>,
+    pub event_page: Option<PageInfo>,
+    pub expanded_event: Option<JournalEvent>,
     pub unresolved_ingest_errors: Vec<IngestErrorSummary>,
 }
 
@@ -97,17 +119,27 @@ impl WebServer {
     }
 
     pub fn serve_once(&self) -> Result<()> {
-        let (mut stream, _) = self.listener.accept().map_err(|source| JottraceError::Io {
-            path: self.db_path.clone(),
-            source,
-        })?;
+        let mut stream = self.accept_stream()?;
         self.handle_stream(&mut stream)
     }
 
     pub fn serve_forever(&self) -> Result<()> {
         loop {
-            self.serve_once()?;
+            let mut stream = self.accept_stream()?;
+            if self.handle_stream(&mut stream).is_err() {
+                continue;
+            }
         }
+    }
+
+    fn accept_stream(&self) -> Result<TcpStream> {
+        self.listener
+            .accept()
+            .map(|(stream, _)| stream)
+            .map_err(|source| JottraceError::Io {
+                path: self.db_path.clone(),
+                source,
+            })
     }
 
     fn handle_stream(&self, stream: &mut TcpStream) -> Result<()> {
@@ -197,8 +229,10 @@ impl WebServer {
 
 pub fn journal_view_for_path(path: &Path, query: &JournalQuery) -> Result<JournalView> {
     let conn = open_web_database(path)?;
-    let search = search_pattern(query.search.as_deref());
-    let loaded_sessions = load_sessions(path, &conn, &search)?;
+    let search = search_pattern(query.search.as_deref(), query.include_payload_search);
+    let session_offset = bounded_offset(query.session_offset);
+    let event_offset = bounded_offset(query.event_offset);
+    let (loaded_sessions, session_page) = load_sessions(path, &conn, &search, session_offset)?;
     let selected_session = select_session(
         path,
         &conn,
@@ -206,9 +240,16 @@ pub fn journal_view_for_path(path: &Path, query: &JournalQuery) -> Result<Journa
         query.selected_source.as_deref(),
         query.selected_source_session_id.as_deref(),
     )?;
-    let events = match selected_session.as_ref() {
-        Some(session) => load_events(path, &conn, session.id)?,
-        None => Vec::new(),
+    let (events, event_page, expanded_event) = match selected_session.as_ref() {
+        Some(session) => {
+            let (events, page) = load_events(path, &conn, session.id, event_offset)?;
+            let expanded_event = match query.expanded_event {
+                Some(key) => load_event_payload(path, &conn, session.id, key)?,
+                None => None,
+            };
+            (events, Some(page), expanded_event)
+        }
+        None => (Vec::new(), None, None),
     };
     let unresolved_ingest_errors =
         unresolved_ingest_errors_from_connection(path, &conn, MAX_INGEST_ERRORS)?;
@@ -220,8 +261,11 @@ pub fn journal_view_for_path(path: &Path, query: &JournalQuery) -> Result<Journa
     Ok(JournalView {
         db_path: path.to_path_buf(),
         sessions,
+        session_page,
         selected_session: selected_session.map(|loaded| loaded.session),
         events,
+        event_page,
+        expanded_event,
         unresolved_ingest_errors,
     })
 }
@@ -237,36 +281,40 @@ pub fn render_home_page(view: &JournalView, query: &JournalQuery) -> String {
         .as_ref()
         .map(|session| session.source.as_str());
     let search = query.search.as_deref().unwrap_or("");
+    let payload_checked = if query.include_payload_search {
+        " checked"
+    } else {
+        ""
+    };
 
     html.push_str("<!doctype html><html lang=\"en\"><head><meta charset=\"utf-8\">");
     html.push_str("<meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">");
     html.push_str("<title>Jottrace Journal</title>");
     html.push_str("<style>");
     html.push_str(
-        ":root{color-scheme:light dark;font-family:Inter,ui-sans-serif,system-ui,sans-serif;line-height:1.45}\
-         body{margin:0;background:#f7f7f3;color:#202124}\
-         header{background:#113f3a;color:#fff;padding:20px 28px}\
-         main{display:grid;grid-template-columns:minmax(280px,360px) 1fr;gap:0;min-height:calc(100vh - 96px)}\
-         aside{border-right:1px solid #d8d5ca;background:#fffdf7;padding:18px;overflow:auto}\
-         section{padding:22px 28px;overflow:auto}\
-         h1,h2,h3{margin:0 0 12px}h1{font-size:1.35rem}h2{font-size:1.05rem}h3{font-size:.95rem}\
-         .muted{color:#62645f}.db{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:.82rem;word-break:break-all}\
-         form{display:flex;gap:8px;margin:0 0 16px}input{flex:1;padding:8px 10px;border:1px solid #b9b7ad;border-radius:6px;background:#fff;color:#202124}\
-         button{padding:8px 12px;border:0;border-radius:6px;background:#176b5f;color:#fff;font-weight:650}\
-         a{color:#175e87;text-decoration:none}.session{display:block;border-top:1px solid #e6e2d8;padding:12px 0}.selected{font-weight:700}\
-         dl{display:grid;grid-template-columns:max-content 1fr;gap:6px 12px;margin:0 0 18px}dt{font-weight:700}dd{margin:0;word-break:break-word}\
-         table{width:100%;border-collapse:collapse;background:#fff}th,td{border-bottom:1px solid #e5e1d7;padding:8px;text-align:left;vertical-align:top}\
-         th{font-size:.78rem;text-transform:uppercase;letter-spacing:.04em;background:#efeee7}pre{white-space:pre-wrap;word-break:break-word;margin:8px 0 0;font-size:.84rem}\
-         details summary{cursor:pointer;color:#176b5f;font-weight:650}.error{color:#8a280d;font-weight:700}\
-         @media(max-width:760px){main{display:block}aside{border-right:0;border-bottom:1px solid #d8d5ca}}",
+        ":root{color-scheme:light;--ink:#151715;--paper:#eef2ee;--line:#c9cec7;--muted:#5d665f;--green:#0e5c4f;--acid:#d8ff3d;--rust:#a93f22;font-family:\"Avenir Next\",\"Gill Sans\",Verdana,sans-serif;line-height:1.45}\
+         *{box-sizing:border-box}body{margin:0;background:linear-gradient(90deg,rgba(21,23,21,.045) 1px,transparent 1px) 0 0/34px 34px,linear-gradient(0deg,rgba(21,23,21,.035) 1px,transparent 1px) 0 0/34px 34px,var(--paper);color:var(--ink)}\
+         .topbar{display:grid;grid-template-columns:1fr minmax(260px,42vw);gap:24px;align-items:end;background:var(--ink);color:#f8faef;padding:24px 30px 22px;border-bottom:5px solid var(--acid)}\
+         .kicker{margin:0 0 5px;font-size:.72rem;text-transform:uppercase;letter-spacing:.18em;color:var(--acid);font-weight:800}.topbar h1{margin:0;font-family:Georgia,\"Times New Roman\",serif;font-size:clamp(2rem,4vw,4.2rem);font-weight:900;line-height:.92}\
+         .db{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:.78rem;word-break:break-all;color:#dfe9df;text-align:right}.shell{display:grid;grid-template-columns:minmax(300px,390px) 1fr;min-height:calc(100vh - 118px)}\
+         .rail{border-right:2px solid var(--line);background:rgba(251,251,247,.92);padding:18px;overflow:auto}.workspace{padding:24px 30px 40px;overflow:auto}\
+         h2,h3{margin:0 0 12px;line-height:1.1}h2{font-size:1.02rem;text-transform:uppercase;letter-spacing:.12em}h3{font-size:1rem}.muted{color:var(--muted)}\
+         .search{display:grid;grid-template-columns:1fr auto;gap:9px;margin:0 0 18px}.search input[type=search]{min-width:0;padding:10px 11px;border:2px solid var(--ink);border-radius:0;background:#fff;color:var(--ink);font:inherit}.search button{padding:10px 14px;border:2px solid var(--ink);border-radius:0;background:var(--acid);color:var(--ink);font-weight:900;text-transform:uppercase;letter-spacing:.06em}.payload-toggle{grid-column:1/3;display:flex;gap:8px;align-items:center;font-size:.86rem;color:var(--muted)}\
+         a{color:var(--green);text-decoration:none}.session{display:block;border-top:1px solid var(--line);border-left:5px solid transparent;padding:12px 10px 12px 12px;color:var(--ink)}.session:hover{background:#fff;border-left-color:var(--rust)}.session.selected{background:var(--ink);border-left-color:var(--acid);color:#f8faef}.session strong{display:block;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:.84rem;overflow-wrap:anywhere}.session .line{display:block;margin-top:3px;font-size:.82rem;color:inherit;opacity:.72}.pager{display:flex;flex-wrap:wrap;gap:8px;margin:14px 0 4px}.pager a,.inspect{display:inline-flex;align-items:center;min-height:32px;border:2px solid var(--ink);padding:5px 10px;background:#fff;color:var(--ink);font-weight:850;text-transform:uppercase;letter-spacing:.05em;font-size:.76rem}.pager a:hover,.inspect:hover{background:var(--acid)}\
+         .summary{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:12px;margin:0 0 22px}.metric{border-top:5px solid var(--ink);background:rgba(255,255,255,.7);padding:10px 0}.metric b{display:block;font-size:1.35rem;line-height:1}.metric span{display:block;margin-top:2px;color:var(--muted);font-size:.78rem;text-transform:uppercase;letter-spacing:.08em}\
+         dl{display:grid;grid-template-columns:max-content 1fr;gap:7px 14px;margin:0 0 24px;max-width:980px}dt{font-weight:900;text-transform:uppercase;letter-spacing:.08em;font-size:.72rem;color:var(--muted)}dd{margin:0;word-break:break-word}\
+         .table-scroll{max-width:100%;overflow-x:auto}table{width:100%;min-width:640px;border-collapse:collapse;background:rgba(255,255,255,.78);border-top:3px solid var(--ink)}th,td{border-bottom:1px solid var(--line);padding:9px 8px;text-align:left;vertical-align:top}th{font-size:.72rem;text-transform:uppercase;letter-spacing:.12em;color:var(--muted);background:#e2e8e2}td{font-size:.9rem}.number{font-family:ui-monospace,SFMono-Regular,Menlo,monospace}.payload-panel{margin:14px 0 22px;border-left:6px solid var(--rust);background:#fff;padding:14px 16px;box-shadow:8px 8px 0 rgba(21,23,21,.08)}pre{white-space:pre-wrap;word-break:break-word;margin:8px 0 0;font-size:.84rem;font-family:ui-monospace,SFMono-Regular,Menlo,monospace}.error{color:#8a280d;font-weight:900}\
+         @media(max-width:860px){.topbar{display:block;padding:20px}.db{text-align:left;margin-top:12px}.shell{display:block}.rail{border-right:0;border-bottom:2px solid var(--line)}.workspace{padding:20px}.summary{grid-template-columns:repeat(2,minmax(0,1fr))}table{font-size:.88rem}}",
     );
     html.push_str("</style></head><body>");
-    html.push_str("<header><h1>Jottrace Journal</h1><div class=\"db\">");
+    html.push_str("<header class=\"topbar\"><div><p class=\"kicker\">local-only session browser</p><h1>Jottrace</h1></div><div class=\"db\">");
     html_escape_into(&mut html, &view.db_path.display().to_string());
-    html.push_str("</div></header><main><aside>");
-    html.push_str("<form method=\"get\" action=\"/\"><input name=\"q\" type=\"search\" value=\"");
+    html.push_str("</div></header><main class=\"shell\"><aside class=\"rail\">");
+    html.push_str("<form class=\"search\" method=\"get\" action=\"/\"><input name=\"q\" type=\"search\" value=\"");
     html_escape_into(&mut html, search);
-    html.push_str("\" placeholder=\"Search source, cwd, path, session id, payload\"><button type=\"submit\">Search</button></form>");
+    html.push_str("\" placeholder=\"Search sessions\"><button type=\"submit\">Search</button><label class=\"payload-toggle\"><input name=\"payload\" type=\"checkbox\" value=\"1\"");
+    html.push_str(payload_checked);
+    html.push_str("> include payload text</label></form>");
     html.push_str("<h2>Sessions</h2>");
     if view.sessions.is_empty() {
         html.push_str("<p class=\"muted\">No sessions found.</p>");
@@ -280,26 +328,36 @@ pub fn render_home_page(view: &JournalView, query: &JournalQuery) -> String {
             "session"
         };
         write!(html, "<a class=\"{}\" href=\"", class).expect("write html");
-        html_escape_into(&mut html, &session_href(session, search));
+        html_escape_into(&mut html, &session_href(session, query));
         html.push_str("\">");
         html.push_str("<strong>");
         html_escape_into(&mut html, &session.source_session_id);
-        html.push_str("</strong><br><span class=\"muted\">");
+        html.push_str("</strong><span class=\"line\">");
         html_escape_into(&mut html, &session.source);
-        html.push_str(" · event count ");
+        html.push_str(" / ");
         write!(html, "{}", session.event_count).expect("write html");
-        html.push_str("</span>");
+        html.push_str(" events</span>");
         if let Some(cwd) = &session.cwd {
-            html.push_str("<br><span class=\"muted\">");
+            html.push_str("<span class=\"line\">");
             html_escape_into(&mut html, cwd);
             html.push_str("</span>");
         }
         html.push_str("</a>");
     }
-    html.push_str("</aside><section>");
+    render_session_pagination(&mut html, view, query);
+    html.push_str("</aside><section class=\"workspace\">");
 
     match &view.selected_session {
         Some(session) => {
+            html.push_str("<div class=\"summary\"><div class=\"metric\"><b>");
+            write!(html, "{}", view.sessions.len()).expect("write html");
+            html.push_str("</b><span>visible sessions</span></div><div class=\"metric\"><b>");
+            write!(html, "{}", session.event_count).expect("write html");
+            html.push_str("</b><span>session events</span></div><div class=\"metric\"><b>");
+            write!(html, "{}", view.events.len()).expect("write html");
+            html.push_str("</b><span>visible events</span></div><div class=\"metric\"><b>");
+            write!(html, "{}", view.unresolved_ingest_errors.len()).expect("write html");
+            html.push_str("</b><span>open errors</span></div></div>");
             html.push_str("<h2>Selected session</h2><dl>");
             definition(&mut html, "source", &session.source);
             definition(&mut html, "session id", &session.source_session_id);
@@ -314,7 +372,13 @@ pub fn render_home_page(view: &JournalView, query: &JournalQuery) -> String {
             optional_definition(&mut html, "ended", session.ended_at.as_deref());
             definition(&mut html, "event count", &session.event_count.to_string());
             html.push_str("</dl><h2>Events</h2>");
-            render_events(&mut html, &view.events);
+            render_events(&mut html, &view.events, query, session);
+            if let Some(event) = &view.expanded_event {
+                render_payload_panel(&mut html, event);
+            }
+            if let Some(page) = view.event_page {
+                render_event_pagination(&mut html, page, query, session);
+            }
         }
         None => html.push_str("<h2>No session selected</h2>"),
     }
@@ -347,7 +411,9 @@ fn load_sessions(
     path: &Path,
     conn: &Connection,
     search: &SearchPattern,
-) -> Result<Vec<LoadedSession>> {
+    offset: usize,
+) -> Result<(Vec<LoadedSession>, PageInfo)> {
+    let limit = SESSION_PAGE_SIZE;
     let mut statement = conn
         .prepare(
             "SELECT sessions.id, sessions.source, sessions.source_session_id,
@@ -369,24 +435,39 @@ fn load_sessions(
                 ))
              ORDER BY COALESCE(sessions.started_at, sessions.updated_at) DESC,
                       sessions.id DESC
-             LIMIT ?5",
+             LIMIT ?5 OFFSET ?6",
         )
         .map_err(|source| sqlite_error(path, source))?;
 
-    statement
+    let mut sessions = statement
         .query_map(
             params![
                 search.like.as_deref(),
                 search.include_payload as i64,
                 RAW_CODEC,
                 PAYLOAD_PREVIEW_BYTES as i64,
-                MAX_SESSIONS as i64,
+                (limit + 1) as i64,
+                offset as i64,
             ],
             loaded_session_from_row,
         )
         .map_err(|source| sqlite_error(path, source))?
         .collect::<std::result::Result<Vec<_>, _>>()
-        .map_err(|source| sqlite_error(path, source))
+        .map_err(|source| sqlite_error(path, source))?;
+    let has_next = sessions.len() > limit;
+    if has_next {
+        sessions.truncate(limit);
+    }
+
+    Ok((
+        sessions,
+        PageInfo {
+            offset,
+            limit,
+            has_previous: offset > 0,
+            has_next,
+        },
+    ))
 }
 
 fn select_session(
@@ -442,34 +523,75 @@ fn session_matches(
         && selected_source.is_none_or(|source| session.source == source)
 }
 
-fn load_events(path: &Path, conn: &Connection, session_id: i64) -> Result<Vec<JournalEvent>> {
+fn load_events(
+    path: &Path,
+    conn: &Connection,
+    session_id: i64,
+    offset: usize,
+) -> Result<(Vec<JournalEvent>, PageInfo)> {
+    let limit = EVENT_PAGE_SIZE;
     let mut statement = conn
         .prepare(
-            "SELECT generation, seq, ts, codec, payload_size,
-                    CASE
-                        WHEN codec = ?3 THEN substr(payload, 1, ?4)
-                        ELSE x''
-                    END AS payload_preview
+            "SELECT generation, seq, ts, codec, payload_size
              FROM events
              WHERE session_id = ?1
              ORDER BY generation, seq
-             LIMIT ?2",
+             LIMIT ?2 OFFSET ?3",
         )
         .map_err(|source| sqlite_error(path, source))?;
 
-    statement
+    let mut events = statement
         .query_map(
-            params![
-                session_id,
-                MAX_EVENTS as i64,
-                RAW_CODEC,
-                PAYLOAD_PREVIEW_BYTES as i64,
-            ],
-            journal_event_from_row,
+            params![session_id, (limit + 1) as i64, offset as i64],
+            journal_event_metadata_from_row,
         )
         .map_err(|source| sqlite_error(path, source))?
         .collect::<std::result::Result<Vec<_>, _>>()
-        .map_err(|source| sqlite_error(path, source))
+        .map_err(|source| sqlite_error(path, source))?;
+    let has_next = events.len() > limit;
+    if has_next {
+        events.truncate(limit);
+    }
+
+    Ok((
+        events,
+        PageInfo {
+            offset,
+            limit,
+            has_previous: offset > 0,
+            has_next,
+        },
+    ))
+}
+
+fn load_event_payload(
+    path: &Path,
+    conn: &Connection,
+    session_id: i64,
+    key: EventKey,
+) -> Result<Option<JournalEvent>> {
+    conn.query_row(
+        "SELECT generation, seq, ts, codec, payload_size,
+                CASE
+                    WHEN codec = ?4 THEN substr(payload, 1, ?5)
+                    ELSE x''
+                END AS payload_preview
+         FROM events
+         WHERE session_id = ?1
+           AND generation = ?2
+           AND seq = ?3
+         LIMIT 1",
+        params![
+            session_id,
+            key.generation,
+            key.seq,
+            RAW_CODEC,
+            PAYLOAD_PREVIEW_BYTES as i64,
+        ],
+        journal_event_with_payload_from_row,
+    )
+    .optional()
+    .map_err(|source| sqlite_error(path, source))
 }
 
 fn loaded_session_from_row(row: &Row<'_>) -> rusqlite::Result<LoadedSession> {
@@ -489,21 +611,35 @@ fn loaded_session_from_row(row: &Row<'_>) -> rusqlite::Result<LoadedSession> {
     })
 }
 
-fn journal_event_from_row(row: &Row<'_>) -> rusqlite::Result<JournalEvent> {
-    let payload_size: i64 = row.get("payload_size")?;
+fn journal_event_metadata_from_row(row: &Row<'_>) -> rusqlite::Result<JournalEvent> {
+    journal_event_from_row(row, |_, _| String::new())
+}
+
+fn journal_event_with_payload_from_row(row: &Row<'_>) -> rusqlite::Result<JournalEvent> {
     let preview_bytes: Vec<u8> = row.get("payload_preview")?;
+    journal_event_from_row(row, |codec, payload_size| {
+        payload_preview(codec, payload_size, &preview_bytes)
+    })
+}
+
+fn journal_event_from_row(
+    row: &Row<'_>,
+    payload_preview_from: impl FnOnce(&str, u64) -> String,
+) -> rusqlite::Result<JournalEvent> {
+    let payload_size: i64 = row.get("payload_size")?;
     let codec: String = row.get("codec")?;
+    let payload_size = payload_size as u64;
     Ok(JournalEvent {
         generation: row.get("generation")?,
         seq: row.get("seq")?,
         ts: row.get("ts")?,
-        payload_preview: payload_preview(&codec, payload_size as u64, &preview_bytes),
+        payload_preview: payload_preview_from(&codec, payload_size),
         codec,
-        payload_size: payload_size as u64,
+        payload_size,
     })
 }
 
-fn search_pattern(search: Option<&str>) -> SearchPattern {
+fn search_pattern(search: Option<&str>, include_payload_search: bool) -> SearchPattern {
     let Some(search) = search.map(str::trim).filter(|search| !search.is_empty()) else {
         return SearchPattern {
             like: None,
@@ -512,7 +648,16 @@ fn search_pattern(search: Option<&str>) -> SearchPattern {
     };
     SearchPattern {
         like: Some(like_contains_pattern(search)),
-        include_payload: search.chars().count() >= MIN_PAYLOAD_SEARCH_CHARS,
+        include_payload: include_payload_search
+            && search.chars().count() >= MIN_PAYLOAD_SEARCH_CHARS,
+    }
+}
+
+fn bounded_offset(offset: usize) -> usize {
+    if offset <= MAX_QUERY_OFFSET {
+        offset
+    } else {
+        0
     }
 }
 
@@ -542,30 +687,48 @@ fn payload_preview(codec: &str, payload_size: u64, payload: &[u8]) -> String {
         .collect()
 }
 
-fn render_events(html: &mut String, events: &[JournalEvent]) {
+fn render_events(
+    html: &mut String,
+    events: &[JournalEvent],
+    query: &JournalQuery,
+    session: &JournalSession,
+) {
     if events.is_empty() {
         html.push_str("<p class=\"muted\">No events found for this session.</p>");
         return;
     }
 
-    html.push_str("<table><thead><tr><th>generation</th><th>seq</th><th>time</th><th>payload</th></tr></thead><tbody>");
+    html.push_str("<div class=\"table-scroll\"><table><thead><tr><th>generation</th><th>seq</th><th>time</th><th>payload</th></tr></thead><tbody>");
     for event in events {
-        html.push_str("<tr><td>");
+        html.push_str("<tr><td class=\"number\">");
         write!(html, "{}", event.generation).expect("write html");
-        html.push_str("</td><td>");
+        html.push_str("</td><td class=\"number\">");
         write!(html, "{}", event.seq).expect("write html");
         html.push_str("</td><td>");
         html_escape_into(html, event.ts.as_deref().unwrap_or(""));
-        html.push_str("</td><td><details><summary>");
-        html_escape_into(
-            html,
-            &format!("{} bytes {}", event.payload_size, event.codec),
-        );
-        html.push_str("</summary><pre>");
-        html_escape_into(html, &event.payload_preview);
-        html.push_str("</pre></details></td></tr>");
+        html.push_str("</td><td><a class=\"inspect\" href=\"");
+        html_escape_into(html, &event_payload_href(query, session, event));
+        html.push_str("\">Inspect ");
+        write!(html, "{} bytes ", event.payload_size).expect("write html");
+        html_escape_into(html, &event.codec);
+        html.push_str("</a></td></tr>");
     }
-    html.push_str("</tbody></table>");
+    html.push_str("</tbody></table></div>");
+}
+
+fn render_payload_panel(html: &mut String, event: &JournalEvent) {
+    html.push_str(
+        "<div class=\"payload-panel\"><h3>Payload preview</h3><div class=\"muted\">generation ",
+    );
+    write!(html, "{}", event.generation).expect("write html");
+    html.push_str(" / seq ");
+    write!(html, "{}", event.seq).expect("write html");
+    html.push_str(" / ");
+    write!(html, "{} bytes ", event.payload_size).expect("write html");
+    html_escape_into(html, &event.codec);
+    html.push_str("</div><pre>");
+    html_escape_into(html, &event.payload_preview);
+    html.push_str("</pre></div>");
 }
 
 fn render_ingest_errors(html: &mut String, ingest_errors: &[IngestErrorSummary]) {
@@ -574,7 +737,7 @@ fn render_ingest_errors(html: &mut String, ingest_errors: &[IngestErrorSummary])
         return;
     }
 
-    html.push_str("<table><thead><tr><th>source</th><th>session</th><th>location</th><th>error</th></tr></thead><tbody>");
+    html.push_str("<div class=\"table-scroll\"><table><thead><tr><th>source</th><th>session</th><th>location</th><th>error</th></tr></thead><tbody>");
     for ingest_error in ingest_errors {
         html.push_str("<tr><td>");
         html_escape_into(html, &ingest_error.source);
@@ -594,7 +757,7 @@ fn render_ingest_errors(html: &mut String, ingest_errors: &[IngestErrorSummary])
         html_escape_into(html, &ingest_error.message);
         html.push_str("</td></tr>");
     }
-    html.push_str("</tbody></table>");
+    html.push_str("</tbody></table></div>");
 }
 
 fn definition(html: &mut String, label: &str, value: &str) {
@@ -611,17 +774,200 @@ fn optional_definition(html: &mut String, label: &str, value: Option<&str>) {
     }
 }
 
-fn session_href(session: &JournalSession, search: &str) -> String {
-    let mut href = format!(
-        "?source={}&session={}",
-        url_encode(&session.source),
-        url_encode(&session.source_session_id)
-    );
-    if !search.is_empty() {
-        href.push_str("&q=");
-        href.push_str(&url_encode(search));
+fn render_session_pagination(html: &mut String, view: &JournalView, query: &JournalQuery) {
+    if !view.session_page.has_previous && !view.session_page.has_next {
+        return;
     }
-    href
+
+    let selected_session = explicit_selected_session_key(view, query);
+    html.push_str("<nav class=\"pager\" aria-label=\"Session pages\">");
+    if view.session_page.has_previous {
+        html.push_str("<a href=\"");
+        html_escape_into(
+            html,
+            &state_href(
+                selected_session,
+                query,
+                view.session_page
+                    .offset
+                    .saturating_sub(view.session_page.limit),
+                0,
+                None,
+            ),
+        );
+        html.push_str("\">Previous sessions</a>");
+    }
+    if view.session_page.has_next {
+        html.push_str("<a href=\"");
+        html_escape_into(
+            html,
+            &state_href(
+                selected_session,
+                query,
+                view.session_page.offset + view.session_page.limit,
+                0,
+                None,
+            ),
+        );
+        html.push_str("\">Next sessions</a>");
+    }
+    html.push_str("</nav>");
+}
+
+fn explicit_selected_session_key<'a>(
+    view: &'a JournalView,
+    query: &JournalQuery,
+) -> Option<SelectedSessionKey<'a>> {
+    query
+        .selected_source_session_id
+        .as_ref()
+        .and(view.selected_session.as_ref())
+        .map(SelectedSessionKey::from)
+}
+
+fn render_event_pagination(
+    html: &mut String,
+    page: PageInfo,
+    query: &JournalQuery,
+    session: &JournalSession,
+) {
+    if !page.has_previous && !page.has_next {
+        return;
+    }
+
+    html.push_str("<nav class=\"pager\" aria-label=\"Event pages\">");
+    if page.has_previous {
+        html.push_str("<a href=\"");
+        html_escape_into(
+            html,
+            &state_href(
+                Some(SelectedSessionKey::from(session)),
+                query,
+                query.session_offset,
+                page.offset.saturating_sub(page.limit),
+                None,
+            ),
+        );
+        html.push_str("\">Previous events</a>");
+    }
+    if page.has_next {
+        html.push_str("<a href=\"");
+        html_escape_into(
+            html,
+            &state_href(
+                Some(SelectedSessionKey::from(session)),
+                query,
+                query.session_offset,
+                page.offset + page.limit,
+                None,
+            ),
+        );
+        html.push_str("\">Next events</a>");
+    }
+    html.push_str("</nav>");
+}
+
+fn session_href(session: &JournalSession, query: &JournalQuery) -> String {
+    state_href(
+        Some(SelectedSessionKey::from(session)),
+        query,
+        query.session_offset,
+        0,
+        None,
+    )
+}
+
+fn event_payload_href(
+    query: &JournalQuery,
+    session: &JournalSession,
+    event: &JournalEvent,
+) -> String {
+    state_href(
+        Some(SelectedSessionKey::from(session)),
+        query,
+        query.session_offset,
+        query.event_offset,
+        Some(EventKey {
+            generation: event.generation,
+            seq: event.seq,
+        }),
+    )
+}
+
+#[derive(Debug, Clone, Copy)]
+struct SelectedSessionKey<'a> {
+    source: Option<&'a str>,
+    source_session_id: &'a str,
+}
+
+impl<'a> From<&'a JournalSession> for SelectedSessionKey<'a> {
+    fn from(session: &'a JournalSession) -> Self {
+        Self {
+            source: Some(&session.source),
+            source_session_id: &session.source_session_id,
+        }
+    }
+}
+
+fn state_href(
+    selected_session: Option<SelectedSessionKey<'_>>,
+    query: &JournalQuery,
+    session_offset: usize,
+    event_offset: usize,
+    expanded_event: Option<EventKey>,
+) -> String {
+    let mut href = String::new();
+    let mut first = true;
+    if let Some(session) = selected_session {
+        if let Some(source) = session.source {
+            append_url_param(&mut href, &mut first, "source", source);
+        }
+        append_url_param(&mut href, &mut first, "session", session.source_session_id);
+    }
+    if let Some(search) = query.search.as_deref().filter(|search| !search.is_empty()) {
+        append_url_param(&mut href, &mut first, "q", search);
+    }
+    if query.include_payload_search {
+        append_url_param(&mut href, &mut first, "payload", "1");
+    }
+    if session_offset > 0 {
+        append_url_param(
+            &mut href,
+            &mut first,
+            "session_offset",
+            &session_offset.to_string(),
+        );
+    }
+    if event_offset > 0 {
+        append_url_param(
+            &mut href,
+            &mut first,
+            "event_offset",
+            &event_offset.to_string(),
+        );
+    }
+    if let Some(event) = expanded_event {
+        append_url_param(
+            &mut href,
+            &mut first,
+            "event_generation",
+            &event.generation.to_string(),
+        );
+        append_url_param(&mut href, &mut first, "event_seq", &event.seq.to_string());
+    }
+    if href.is_empty() {
+        "/".to_string()
+    } else {
+        href
+    }
+}
+
+fn append_url_param(href: &mut String, first: &mut bool, key: &str, value: &str) {
+    href.push(if *first { '?' } else { '&' });
+    *first = false;
+    href.push_str(key);
+    href.push('=');
+    href.push_str(&url_encode(value));
 }
 
 fn html_escape_into(output: &mut String, value: &str) {
@@ -668,16 +1014,34 @@ fn journal_query_from_target(target: &str) -> JournalQuery {
     };
 
     let mut query = JournalQuery::default();
+    let mut event_generation = None;
+    let mut event_seq = None;
     for pair in raw_query.split('&') {
         let (key, value) = pair.split_once('=').unwrap_or((pair, ""));
         match key {
             "source" => query.selected_source = Some(percent_decode(value)),
             "session" => query.selected_source_session_id = Some(percent_decode(value)),
             "q" => query.search = Some(percent_decode(value)),
+            "payload" => query.include_payload_search = value == "1" || value == "true",
+            "session_offset" => query.session_offset = parse_offset(value),
+            "event_offset" => query.event_offset = parse_offset(value),
+            "event_generation" => event_generation = percent_decode(value).parse().ok(),
+            "event_seq" => event_seq = percent_decode(value).parse().ok(),
             _ => {}
         }
     }
+    if let (Some(generation), Some(seq)) = (event_generation, event_seq) {
+        query.expanded_event = Some(EventKey { generation, seq });
+    }
     query
+}
+
+fn parse_offset(value: &str) -> usize {
+    percent_decode(value)
+        .parse()
+        .ok()
+        .map(bounded_offset)
+        .unwrap_or(0)
 }
 
 fn percent_decode(value: &str) -> String {
