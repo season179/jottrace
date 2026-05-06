@@ -3,11 +3,11 @@
 Jottrace preserves local AI coding-session transcripts into a private SQLite
 journal you control.
 
-Today it can ingest Claude CLI / Claude Code and Codex CLI JSONL session files,
-plus Gemini CLI chat JSON files. It also preserves Claude subagent sidechain
-sessions and reports the local journal status from the command line. Cursor,
-OpenCode, and other readers are tracked in the design docs, but are not
-implemented as user-facing ingest sources yet.
+Today it can ingest Claude CLI / Claude Code, Codex CLI, Factory /
+Droid-style JSONL session files, and Gemini CLI chat JSON files. It also
+preserves Claude subagent sidechain sessions and reports the local journal
+status from the command line. Cursor, OpenCode, and other readers are tracked
+in the design docs, but are not implemented as user-facing ingest sources yet.
 
 ## Features
 
@@ -15,7 +15,8 @@ implemented as user-facing ingest sources yet.
 - Keep local state in `~/.jottrace/db.sqlite`, or another directory via
   `JOTTRACE_HOME`.
 - Check the data directory and database with `jottrace doctor`.
-- Ingest Claude, Codex, and Gemini session files with `jottrace ingest`.
+- Ingest Claude, Codex, Factory, and Gemini session files with
+  `jottrace ingest`.
 - Inspect stored session, event, schema, and ingest-error counts with
   `jottrace status`.
 - Preserve Claude subagent sidechains as distinct child sessions linked to the
@@ -95,6 +96,14 @@ stable session id.
 For Gemini CLI, Jottrace reads chat JSON files under
 `~/.gemini/tmp/<project-or-hash>/chats/*.json`, using each file's `sessionId`
 as the stable session id and preserving the ordered `messages[]` entries.
+
+It also scans Factory / Droid-style sessions under:
+
+- `~/.factory/sessions`
+
+For Factory, Jottrace reads nested `sessions/<encoded-cwd>/*.jsonl` files,
+uses the first committed `session_start.id` as the stable session id, and links
+matching sibling `.settings.json` files through deterministic source metadata.
 
 The ingest command stores raw source event/message payloads and cheap
 deterministic session metadata, then prints the database path, discovered file

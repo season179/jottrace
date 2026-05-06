@@ -212,6 +212,16 @@ fn reader_fixture_corpus_has_sanitized_opencode_sqlite_shape() {
 }
 
 #[test]
+fn reader_fixture_corpus_has_issue_65_factory_shapes() {
+    for path in [
+        "factory/sessions/-Users-fixture-Workspace-jottrace/00000000-0000-4000-8000-000000000065.jsonl",
+        "factory/sessions/-Users-fixture-Workspace-jottrace/00000000-0000-4000-8000-000000000065.settings.json",
+    ] {
+        assert!(fixture(path).exists(), "missing fixture {path}");
+    }
+}
+
+#[test]
 fn reader_fixture_readme_documents_opencode_fixture_status() {
     let readme = fs::read_to_string(fixture("README.md")).expect("read reader fixture README");
 

@@ -18,6 +18,7 @@ const CLAUDE_LOCAL_AGENT_SOURCE: &str = "claude_local_agent";
 const CODEX_SOURCE: &str = "codex_cli";
 const PI_AGENT_SOURCE: &str = "pi_agent";
 const GEMINI_SOURCE: &str = "gemini_cli";
+const FACTORY_SOURCE: &str = "factory";
 const CLAUDE_INSTALL_DIRS: &[&str] = &[
     ".claude",
     ".claude-code",
@@ -31,7 +32,10 @@ const CLAUDE_LOCAL_AGENT_SESSIONS_DIR: &str =
     "Library/Application Support/Claude/local-agent-mode-sessions";
 const CLAUDE_LOCAL_AGENT_AUDIT_FILE_NAME: &str = "audit.jsonl";
 const GEMINI_TMP_DIR: &str = ".gemini/tmp";
+const FACTORY_INSTALL_DIRS: &[&str] = &[".factory"];
 const MAX_SESSION_HEADER_BYTES: u64 = 64 * 1024;
+const FACTORY_SESSION_START_MISSING_MESSAGE: &str =
+    "factory session file has no committed session_start line within the header limit";
 const FNV_OFFSET_BASIS: u64 = 0xcbf29ce484222325;
 const FNV_PRIME: u64 = 0x100000001b3;
 const INVALID_JSON_ERROR_KIND: &str = "invalid_json";
@@ -76,6 +80,7 @@ enum SourceSessionIdKind {
     ClaudeLocalAgentAudit,
     CodexSessionMeta,
     GeminiChatJson,
+    FactorySessionStart,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -94,6 +99,7 @@ struct StoredSession {
     file_size: Option<i64>,
     file_mtime: Option<i64>,
     content_fingerprint: Option<String>,
+    source_metadata: Option<String>,
     next_read_offset: i64,
     event_count: i64,
 }
@@ -128,6 +134,7 @@ struct SessionUpdate<'a> {
     pass_size: i64,
     file_mtime: Option<i64>,
     content_fingerprint: &'a str,
+    source_metadata: Option<&'a str>,
     next_read_offset: i64,
     event_count: i64,
     metadata: &'a ParsedMetadata,
@@ -152,6 +159,7 @@ struct SkippedSessionUpdate<'a> {
     source_file: &'a SourceFile,
     session_id: i64,
     parent_session_id: Option<i64>,
+    source_metadata: Option<&'a str>,
     checked_file: Option<CheckedFileState<'a>>,
 }
 
@@ -307,6 +315,7 @@ fn discover_session_files() -> Result<Vec<SourceFile>> {
     source_files.extend(discover_codex_session_files()?);
     source_files.extend(discover_pi_agent_session_files()?);
     source_files.extend(discover_gemini_session_files()?);
+    source_files.extend(discover_factory_session_files()?);
     Ok(source_files)
 }
 
@@ -452,6 +461,7 @@ fn discover_pi_agent_session_files() -> Result<Vec<SourceFile>> {
     let mut paths = Vec::new();
 
     collect_jsonl_files(&home.join(PI_AGENT_SESSIONS_DIR), true, &mut paths)?;
+
     paths.sort();
     paths.dedup();
 
@@ -463,6 +473,34 @@ fn discover_pi_agent_session_files() -> Result<Vec<SourceFile>> {
                 source: PI_AGENT_SOURCE,
                 source_session_id,
                 source_session_id_kind: SourceSessionIdKind::Known,
+                parent_source_session_id: None,
+                metadata_path: None,
+                source_format: SourceFormat::Jsonl,
+                path,
+            })
+        })
+        .collect()
+}
+
+fn discover_factory_session_files() -> Result<Vec<SourceFile>> {
+    let home = home_dir()?;
+    let mut paths = Vec::new();
+
+    for install_dir in FACTORY_INSTALL_DIRS {
+        collect_jsonl_files(&home.join(install_dir).join("sessions"), true, &mut paths)?;
+    }
+
+    paths.sort();
+    paths.dedup();
+
+    paths
+        .into_iter()
+        .map(|path| {
+            let (source_session_id, _) = source_session_ids_from_path(&path)?;
+            Ok(SourceFile {
+                source: FACTORY_SOURCE,
+                source_session_id,
+                source_session_id_kind: SourceSessionIdKind::FactorySessionStart,
                 parent_source_session_id: None,
                 metadata_path: None,
                 source_format: SourceFormat::Jsonl,
@@ -643,14 +681,26 @@ fn ingest_source_file(
         source_file,
         buffer: preloaded_buffer,
     } = resolved_source_file;
+    let stored = load_session(conn, &source_file)?;
+    let session_source_metadata = source_metadata_for_source_file(
+        &source_file,
+        stored
+            .as_ref()
+            .and_then(|stored| stored.source_metadata.as_deref()),
+    )?;
 
-    if let Some(stored) = load_session(conn, &source_file)?
-        && unchanged_by_mtime(&stored, pass_size, file_mtime)
+    if let Some(stored) = &stored
+        && unchanged_by_mtime(stored, pass_size, file_mtime)
     {
         let path_is_current =
             stored.file_path.as_deref() == Some(source_file.path.to_string_lossy().as_ref());
         let parent_session_id = resolve_parent_session_id(conn, &source_file)?;
-        if path_is_current && stored.parent_session_id == parent_session_id {
+        let source_metadata_is_current =
+            stored.source_metadata.as_deref() == session_source_metadata.as_deref();
+        if path_is_current
+            && stored.parent_session_id == parent_session_id
+            && source_metadata_is_current
+        {
             resolve_invalid_session_meta_error(
                 conn,
                 ingest_state,
@@ -669,6 +719,7 @@ fn ingest_source_file(
                 source_file: &source_file,
                 session_id: stored.id,
                 parent_session_id,
+                source_metadata: session_source_metadata.as_deref(),
                 checked_file: None,
             },
         )?;
@@ -706,6 +757,7 @@ fn ingest_source_file(
                 source_file: &source_file,
                 session_id: stored.id,
                 parent_session_id,
+                source_metadata: session_source_metadata.as_deref(),
                 checked_file: Some(CheckedFileState {
                     pass_size,
                     file_mtime,
@@ -766,6 +818,7 @@ fn ingest_source_file(
             pass_size,
             file_mtime,
             content_fingerprint: &content_fingerprint,
+            source_metadata: session_source_metadata.as_deref(),
             next_read_offset: imported.next_read_offset,
             event_count,
             metadata: &metadata,
@@ -826,6 +879,10 @@ fn resolve_source_file(
                 Some(buffer),
             )
         }
+        SourceSessionIdKind::FactorySessionStart => (
+            factory_source_session_id_from_file(&source_file.path)?,
+            None,
+        ),
         SourceSessionIdKind::Known => unreachable!("known source files return early"),
     };
     reuse_source_file_session_identity(
@@ -1104,7 +1161,7 @@ fn load_session_by_source_session_id(
 ) -> Result<Option<StoredSession>> {
     conn.query_row(
         "SELECT id, source_session_id, file_path, parent_session_id, current_generation, file_size, file_mtime,
-                content_fingerprint, next_read_offset, event_count
+                content_fingerprint, source_metadata, next_read_offset, event_count
          FROM sessions
          WHERE source = ?1 AND source_session_id = ?2",
         params![source, source_session_id],
@@ -1118,8 +1175,9 @@ fn load_session_by_source_session_id(
                 file_size: row.get(5)?,
                 file_mtime: row.get(6)?,
                 content_fingerprint: row.get(7)?,
-                next_read_offset: row.get(8)?,
-                event_count: row.get(9)?,
+                source_metadata: row.get(8)?,
+                next_read_offset: row.get(9)?,
+                event_count: row.get(10)?,
             })
         },
     )
@@ -1133,7 +1191,7 @@ fn load_session_by_source_file_path(
 ) -> Result<Option<StoredSession>> {
     conn.query_row(
         "SELECT id, source_session_id, file_path, parent_session_id, current_generation, file_size, file_mtime,
-                content_fingerprint, next_read_offset, event_count
+                content_fingerprint, source_metadata, next_read_offset, event_count
          FROM sessions
          WHERE source = ?1 AND file_path = ?2",
         params![
@@ -1150,8 +1208,9 @@ fn load_session_by_source_file_path(
                 file_size: row.get(5)?,
                 file_mtime: row.get(6)?,
                 content_fingerprint: row.get(7)?,
-                next_read_offset: row.get(8)?,
-                event_count: row.get(9)?,
+                source_metadata: row.get(8)?,
+                next_read_offset: row.get(9)?,
+                event_count: row.get(10)?,
             })
         },
     )
@@ -1205,6 +1264,7 @@ fn update_skipped_session(tx: &Transaction<'_>, update: SkippedSessionUpdate<'_>
                  WHEN :has_parent_source THEN :parent_session_id
                  ELSE NULL
              END,
+             source_metadata = :source_metadata,
              file_mtime = CASE WHEN :has_checked_file THEN :file_mtime ELSE file_mtime END,
              file_size = CASE WHEN :has_checked_file THEN :pass_size ELSE file_size END,
              content_fingerprint = CASE
@@ -1218,6 +1278,7 @@ fn update_skipped_session(tx: &Transaction<'_>, update: SkippedSessionUpdate<'_>
             ":file_path": file_path,
             ":has_parent_source": has_parent_source,
             ":parent_session_id": update.parent_session_id,
+            ":source_metadata": update.source_metadata,
             ":has_checked_file": has_checked_file,
             ":file_mtime": file_mtime,
             ":pass_size": pass_size,
@@ -1253,6 +1314,7 @@ fn update_session_after_import(tx: &Transaction<'_>, update: SessionUpdate<'_>) 
                  WHEN :ended_at > ended_at THEN :ended_at
                  ELSE ended_at
              END,
+             source_metadata = :source_metadata,
              current_generation = :current_generation,
              file_mtime = :file_mtime,
              file_size = :file_size,
@@ -1269,6 +1331,7 @@ fn update_session_after_import(tx: &Transaction<'_>, update: SessionUpdate<'_>) 
             ":cwd": update.metadata.cwd.as_deref(),
             ":started_at": update.metadata.started_at.as_deref(),
             ":ended_at": update.metadata.ended_at.as_deref(),
+            ":source_metadata": update.source_metadata,
             ":current_generation": update.generation,
             ":file_mtime": update.file_mtime,
             ":file_size": update.pass_size,
@@ -1338,6 +1401,87 @@ fn is_empty_source_file_placeholder(stored: &StoredSession) -> bool {
         && stored.next_read_offset == 0
         && stored.event_count == 0
         && stored.content_fingerprint.is_none()
+}
+
+fn source_metadata_for_source_file(
+    source_file: &SourceFile,
+    stored_source_metadata: Option<&str>,
+) -> Result<Option<String>> {
+    if source_file.source != FACTORY_SOURCE {
+        return Ok(None);
+    }
+
+    let settings_path = source_file.path.with_extension("settings.json");
+    let metadata = match fs::metadata(&settings_path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
+        Err(source) => {
+            return Err(JottraceError::Io {
+                path: settings_path,
+                source,
+            });
+        }
+    };
+    if !metadata.is_file() {
+        return Err(JottraceError::NotFile(settings_path));
+    }
+
+    let pass_size_bytes = metadata.len();
+    let pass_size = i64_from_u64(pass_size_bytes, &settings_path)?;
+    let file_mtime = file_mtime(&metadata);
+    let settings_path_text = settings_path.to_string_lossy().into_owned();
+    if let Some(stored_source_metadata) = stored_source_metadata
+        && factory_settings_metadata_matches(
+            stored_source_metadata,
+            &settings_path_text,
+            pass_size,
+            file_mtime,
+        )
+    {
+        return Ok(Some(stored_source_metadata.to_string()));
+    }
+
+    let buffer = read_bounded(&settings_path, pass_size_bytes)?;
+    let (settings, settings_parse_error) =
+        match serde_json::from_slice::<serde_json::Value>(&buffer) {
+            Ok(settings) => (Some(settings), None),
+            Err(error) => (None, Some(error.to_string())),
+        };
+    let source_metadata = serde_json::json!({
+        "settings_path": settings_path_text,
+        "settings_file_size": pass_size,
+        "settings_file_mtime": file_mtime,
+        "settings_content_fingerprint": fingerprint(&buffer),
+        "settings": settings,
+        "settings_parse_error": settings_parse_error,
+    });
+    Ok(Some(source_metadata.to_string()))
+}
+
+fn factory_settings_metadata_matches(
+    stored_source_metadata: &str,
+    settings_path: &str,
+    settings_file_size: i64,
+    settings_file_mtime: Option<i64>,
+) -> bool {
+    let Ok(stored) = serde_json::from_str::<serde_json::Value>(stored_source_metadata) else {
+        return false;
+    };
+    stored.get("settings_path").and_then(|value| value.as_str()) == Some(settings_path)
+        && stored
+            .get("settings_file_size")
+            .and_then(|value| value.as_i64())
+            == Some(settings_file_size)
+        && json_i64_option(stored.get("settings_file_mtime")) == Some(settings_file_mtime)
+        && (stored.get("settings").is_some() || stored.get("settings_parse_error").is_some())
+}
+
+fn json_i64_option(value: Option<&serde_json::Value>) -> Option<Option<i64>> {
+    match value {
+        Some(serde_json::Value::Number(number)) => number.as_i64().map(Some),
+        Some(serde_json::Value::Null) => Some(None),
+        _ => None,
+    }
 }
 
 fn unresolved_source_file_error_paths(
@@ -1671,6 +1815,27 @@ fn codex_source_session_id_from_file(path: &Path) -> Result<String> {
         .payload
         .and_then(|payload| payload.id.map(str::to_string))
         .ok_or_else(|| invalid_session_meta(path, "codex session_meta payload id is missing"))
+}
+
+fn factory_source_session_id_from_file(path: &Path) -> Result<String> {
+    let first_line = first_committed_line(
+        path,
+        MAX_SESSION_HEADER_BYTES,
+        FACTORY_SESSION_START_MISSING_MESSAGE,
+    )?;
+    let header = serde_json::from_slice::<EventHeader<'_>>(&first_line)
+        .map_err(|source| invalid_session_meta(path, source.to_string()))?;
+    if header.event_type != Some("session_start") {
+        return Err(invalid_session_meta(
+            path,
+            "factory session file does not start with session_start",
+        ));
+    }
+    header
+        .id
+        .map(str::to_string)
+        .filter(|id| !id.is_empty())
+        .ok_or_else(|| invalid_session_meta(path, "factory session_start id is missing"))
 }
 
 fn first_committed_line(

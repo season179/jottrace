@@ -34,6 +34,9 @@ synthetic and safe to commit.
 - `gemini-cli/tmp/fixture-project/chats/` captures the Gemini CLI chat JSON
   shape with user, gemini, and info messages plus thoughts, token metadata, and
   tool-call/result payloads.
+- `factory/sessions/-Users-fixture-Workspace-jottrace/` captures the nested
+  Factory / Droid-style JSONL shape, including `session_start`, `message`,
+  `todo_state`, `compaction_state`, and sibling `.settings.json` metadata.
 - `edge-cases/` contains partial-tail, corrupt-line, truncation, and same-size
   rewrite cases for the shared JSONL ingest core.
 
@@ -51,8 +54,8 @@ synthetic and safe to commit.
 ## Human Review
 
 Review status: pending human approval for the Claude CLI, Claude local-agent,
-Codex CLI, OpenCode SQLite, and Pi agent fixtures before they become the
-baseline for new reader implementation. Cursor fixture capture is still pending
-because no local Cursor `state.vscdb` or
+Codex CLI, OpenCode SQLite, Pi agent, Gemini CLI, and Factory fixtures before
+they become the baseline for new reader implementation.
+Cursor fixture capture is still pending because no local Cursor `state.vscdb` or
 `cursorDiskKV` source was available on this machine during the 2026-05-06
 fixture pass.
