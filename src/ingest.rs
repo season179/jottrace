@@ -14,6 +14,7 @@ use crate::{JottraceError, Result};
 
 const CLAUDE_SOURCE: &str = "claude_cli";
 const CODEX_SOURCE: &str = "codex_cli";
+const PI_AGENT_SOURCE: &str = "pi_agent";
 const CLAUDE_INSTALL_DIRS: &[&str] = &[
     ".claude",
     ".claude-code",
@@ -22,7 +23,9 @@ const CLAUDE_INSTALL_DIRS: &[&str] = &[
     ".claude-zai",
 ];
 const CODEX_INSTALL_DIRS: &[&str] = &[".codex", ".codex-local"];
+const PI_AGENT_SESSIONS_DIR: &str = ".pi/agent/sessions";
 const MAX_CODEX_SESSION_META_BYTES: u64 = 64 * 1024;
+const MAX_PI_SESSION_HEADER_BYTES: u64 = 64 * 1024;
 const FNV_OFFSET_BASIS: u64 = 0xcbf29ce484222325;
 const FNV_PRIME: u64 = 0x100000001b3;
 const INVALID_JSON_ERROR_KIND: &str = "invalid_json";
@@ -128,6 +131,8 @@ struct CheckedFileState<'a> {
 
 #[derive(Debug, Deserialize)]
 struct EventHeader<'a> {
+    #[serde(default, borrow)]
+    id: Option<&'a str>,
     #[serde(default, borrow, rename = "type")]
     event_type: Option<&'a str>,
     #[serde(default, borrow)]
@@ -204,6 +209,7 @@ pub fn run_ingest() -> Result<IngestReport> {
 fn discover_session_files() -> Result<Vec<SourceFile>> {
     let mut source_files = discover_claude_session_files()?;
     source_files.extend(discover_codex_session_files()?);
+    source_files.extend(discover_pi_agent_session_files()?);
     Ok(source_files)
 }
 
@@ -264,6 +270,29 @@ fn discover_codex_session_files() -> Result<Vec<SourceFile>> {
                 source: CODEX_SOURCE,
                 source_session_id,
                 source_session_id_kind: SourceSessionIdKind::CodexSessionMeta,
+                parent_source_session_id: None,
+                path,
+            })
+        })
+        .collect()
+}
+
+fn discover_pi_agent_session_files() -> Result<Vec<SourceFile>> {
+    let home = home_dir()?;
+    let mut paths = Vec::new();
+
+    collect_jsonl_files(&home.join(PI_AGENT_SESSIONS_DIR), true, &mut paths)?;
+    paths.sort();
+    paths.dedup();
+
+    paths
+        .into_iter()
+        .map(|path| {
+            let source_session_id = pi_source_session_id_from_path(&path)?;
+            Ok(SourceFile {
+                source: PI_AGENT_SOURCE,
+                source_session_id,
+                source_session_id_kind: SourceSessionIdKind::Known,
                 parent_source_session_id: None,
                 path,
             })
@@ -404,6 +433,7 @@ fn ingest_jsonl_file(
         return Ok(0);
     }
 
+    validate_source_file_header(&source_file)?;
     let buffer = read_bounded(&source_file.path, pass_size_bytes)?;
     let content_fingerprint = fingerprint(&buffer);
     let committed_len = committed_len(&buffer);
@@ -1150,25 +1180,11 @@ fn event_timestamp<'a>(source: &str, header: &'a EventHeader<'a>) -> Option<&'a 
 }
 
 fn codex_source_session_id_from_file(path: &Path) -> Result<String> {
-    let file = File::open(path).map_err(|source| JottraceError::Io {
-        path: path.to_path_buf(),
-        source,
-    })?;
-    let mut reader = BufReader::new(file).take(MAX_CODEX_SESSION_META_BYTES);
-    let mut first_line = Vec::new();
-    let read = reader
-        .read_until(b'\n', &mut first_line)
-        .map_err(|source| JottraceError::Io {
-            path: path.to_path_buf(),
-            source,
-        })?;
-    if read == 0 || !first_line.ends_with(b"\n") {
-        return Err(invalid_session_meta(
-            path,
-            "codex session file has no committed session_meta line within the header limit",
-        ));
-    }
-    first_line.pop();
+    let first_line = read_committed_first_line(
+        path,
+        MAX_CODEX_SESSION_META_BYTES,
+        "codex session file has no committed session_meta line within the header limit",
+    )?;
 
     let header = serde_json::from_slice::<EventHeader<'_>>(&first_line)
         .map_err(|source| invalid_session_meta(path, source.to_string()))?;
@@ -1193,6 +1209,64 @@ fn codex_source_session_id_from_file(path: &Path) -> Result<String> {
         .ok_or_else(|| invalid_session_meta(path, "codex session_meta payload id is missing"))
 }
 
+fn read_committed_first_line(
+    path: &Path,
+    byte_limit: u64,
+    missing_line_message: &str,
+) -> Result<Vec<u8>> {
+    let file = File::open(path).map_err(|source| JottraceError::Io {
+        path: path.to_path_buf(),
+        source,
+    })?;
+    let mut reader = BufReader::new(file).take(byte_limit);
+    let mut first_line = Vec::new();
+    let read = reader
+        .read_until(b'\n', &mut first_line)
+        .map_err(|source| JottraceError::Io {
+            path: path.to_path_buf(),
+            source,
+        })?;
+    if read == 0 || !first_line.ends_with(b"\n") {
+        return Err(invalid_session_meta(path, missing_line_message));
+    }
+    first_line.pop();
+    Ok(first_line)
+}
+
+fn validate_source_file_header(source_file: &SourceFile) -> Result<()> {
+    if source_file.source == PI_AGENT_SOURCE {
+        validate_pi_source_session_header(&source_file.path, &source_file.source_session_id)?;
+    }
+    Ok(())
+}
+
+fn validate_pi_source_session_header(path: &Path, source_session_id: &str) -> Result<()> {
+    let first_line = read_committed_first_line(
+        path,
+        MAX_PI_SESSION_HEADER_BYTES,
+        "Pi agent session file has no committed session event line within the header limit",
+    )?;
+    let header = serde_json::from_slice::<EventHeader<'_>>(&first_line)
+        .map_err(|source| invalid_session_meta(path, source.to_string()))?;
+    if header.event_type != Some("session") {
+        return Err(invalid_session_meta(
+            path,
+            "Pi agent session file does not start with a session event",
+        ));
+    }
+    let id = header
+        .id
+        .filter(|id| !id.is_empty())
+        .ok_or_else(|| invalid_session_meta(path, "Pi agent session id is missing"))?;
+    if id != source_session_id {
+        return Err(invalid_session_meta(
+            path,
+            "Pi agent session id does not match filename session id",
+        ));
+    }
+    Ok(())
+}
+
 fn source_session_ids_from_path(path: &Path) -> Result<(String, Option<String>)> {
     let file_stem = path
         .file_stem()
@@ -1208,6 +1282,20 @@ fn source_session_ids_from_path(path: &Path) -> Result<(String, Option<String>)>
     };
 
     Ok((source_session_id, parent_source_session_id))
+}
+
+fn pi_source_session_id_from_path(path: &Path) -> Result<String> {
+    let file_stem = path
+        .file_stem()
+        .and_then(|stem| stem.to_str())
+        .ok_or_else(|| invalid_path(path, "session file name is not valid UTF-8"))?;
+    let source_session_id = file_stem
+        .rsplit_once('_')
+        .map_or(file_stem, |(_, suffix)| suffix);
+    if source_session_id.is_empty() {
+        return Err(invalid_path(path, "Pi agent session id suffix is empty"));
+    }
+    Ok(source_session_id.to_string())
 }
 
 fn parent_source_session_id_from_path(path: &Path, file_stem: &str) -> Option<String> {
