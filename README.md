@@ -53,12 +53,16 @@ download step.
 After installing, run:
 
 ```sh
+jottrace -h
 jottrace --version
 jottrace doctor
 jottrace ingest
 jottrace status
 jottrace web
 ```
+
+`jottrace -h` is the fastest CLI discovery path. It prints the top-level
+commands and points to `jottrace <command> --help` for command-specific usage.
 
 `jottrace doctor` creates or checks the local data directory at `~/.jottrace`
 and reports whether its permissions are private. On Unix systems, the directory
