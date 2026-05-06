@@ -55,6 +55,19 @@ pub enum JottraceError {
         actual: i64,
         supported: i64,
     },
+    UnsupportedEventPayloadCodec {
+        codec: String,
+    },
+    SessionNotFound {
+        source: String,
+        source_session_id: String,
+    },
+    InvalidEventLimit {
+        limit: i64,
+    },
+    Output {
+        source: io::Error,
+    },
     /// A DB-mutating command is already active in this data directory.
     LockHeld(PathBuf),
     Sqlite {
@@ -94,6 +107,20 @@ impl fmt::Display for JottraceError {
                 actual,
                 supported
             ),
+            Self::UnsupportedEventPayloadCodec { codec } => {
+                write!(f, "unsupported event payload codec: {codec}")
+            }
+            Self::SessionNotFound {
+                source,
+                source_session_id,
+            } => write!(
+                f,
+                "session not found: source={source} source_session_id={source_session_id}"
+            ),
+            Self::InvalidEventLimit { limit } => {
+                write!(f, "event limit must be at least 1; got {limit}")
+            }
+            Self::Output { source } => write!(f, "failed to write output: {source}"),
             Self::LockHeld(path) => write!(
                 f,
                 "another jottrace DB-mutating command is already running; lock: {}",
@@ -108,6 +135,7 @@ impl std::error::Error for JottraceError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
             Self::Io { source, .. } => Some(source),
+            Self::Output { source } => Some(source),
             Self::Sqlite { source, .. } => Some(source),
             _ => None,
         }
