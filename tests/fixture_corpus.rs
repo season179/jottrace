@@ -162,6 +162,7 @@ fn reader_fixture_corpus_has_issue_21_required_shapes() {
         "claude-cli/projects/-Users-fixture-Workspace-jottrace/00000000-0000-4000-8000-000000000021/subagents/agent-a000000000000021.jsonl",
         "codex-cli/sessions/2026/05/05/rollout-2026-05-05T09-00-00-00000000-0000-4000-8000-000000000021.jsonl",
         "codex-cli/archived_sessions/rollout-2026-03-28T10-42-29-00000000-0000-4000-8000-000000000021.jsonl",
+        "gemini-cli/tmp/fixture-project/chats/session-2026-05-06T09-00-gemini000.json",
         "edge-cases/partial-tail.jsonl",
         "edge-cases/corrupt-line.jsonl",
         "edge-cases/truncation-before.jsonl",

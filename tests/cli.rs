@@ -28,6 +28,9 @@ const CODEX_ARCHIVED_FIXTURE_SESSION_ID: &str = "00000000-0000-4000-8000-0000000
 const CODEX_LEGACY_FIXTURE_SESSION_ID: &str = "22222222-2222-4222-8222-222222222222";
 const PI_AGENT_FIXTURE_SESSION: &str = "pi-agent/sessions/--Users-fixture-Workspace-jottrace--/2026-05-06T02-00-00-000Z_00000000-0000-4000-8000-000000000064.jsonl";
 const PI_AGENT_FIXTURE_SESSION_ID: &str = "00000000-0000-4000-8000-000000000064";
+const GEMINI_FIXTURE_SESSION: &str =
+    "gemini-cli/tmp/fixture-project/chats/session-2026-05-06T09-00-gemini000.json";
+const GEMINI_FIXTURE_SESSION_ID: &str = "33333333-3333-4333-8333-333333333333";
 const CORRUPT_FIXTURE_SESSION: &str = "edge-cases/corrupt-line.jsonl";
 const CORRUPT_FIXTURE_SESSION_ID: &str = "00000000-0000-4000-8000-000000000000";
 const UNREADABLE_FIXTURE_SESSION_ID: &str = "00000000-0000-4000-8000-000000000001";
@@ -1272,6 +1275,290 @@ fn ingest_preserves_legacy_codex_session_with_top_level_id_header() {
     assert_eq!(event_count, 3);
     assert_eq!(started_at, "2025-09-12T09:54:22.802Z");
     assert_eq!(PathBuf::from(file_path), session_file);
+
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn ingest_preserves_gemini_cli_chat_json_session() {
+    let root = temp_root("ingest-gemini-chat");
+    let data_dir = root.join(".jottrace");
+    let session_file = install_gemini_fixture(&root);
+
+    let ingest = run_ingest(&root, &data_dir);
+    assert!(ingest.contains("sessions: 1"));
+    assert!(ingest.contains("events: 4"));
+    assert!(ingest.contains("inserted_events: 4"));
+    assert!(ingest.contains("unresolved_ingest_errors: 0"));
+
+    let conn = Connection::open(db_path(&data_dir)).expect("open preserved db");
+    let (source_session_id, cwd, started_at, ended_at, event_count, file_path): (
+        String,
+        String,
+        String,
+        String,
+        i64,
+        String,
+    ) = conn
+        .query_row(
+            "SELECT source_session_id, cwd, started_at, ended_at, event_count, file_path
+             FROM sessions
+             WHERE source = 'gemini_cli'",
+            [],
+            |row| {
+                Ok((
+                    row.get(0)?,
+                    row.get(1)?,
+                    row.get(2)?,
+                    row.get(3)?,
+                    row.get(4)?,
+                    row.get(5)?,
+                ))
+            },
+        )
+        .expect("gemini session metadata");
+    assert_eq!(source_session_id, GEMINI_FIXTURE_SESSION_ID);
+    assert_eq!(cwd, "fixture-gemini-project-hash");
+    assert_eq!(started_at, "2026-05-06T09:00:00.000Z");
+    assert_eq!(ended_at, "2026-05-06T09:00:06.000Z");
+    assert_eq!(event_count, 4);
+    assert_eq!(PathBuf::from(file_path), session_file);
+
+    let events: Vec<(i64, Option<String>, serde_json::Value)> = conn
+        .prepare(
+            "SELECT seq, ts, payload, codec
+             FROM events
+             JOIN sessions ON sessions.id = events.session_id
+             WHERE sessions.source = 'gemini_cli'
+             ORDER BY seq",
+        )
+        .expect("prepare gemini events")
+        .query_map([], |row| {
+            let payload: Vec<u8> = row.get(2)?;
+            let codec: String = row.get(3)?;
+            let decoded = jottrace::storage::decode_event_payload(&payload, &codec)
+                .expect("decode gemini payload");
+            let json = serde_json::from_slice(&decoded).expect("gemini payload should be json");
+            Ok((row.get(0)?, row.get(1)?, json))
+        })
+        .expect("query gemini events")
+        .map(|row| row.expect("gemini event"))
+        .collect();
+    assert_eq!(events.len(), 4);
+    assert_eq!(
+        events.iter().map(|event| event.0).collect::<Vec<_>>(),
+        vec![0, 1, 2, 3]
+    );
+    assert_eq!(events[0].1.as_deref(), Some("2026-05-06T09:00:01.000Z"));
+    assert_eq!(events[0].2["type"], "user");
+    assert_eq!(events[1].2["type"], "gemini");
+    assert!(events[1].2.get("thoughts").is_some());
+    assert!(events[1].2.get("tokens").is_some());
+    assert!(events[1].2.get("toolCalls").is_some());
+    assert_eq!(events[2].2["type"], "info");
+    assert_eq!(events[3].2["content"], "Final sanitized response.");
+
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn ingest_is_idempotent_for_unchanged_gemini_cli_fixture() {
+    let root = temp_root("ingest-gemini-idempotent");
+    let data_dir = root.join(".jottrace");
+    install_gemini_fixture(&root);
+
+    let first = run_ingest(&root, &data_dir);
+    assert!(first.contains("events: 4"));
+    assert!(first.contains("inserted_events: 4"));
+
+    let second = run_ingest(&root, &data_dir);
+    assert!(second.contains("sessions: 1"));
+    assert!(second.contains("events: 4"));
+    assert!(second.contains("inserted_events: 0"));
+
+    let conn = Connection::open(db_path(&data_dir)).expect("open preserved db");
+    let (current_generation, event_count): (i64, i64) = conn
+        .query_row(
+            "SELECT current_generation, event_count
+             FROM sessions
+             WHERE source = 'gemini_cli'",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .expect("gemini idempotent session state");
+    assert_eq!(current_generation, 0);
+    assert_eq!(event_count, 4);
+    assert_eq!(generation_counts(&conn), vec![(0, 4)]);
+
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn ingest_preserves_changed_gemini_cli_chat_as_next_generation() {
+    let root = temp_root("ingest-gemini-rewrite");
+    let data_dir = root.join(".jottrace");
+    let session_file = install_gemini_fixture(&root);
+
+    let first = run_ingest(&root, &data_dir);
+    assert!(first.contains("events: 4"));
+    assert!(first.contains("inserted_events: 4"));
+
+    let mut chat: serde_json::Value = serde_json::from_str(
+        &fs::read_to_string(&session_file).expect("read gemini fixture for rewrite"),
+    )
+    .expect("parse gemini fixture for rewrite");
+    chat["messages"]
+        .as_array_mut()
+        .expect("gemini messages array")
+        .push(serde_json::json!({
+            "id": "gemini-message-005",
+            "timestamp": "2026-05-06T09:00:08.000Z",
+            "type": "user",
+            "content": [
+                {
+                    "text": "Please continue with the next fixture step."
+                }
+            ]
+        }));
+    chat["lastUpdated"] = serde_json::json!("2026-05-06T09:00:08.000Z");
+    write_text_file(
+        &session_file,
+        &serde_json::to_string_pretty(&chat).expect("serialize rewritten gemini fixture"),
+    );
+
+    let second = run_ingest(&root, &data_dir);
+    assert!(second.contains("events: 9"));
+    assert!(second.contains("inserted_events: 5"));
+
+    let conn = Connection::open(db_path(&data_dir)).expect("open preserved db");
+    let (current_generation, event_count, ended_at): (i64, i64, String) = conn
+        .query_row(
+            "SELECT current_generation, event_count, ended_at
+             FROM sessions
+             WHERE source = 'gemini_cli'",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .expect("gemini rewritten session state");
+    assert_eq!(current_generation, 1);
+    assert_eq!(event_count, 5);
+    assert_eq!(ended_at, "2026-05-06T09:00:08.000Z");
+    assert_eq!(generation_counts(&conn), vec![(0, 4), (1, 5)]);
+    assert!(event_payload(&conn, 1, 4).contains("Please continue"));
+
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn ingest_records_invalid_gemini_chat_json_without_blocking_unrelated_files() {
+    let root = temp_root("ingest-gemini-invalid-json");
+    let data_dir = root.join(".jottrace");
+    install_primary_claude_fixture(&root);
+    let bad_file = root
+        .join(".gemini/tmp/bad-project/chats")
+        .join("session-bad-gemini.json");
+    write_text_file(&bad_file, "{\"sessionId\":");
+
+    let ingest = run_ingest(&root, &data_dir);
+    assert!(ingest.contains("sessions: 2"));
+    assert!(ingest.contains("events: 12"));
+    assert!(ingest.contains("inserted_events: 12"));
+    assert!(ingest.contains("unresolved_ingest_errors: 1"));
+
+    let errors = jottrace::storage::unresolved_ingest_errors_for_path(&db_path(&data_dir), 10)
+        .expect("unresolved ingest errors");
+    assert_eq!(errors.len(), 1);
+    let error = &errors[0];
+    assert_eq!(error.source, "gemini_cli");
+    assert_eq!(
+        error.source_session_id.as_deref(),
+        Some("session-bad-gemini")
+    );
+    assert_eq!(error.file_path, bad_file);
+    assert_eq!(error.error_kind, "invalid_session_meta");
+    assert!(!error.message.is_empty());
+
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn ingest_records_invalid_gemini_chat_shape_with_readable_session_id() {
+    let root = temp_root("ingest-gemini-invalid-shape");
+    let data_dir = root.join(".jottrace");
+    let bad_file = root
+        .join(".gemini/tmp/bad-project/chats")
+        .join("session-bad-gemini.json");
+    write_text_file(
+        &bad_file,
+        r#"{"sessionId":"33333333-3333-4333-8333-333333333334","messages":{}}"#,
+    );
+
+    let ingest = run_ingest(&root, &data_dir);
+    assert!(ingest.contains("sessions: 1"));
+    assert!(ingest.contains("events: 0"));
+    assert!(ingest.contains("inserted_events: 0"));
+    assert!(ingest.contains("unresolved_ingest_errors: 1"));
+
+    let errors = jottrace::storage::unresolved_ingest_errors_for_path(&db_path(&data_dir), 10)
+        .expect("unresolved ingest errors");
+    assert_eq!(errors.len(), 1);
+    let error = &errors[0];
+    assert_eq!(error.source, "gemini_cli");
+    assert_eq!(
+        error.source_session_id.as_deref(),
+        Some("33333333-3333-4333-8333-333333333334")
+    );
+    assert_eq!(error.file_path, bad_file);
+    assert_eq!(error.error_kind, "invalid_session_meta");
+
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn ingest_records_invalid_gemini_rewrite_against_existing_session() {
+    let root = temp_root("ingest-gemini-invalid-rewrite");
+    let data_dir = root.join(".jottrace");
+    let session_file = install_gemini_fixture(&root);
+
+    let first = run_ingest(&root, &data_dir);
+    assert!(first.contains("sessions: 1"));
+    assert!(first.contains("events: 4"));
+    assert!(first.contains("unresolved_ingest_errors: 0"));
+
+    write_text_file(&session_file, "{\"sessionId\":");
+
+    let second = run_ingest(&root, &data_dir);
+    assert!(second.contains("sessions: 1"));
+    assert!(second.contains("events: 4"));
+    assert!(second.contains("inserted_events: 0"));
+    assert!(second.contains("unresolved_ingest_errors: 1"));
+
+    let errors = jottrace::storage::unresolved_ingest_errors_for_path(&db_path(&data_dir), 10)
+        .expect("unresolved ingest errors");
+    assert_eq!(errors.len(), 1);
+    let error = &errors[0];
+    assert_eq!(error.source, "gemini_cli");
+    assert_eq!(
+        error.source_session_id.as_deref(),
+        Some(GEMINI_FIXTURE_SESSION_ID)
+    );
+    assert_eq!(error.file_path, session_file);
+    assert_eq!(error.error_kind, "invalid_session_meta");
+
+    let conn = Connection::open(db_path(&data_dir)).expect("open preserved db");
+    let session_ids: Vec<String> = conn
+        .prepare(
+            "SELECT source_session_id
+             FROM sessions
+             WHERE source = 'gemini_cli'
+             ORDER BY source_session_id",
+        )
+        .expect("prepare gemini session ids")
+        .query_map([], |row| row.get(0))
+        .expect("query gemini session ids")
+        .map(|row| row.expect("gemini session id"))
+        .collect();
+    assert_eq!(session_ids, vec![GEMINI_FIXTURE_SESSION_ID]);
 
     let _ = fs::remove_dir_all(root);
 }
@@ -2844,6 +3131,14 @@ fn install_claude_local_agent_fixture(root: &Path) -> PathBuf {
     let audit_file = base.join(local_session).join("audit.jsonl");
     copy_reader_fixture(CLAUDE_LOCAL_AGENT_FIXTURE_AUDIT, &audit_file);
     audit_file
+}
+
+fn install_gemini_fixture(root: &Path) -> PathBuf {
+    let session_file = root
+        .join(".gemini/tmp/fixture-project/chats")
+        .join("session-2026-05-06T09-00-gemini000.json");
+    copy_reader_fixture(GEMINI_FIXTURE_SESSION, &session_file);
+    session_file
 }
 
 fn replace_with_fixture(path: &Path, fixture_relative: &str) {

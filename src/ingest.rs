@@ -1,5 +1,6 @@
 use rusqlite::{Connection, OptionalExtension, Transaction, named_params, params};
 use serde::Deserialize;
+use serde_json::value::RawValue;
 use std::collections::HashSet;
 use std::env;
 use std::fs::{self, File, Metadata};
@@ -16,6 +17,7 @@ const CLAUDE_SOURCE: &str = "claude_cli";
 const CLAUDE_LOCAL_AGENT_SOURCE: &str = "claude_local_agent";
 const CODEX_SOURCE: &str = "codex_cli";
 const PI_AGENT_SOURCE: &str = "pi_agent";
+const GEMINI_SOURCE: &str = "gemini_cli";
 const CLAUDE_INSTALL_DIRS: &[&str] = &[
     ".claude",
     ".claude-code",
@@ -28,6 +30,7 @@ const PI_AGENT_SESSIONS_DIR: &str = ".pi/agent/sessions";
 const CLAUDE_LOCAL_AGENT_SESSIONS_DIR: &str =
     "Library/Application Support/Claude/local-agent-mode-sessions";
 const CLAUDE_LOCAL_AGENT_AUDIT_FILE_NAME: &str = "audit.jsonl";
+const GEMINI_TMP_DIR: &str = ".gemini/tmp";
 const MAX_SESSION_HEADER_BYTES: u64 = 64 * 1024;
 const FNV_OFFSET_BASIS: u64 = 0xcbf29ce484222325;
 const FNV_PRIME: u64 = 0x100000001b3;
@@ -37,6 +40,9 @@ const READ_ERROR_KIND: &str = "read_error";
 const NOT_FILE_ERROR_KIND: &str = "not_file";
 const SOURCE_FILE_INGESTED_SUCCESSFULLY_NOTE: &str = "source file ingested successfully";
 const EMPTY_CODEX_SESSION_FILE_SKIPPED_NOTE: &str = "empty Codex session file skipped";
+const INSERT_EVENT_SQL: &str = "INSERT OR IGNORE INTO events
+    (session_id, generation, seq, ts, payload, codec, payload_size)
+ VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct IngestReport {
@@ -60,6 +66,7 @@ struct SourceFile {
     source_session_id_kind: SourceSessionIdKind,
     parent_source_session_id: Option<String>,
     metadata_path: Option<PathBuf>,
+    source_format: SourceFormat,
     path: PathBuf,
 }
 
@@ -68,6 +75,13 @@ enum SourceSessionIdKind {
     Known,
     ClaudeLocalAgentAudit,
     CodexSessionMeta,
+    GeminiChatJson,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SourceFormat {
+    Jsonl,
+    GeminiChatJson,
 }
 
 #[derive(Debug, Clone)]
@@ -127,6 +141,11 @@ struct IngestErrorRecord<'a> {
     line_number: Option<i64>,
     error_kind: &'a str,
     message: &'a str,
+}
+
+struct ResolvedSourceFile {
+    source_file: SourceFile,
+    buffer: Option<Vec<u8>>,
 }
 
 struct SkippedSessionUpdate<'a> {
@@ -217,6 +236,34 @@ struct ClaudeLocalAgentMetadata<'a> {
     ended_at: Option<&'a str>,
 }
 
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct GeminiChatFile<'a> {
+    #[serde(borrow)]
+    session_id: &'a str,
+    #[serde(default, borrow)]
+    project_hash: Option<&'a str>,
+    #[serde(default, borrow)]
+    start_time: Option<&'a str>,
+    #[serde(default, borrow)]
+    last_updated: Option<&'a str>,
+    #[serde(borrow)]
+    messages: Vec<&'a RawValue>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct GeminiChatIdentity<'a> {
+    #[serde(borrow)]
+    session_id: &'a str,
+}
+
+#[derive(Debug, Deserialize)]
+struct GeminiMessageHeader<'a> {
+    #[serde(default, borrow)]
+    timestamp: Option<&'a str>,
+}
+
 pub fn run_ingest() -> Result<IngestReport> {
     let data_dir = crate::data_dir_from_env()?;
     let _lock = crate::acquire_data_lock(&data_dir)?;
@@ -233,7 +280,7 @@ pub fn run_ingest() -> Result<IngestReport> {
     let mut inserted_event_count = 0;
 
     for source_file in &source_files {
-        match ingest_jsonl_file(&mut conn, &mut ingest_state, source_file) {
+        match ingest_source_file(&mut conn, &mut ingest_state, source_file) {
             Ok(inserted) => inserted_event_count += inserted,
             Err(error) if is_source_file_ingest_error(&error) => {
                 record_source_file_ingest_error(&mut conn, source_file, &error)?;
@@ -259,6 +306,7 @@ fn discover_session_files() -> Result<Vec<SourceFile>> {
     source_files.extend(discover_claude_local_agent_session_files()?);
     source_files.extend(discover_codex_session_files()?);
     source_files.extend(discover_pi_agent_session_files()?);
+    source_files.extend(discover_gemini_session_files()?);
     Ok(source_files)
 }
 
@@ -286,6 +334,7 @@ fn discover_claude_session_files() -> Result<Vec<SourceFile>> {
                 source_session_id_kind: SourceSessionIdKind::Known,
                 parent_source_session_id,
                 metadata_path: None,
+                source_format: SourceFormat::Jsonl,
                 path,
             })
         })
@@ -315,6 +364,7 @@ fn discover_claude_local_agent_session_files() -> Result<Vec<SourceFile>> {
                 source_session_id_kind: SourceSessionIdKind::ClaudeLocalAgentAudit,
                 parent_source_session_id: None,
                 metadata_path: claude_local_agent_metadata_path(&path),
+                source_format: SourceFormat::Jsonl,
                 path,
             })
         })
@@ -344,6 +394,53 @@ fn discover_codex_session_files() -> Result<Vec<SourceFile>> {
                 source_session_id_kind: SourceSessionIdKind::CodexSessionMeta,
                 parent_source_session_id: None,
                 metadata_path: None,
+                source_format: SourceFormat::Jsonl,
+                path,
+            })
+        })
+        .collect()
+}
+
+fn discover_gemini_session_files() -> Result<Vec<SourceFile>> {
+    let root = home_dir()?.join(GEMINI_TMP_DIR);
+    let entries = match fs::read_dir(&root) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(source) => {
+            return Err(JottraceError::Io { path: root, source });
+        }
+    };
+
+    let mut paths = Vec::new();
+    for entry in entries {
+        let entry = entry.map_err(|source| JottraceError::Io {
+            path: root.clone(),
+            source,
+        })?;
+        let path = entry.path();
+        let file_type = entry.file_type().map_err(|source| JottraceError::Io {
+            path: path.clone(),
+            source,
+        })?;
+        if file_type.is_dir() {
+            collect_json_files(&path.join("chats"), false, &mut paths)?;
+        }
+    }
+
+    paths.sort();
+    paths.dedup();
+
+    paths
+        .into_iter()
+        .map(|path| {
+            let (source_session_id, _) = source_session_ids_from_path(&path)?;
+            Ok(SourceFile {
+                source: GEMINI_SOURCE,
+                source_session_id,
+                source_session_id_kind: SourceSessionIdKind::GeminiChatJson,
+                parent_source_session_id: None,
+                metadata_path: None,
+                source_format: SourceFormat::GeminiChatJson,
                 path,
             })
         })
@@ -368,6 +465,7 @@ fn discover_pi_agent_session_files() -> Result<Vec<SourceFile>> {
                 source_session_id_kind: SourceSessionIdKind::Known,
                 parent_source_session_id: None,
                 metadata_path: None,
+                source_format: SourceFormat::Jsonl,
                 path,
             })
         })
@@ -439,6 +537,19 @@ fn push_claude_local_agent_audit_file(session_dir: &Path, paths: &mut Vec<PathBu
 }
 
 fn collect_jsonl_files(root: &Path, recursive: bool, paths: &mut Vec<PathBuf>) -> Result<()> {
+    collect_files_with_extension(root, "jsonl", recursive, paths)
+}
+
+fn collect_json_files(root: &Path, recursive: bool, paths: &mut Vec<PathBuf>) -> Result<()> {
+    collect_files_with_extension(root, "json", recursive, paths)
+}
+
+fn collect_files_with_extension(
+    root: &Path,
+    extension: &str,
+    recursive: bool,
+    paths: &mut Vec<PathBuf>,
+) -> Result<()> {
     let entries = match fs::read_dir(root) {
         Ok(entries) => entries,
         Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
@@ -462,12 +573,12 @@ fn collect_jsonl_files(root: &Path, recursive: bool, paths: &mut Vec<PathBuf>) -
         })?;
         if file_type.is_dir() {
             if recursive {
-                collect_jsonl_files(&path, true, paths)?;
+                collect_files_with_extension(&path, extension, true, paths)?;
             }
         } else if file_type.is_file()
             && path
                 .extension()
-                .is_some_and(|extension| extension == "jsonl")
+                .is_some_and(|path_extension| path_extension == extension)
         {
             paths.push(path);
         }
@@ -487,7 +598,7 @@ fn collect_flat_session_files(root: &Path, paths: &mut Vec<PathBuf>) -> Result<(
     Ok(())
 }
 
-fn ingest_jsonl_file(
+fn ingest_source_file(
     conn: &mut Connection,
     ingest_state: &mut IngestState,
     source_file: &SourceFile,
@@ -504,12 +615,15 @@ fn ingest_jsonl_file(
     let pass_size = i64_from_u64(pass_size_bytes, &source_file.path)?;
     let file_mtime = file_mtime(&metadata);
 
-    let source_file = if source_file.source == CODEX_SOURCE && pass_size_bytes == 0 {
+    let resolved_source_file = if source_file.source == CODEX_SOURCE && pass_size_bytes == 0 {
         match load_session_by_source_file_path(conn, source_file)? {
-            Some(stored) if !is_empty_source_file_placeholder(&stored) => SourceFile {
-                source_session_id: stored.source_session_id,
-                source_session_id_kind: SourceSessionIdKind::Known,
-                ..source_file.clone()
+            Some(stored) if !is_empty_source_file_placeholder(&stored) => ResolvedSourceFile {
+                source_file: SourceFile {
+                    source_session_id: stored.source_session_id,
+                    source_session_id_kind: SourceSessionIdKind::Known,
+                    ..source_file.clone()
+                },
+                buffer: None,
             },
             stored => {
                 resolve_invalid_session_meta_error(
@@ -523,8 +637,12 @@ fn ingest_jsonl_file(
             }
         }
     } else {
-        resolve_source_file(conn, source_file, pass_size, file_mtime)?
+        resolve_source_file(conn, source_file, pass_size, pass_size_bytes, file_mtime)?
     };
+    let ResolvedSourceFile {
+        source_file,
+        buffer: preloaded_buffer,
+    } = resolved_source_file;
 
     if let Some(stored) = load_session(conn, &source_file)?
         && unchanged_by_mtime(&stored, pass_size, file_mtime)
@@ -566,9 +684,11 @@ fn ingest_jsonl_file(
     }
 
     validate_source_file_header(&source_file)?;
-    let buffer = read_bounded(&source_file.path, pass_size_bytes)?;
+    let buffer = match preloaded_buffer {
+        Some(buffer) => buffer,
+        None => read_bounded(&source_file.path, pass_size_bytes)?,
+    };
     let content_fingerprint = fingerprint(&buffer);
-    let committed_len = committed_len(&buffer);
     let source_metadata = source_metadata(&source_file)?;
 
     let tx = conn
@@ -576,7 +696,7 @@ fn ingest_jsonl_file(
         .map_err(|source| sqlite_error(&source_file.path, source))?;
     insert_session_if_missing(&tx, &source_file)?;
     let stored = load_session(&tx, &source_file)?.expect("session row should exist after insert");
-    let import_mode = import_mode(&stored, pass_size, &content_fingerprint);
+    let import_mode = import_mode(&source_file, &stored, pass_size, &content_fingerprint);
 
     if import_mode == ImportMode::Skip {
         let parent_session_id = resolve_parent_session_id(&tx, &source_file)?;
@@ -608,21 +728,29 @@ fn ingest_jsonl_file(
         ImportMode::Append | ImportMode::Skip => stored.current_generation,
         ImportMode::Rewrite => stored.current_generation + 1,
     };
-    let start_offset = match import_mode {
-        ImportMode::Append => stored.next_read_offset.max(0) as usize,
-        ImportMode::Rewrite | ImportMode::Skip => 0,
-    }
-    .min(committed_len);
+    let imported = match source_file.source_format {
+        SourceFormat::Jsonl => {
+            let committed_len = committed_len(&buffer);
+            let start_offset = match import_mode {
+                ImportMode::Append => stored.next_read_offset.max(0) as usize,
+                ImportMode::Rewrite | ImportMode::Skip => 0,
+            }
+            .min(committed_len);
 
-    let imported = import_committed_lines(
-        &tx,
-        &source_file,
-        stored.id,
-        generation,
-        &buffer,
-        start_offset,
-        committed_len,
-    )?;
+            import_committed_lines(
+                &tx,
+                &source_file,
+                stored.id,
+                generation,
+                &buffer,
+                start_offset,
+                committed_len,
+            )?
+        }
+        SourceFormat::GeminiChatJson => {
+            import_gemini_chat_json(&tx, &source_file, stored.id, generation, &buffer)?
+        }
+    };
 
     let mut metadata = imported.metadata;
     metadata.fill_missing_from(source_metadata);
@@ -659,31 +787,46 @@ fn resolve_source_file(
     conn: &Connection,
     source_file: &SourceFile,
     pass_size: i64,
+    pass_size_bytes: u64,
     file_mtime: Option<i64>,
-) -> Result<SourceFile> {
+) -> Result<ResolvedSourceFile> {
     if source_file.source_session_id_kind == SourceSessionIdKind::Known {
-        return Ok(source_file.clone());
+        return Ok(ResolvedSourceFile {
+            source_file: source_file.clone(),
+            buffer: None,
+        });
     }
 
     let stored_by_path = load_session_by_source_file_path(conn, source_file)?;
     if let Some(stored) = &stored_by_path
         && unchanged_by_mtime(stored, pass_size, file_mtime)
     {
-        return Ok(SourceFile {
-            source_session_id: stored.source_session_id.clone(),
-            source_session_id_kind: SourceSessionIdKind::Known,
-            ..source_file.clone()
+        return Ok(ResolvedSourceFile {
+            source_file: SourceFile {
+                source_session_id: stored.source_session_id.clone(),
+                source_session_id_kind: SourceSessionIdKind::Known,
+                ..source_file.clone()
+            },
+            buffer: None,
         });
     }
 
-    let source_session_id = match source_file.source_session_id_kind {
-        SourceSessionIdKind::Known => unreachable!("known source file returned above"),
-        SourceSessionIdKind::ClaudeLocalAgentAudit => {
-            claude_local_agent_source_session_id_from_file(&source_file.path)?
-        }
+    let (source_session_id, buffer) = match source_file.source_session_id_kind {
+        SourceSessionIdKind::ClaudeLocalAgentAudit => (
+            claude_local_agent_source_session_id_from_file(&source_file.path)?,
+            None,
+        ),
         SourceSessionIdKind::CodexSessionMeta => {
-            codex_source_session_id_from_file(&source_file.path)?
+            (codex_source_session_id_from_file(&source_file.path)?, None)
         }
+        SourceSessionIdKind::GeminiChatJson => {
+            let buffer = read_bounded(&source_file.path, pass_size_bytes)?;
+            (
+                gemini_source_session_id_from_buffer(&source_file.path, &buffer)?,
+                Some(buffer),
+            )
+        }
+        SourceSessionIdKind::Known => unreachable!("known source files return early"),
     };
     reuse_source_file_session_identity(
         conn,
@@ -692,10 +835,13 @@ fn resolve_source_file(
         &source_session_id,
     )?;
 
-    Ok(SourceFile {
-        source_session_id,
-        source_session_id_kind: SourceSessionIdKind::Known,
-        ..source_file.clone()
+    Ok(ResolvedSourceFile {
+        source_file: SourceFile {
+            source_session_id,
+            source_session_id_kind: SourceSessionIdKind::Known,
+            ..source_file.clone()
+        },
+        buffer,
     })
 }
 
@@ -721,11 +867,7 @@ fn import_committed_lines(
     let mut byte_offset = start_offset;
     let mut seq = line_number_at(buffer, start_offset);
     let mut event_insert = tx
-        .prepare(
-            "INSERT OR IGNORE INTO events
-                (session_id, generation, seq, ts, payload, codec, payload_size)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
-        )
+        .prepare(INSERT_EVENT_SQL)
         .map_err(|source| sqlite_error(&source_file.path, source))?;
 
     while byte_offset < committed_len {
@@ -736,19 +878,15 @@ fn import_committed_lines(
             Ok(header) => {
                 capture_metadata(&mut metadata, source_file.source, &header);
                 let ts = event_timestamp(source_file.source, &header);
-                let encoded = encode_event_payload(line)?;
-                let inserted = event_insert
-                    .execute(params![
-                        session_id,
-                        generation,
-                        seq,
-                        ts,
-                        encoded.payload,
-                        encoded.codec,
-                        i64_from_usize(encoded.payload_size, &source_file.path)?,
-                    ])
-                    .map_err(|source| sqlite_error(&source_file.path, source))?;
-                inserted_event_count += inserted as u64;
+                inserted_event_count += insert_event_payload(
+                    &mut event_insert,
+                    source_file,
+                    session_id,
+                    generation,
+                    seq,
+                    ts,
+                    line,
+                )?;
                 next_read_offset = (line_end + 1) as i64;
             }
             Err(error) => {
@@ -779,6 +917,80 @@ fn import_committed_lines(
     })
 }
 
+fn insert_event_payload(
+    event_insert: &mut rusqlite::Statement<'_>,
+    source_file: &SourceFile,
+    session_id: i64,
+    generation: i64,
+    seq: i64,
+    ts: Option<&str>,
+    payload: &[u8],
+) -> Result<u64> {
+    let encoded = encode_event_payload(payload)?;
+    let inserted = event_insert
+        .execute(params![
+            session_id,
+            generation,
+            seq,
+            ts,
+            encoded.payload,
+            encoded.codec,
+            i64_from_usize(encoded.payload_size, &source_file.path)?,
+        ])
+        .map_err(|source| sqlite_error(&source_file.path, source))?;
+    Ok(inserted as u64)
+}
+
+fn import_gemini_chat_json(
+    tx: &Transaction<'_>,
+    source_file: &SourceFile,
+    session_id: i64,
+    generation: i64,
+    buffer: &[u8],
+) -> Result<ImportResult> {
+    let chat = gemini_chat_from_buffer(&source_file.path, buffer)?;
+    let mut metadata = ParsedMetadata::default();
+    if let Some(project_hash) = chat.project_hash {
+        metadata.cwd = Some(project_hash.to_string());
+    }
+    if let Some(start_time) = chat.start_time {
+        capture_metadata_timestamp(&mut metadata, start_time);
+    }
+    if let Some(last_updated) = chat.last_updated {
+        capture_metadata_timestamp(&mut metadata, last_updated);
+    }
+
+    let mut inserted_event_count = 0;
+    let mut event_insert = tx
+        .prepare(INSERT_EVENT_SQL)
+        .map_err(|source| sqlite_error(&source_file.path, source))?;
+
+    for (index, message) in chat.messages.iter().enumerate() {
+        let header = serde_json::from_str::<GeminiMessageHeader<'_>>(message.get())
+            .map_err(|source| invalid_session_meta(&source_file.path, source.to_string()))?;
+        if let Some(ts) = header.timestamp {
+            capture_metadata_timestamp(&mut metadata, ts);
+        }
+
+        let payload = message.get().as_bytes();
+        inserted_event_count += insert_event_payload(
+            &mut event_insert,
+            source_file,
+            session_id,
+            generation,
+            i64_from_usize(index, &source_file.path)?,
+            header.timestamp,
+            payload,
+        )?;
+    }
+
+    Ok(ImportResult {
+        inserted_event_count,
+        next_read_offset: i64_from_usize(buffer.len(), &source_file.path)?,
+        metadata,
+    })
+}
+
 fn record_source_file_ingest_error(
     conn: &mut Connection,
     source_file: &SourceFile,
@@ -787,13 +999,28 @@ fn record_source_file_ingest_error(
     let tx = conn
         .transaction()
         .map_err(|source| sqlite_error(&source_file.path, source))?;
-    insert_session_if_missing(&tx, source_file)?;
-    let stored = load_session(&tx, source_file)?.expect("session row should exist after insert");
+    let stored_by_path = load_session_by_source_file_path(&tx, source_file)?;
+    let (error_source_file, stored) = if let Some(stored) = stored_by_path {
+        (
+            SourceFile {
+                source_session_id: stored.source_session_id.clone(),
+                source_session_id_kind: SourceSessionIdKind::Known,
+                ..source_file.clone()
+            },
+            stored,
+        )
+    } else {
+        let error_source_file = source_file_for_ingest_error(source_file);
+        insert_session_if_missing(&tx, &error_source_file)?;
+        let stored =
+            load_session(&tx, &error_source_file)?.expect("session row should exist after insert");
+        (error_source_file, stored)
+    };
     let message = error.to_string();
     record_ingest_error(
         &tx,
         IngestErrorRecord {
-            source_file,
+            source_file: &error_source_file,
             session_id: Some(stored.id),
             generation: Some(stored.current_generation),
             byte_offset: None,
@@ -803,7 +1030,29 @@ fn record_source_file_ingest_error(
         },
     )?;
     tx.commit()
-        .map_err(|source| sqlite_error(&source_file.path, source))
+        .map_err(|source| sqlite_error(&error_source_file.path, source))
+}
+
+fn source_file_for_ingest_error(source_file: &SourceFile) -> SourceFile {
+    if source_file.source_session_id_kind == SourceSessionIdKind::GeminiChatJson
+        && let Some(source_session_id) = recover_gemini_source_session_id(source_file)
+    {
+        return SourceFile {
+            source_session_id,
+            source_session_id_kind: SourceSessionIdKind::Known,
+            ..source_file.clone()
+        };
+    }
+    source_file.clone()
+}
+
+fn recover_gemini_source_session_id(source_file: &SourceFile) -> Option<String> {
+    let metadata = fs::metadata(&source_file.path).ok()?;
+    if !metadata.is_file() {
+        return None;
+    }
+    let buffer = read_bounded(&source_file.path, metadata.len()).ok()?;
+    gemini_source_session_id_from_buffer(&source_file.path, &buffer).ok()
 }
 
 fn is_source_file_ingest_error(error: &JottraceError) -> bool {
@@ -917,7 +1166,12 @@ fn unchanged_by_mtime(stored: &StoredSession, pass_size: i64, file_mtime: Option
         && stored.content_fingerprint.is_some()
 }
 
-fn import_mode(stored: &StoredSession, pass_size: i64, content_fingerprint: &str) -> ImportMode {
+fn import_mode(
+    source_file: &SourceFile,
+    stored: &StoredSession,
+    pass_size: i64,
+    content_fingerprint: &str,
+) -> ImportMode {
     match stored.file_size {
         None => ImportMode::Append,
         Some(file_size)
@@ -926,7 +1180,11 @@ fn import_mode(stored: &StoredSession, pass_size: i64, content_fingerprint: &str
         {
             ImportMode::Skip
         }
-        Some(file_size) if pass_size > file_size => ImportMode::Append,
+        Some(file_size)
+            if source_file.source_format == SourceFormat::Jsonl && pass_size > file_size =>
+        {
+            ImportMode::Append
+        }
         Some(_) => ImportMode::Rewrite,
     }
 }
@@ -1283,21 +1541,29 @@ fn capture_metadata(metadata: &mut ParsedMetadata, source: &str, header: &EventH
     }
 
     if let Some(ts) = event_timestamp(source, header) {
-        let ts = ts.to_string();
-        if metadata
-            .started_at
-            .as_ref()
-            .is_none_or(|current| ts < *current)
-        {
+        capture_metadata_timestamp(metadata, ts);
+    }
+}
+
+fn capture_metadata_timestamp(metadata: &mut ParsedMetadata, ts: &str) {
+    let replace_started = metadata
+        .started_at
+        .as_deref()
+        .is_none_or(|current| ts < current);
+    let replace_ended = metadata
+        .ended_at
+        .as_deref()
+        .is_none_or(|current| ts > current);
+
+    match (replace_started, replace_ended) {
+        (true, true) => {
+            let ts = ts.to_string();
             metadata.started_at = Some(ts.clone());
-        }
-        if metadata
-            .ended_at
-            .as_ref()
-            .is_none_or(|current| ts > *current)
-        {
             metadata.ended_at = Some(ts);
         }
+        (true, false) => metadata.started_at = Some(ts.to_string()),
+        (false, true) => metadata.ended_at = Some(ts.to_string()),
+        (false, false) => {}
     }
 }
 
@@ -1479,6 +1745,30 @@ fn claude_local_agent_fallback_source_session_id(path: &Path) -> Result<String> 
 
 fn claude_local_agent_metadata_path(path: &Path) -> Option<PathBuf> {
     path.parent().map(|parent| parent.with_extension("json"))
+}
+
+fn gemini_source_session_id_from_buffer(path: &Path, buffer: &[u8]) -> Result<String> {
+    let identity = serde_json::from_slice::<GeminiChatIdentity<'_>>(buffer)
+        .map_err(|source| invalid_session_meta(path, source.to_string()))?;
+    if identity.session_id.trim().is_empty() {
+        return Err(invalid_session_meta(
+            path,
+            "gemini chat sessionId is missing",
+        ));
+    }
+    Ok(identity.session_id.to_string())
+}
+
+fn gemini_chat_from_buffer<'a>(path: &Path, buffer: &'a [u8]) -> Result<GeminiChatFile<'a>> {
+    let chat = serde_json::from_slice::<GeminiChatFile<'a>>(buffer)
+        .map_err(|source| invalid_session_meta(path, source.to_string()))?;
+    if chat.session_id.trim().is_empty() {
+        return Err(invalid_session_meta(
+            path,
+            "gemini chat sessionId is missing",
+        ));
+    }
+    Ok(chat)
 }
 
 fn source_session_ids_from_path(path: &Path) -> Result<(String, Option<String>)> {

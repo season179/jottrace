@@ -1,7 +1,8 @@
 # Reader Fixture Corpus
 
 This corpus started as the issue #21 reader-fixture seed set and now includes
-the Claude local-agent, OpenCode SQLite, and issue #64 Pi agent slices. It is
+the Claude local-agent, OpenCode SQLite, issue #64 Pi agent, and issue #67
+Gemini CLI slices. It is
 source-shaped from inspected local agent artifacts, but all content is
 synthetic and safe to commit.
 
@@ -30,6 +31,9 @@ synthetic and safe to commit.
   assistant, system, result, tool-summary, and rate-limit events. Browser
   session storage, app caches, uploads, outputs, and audit keys are
   intentionally not part of the fixture.
+- `gemini-cli/tmp/fixture-project/chats/` captures the Gemini CLI chat JSON
+  shape with user, gemini, and info messages plus thoughts, token metadata, and
+  tool-call/result payloads.
 - `edge-cases/` contains partial-tail, corrupt-line, truncation, and same-size
   rewrite cases for the shared JSONL ingest core.
 

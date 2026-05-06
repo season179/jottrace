@@ -1,0 +1,88 @@
+{
+  "sessionId": "33333333-3333-4333-8333-333333333333",
+  "projectHash": "fixture-gemini-project-hash",
+  "startTime": "2026-05-06T09:00:00.000Z",
+  "lastUpdated": "2026-05-06T09:00:06.000Z",
+  "messages": [
+    {
+      "id": "gemini-message-001",
+      "timestamp": "2026-05-06T09:00:01.000Z",
+      "type": "user",
+      "content": [
+        {
+          "text": "Please inspect the fixture project."
+        }
+      ]
+    },
+    {
+      "id": "gemini-message-002",
+      "timestamp": "2026-05-06T09:00:03.000Z",
+      "type": "gemini",
+      "content": "I will inspect the sanitized fixture project.",
+      "thoughts": [
+        {
+          "subject": "Plan",
+          "description": "Use the source-shaped fixture without private content.",
+          "timestamp": "2026-05-06T09:00:02.000Z"
+        }
+      ],
+      "tokens": {
+        "input": 128,
+        "output": 32,
+        "cached": 0,
+        "thoughts": 8,
+        "tool": 12,
+        "total": 180
+      },
+      "model": "gemini-fixture",
+      "toolCalls": [
+        {
+          "id": "tool-call-fixture-001",
+          "name": "list_directory",
+          "args": {
+            "dir_path": "/Users/fixture/Workspace/jottrace"
+          },
+          "result": [
+            {
+              "functionResponse": {
+                "id": "tool-call-fixture-001",
+                "name": "list_directory",
+                "response": {
+                  "output": "README.md\nsrc\ntests\n"
+                }
+              }
+            }
+          ],
+          "status": "success",
+          "timestamp": "2026-05-06T09:00:03.000Z",
+          "resultDisplay": "README.md\nsrc\ntests\n",
+          "displayName": "List directory",
+          "description": "List the fixture project directory.",
+          "renderOutputAsMarkdown": false
+        }
+      ]
+    },
+    {
+      "id": "gemini-message-003",
+      "timestamp": "2026-05-06T09:00:04.000Z",
+      "type": "info",
+      "content": "Fixture command completed."
+    },
+    {
+      "id": "gemini-message-004",
+      "timestamp": "2026-05-06T09:00:06.000Z",
+      "type": "gemini",
+      "content": "Final sanitized response.",
+      "tokens": {
+        "input": 64,
+        "output": 16,
+        "cached": 0,
+        "thoughts": 0,
+        "tool": 0,
+        "total": 80
+      },
+      "model": "gemini-fixture"
+    }
+  ],
+  "kind": "chat"
+}
