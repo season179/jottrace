@@ -527,17 +527,19 @@ source without modification.
   `~/.local/share/opencode/opencode.db`
 - This machine also has a coexisting JSON storage tree at
   `~/.local/share/opencode/storage/{session,message,part,project,session_diff}/`.
-- SQLite appears to be the complete current store in the 2026-05-06
-  metadata-only check. The observed database has `session`, `message`, `part`,
+- SQLite appears to be the complete current store in the 2026-05-06 source
+  check. The observed database has `session`, `message`, `part`,
   `session_entry`, `project`, `workspace`, `event`, and `event_sequence`
   tables; local counts were 62 sessions, 766 messages, and 3,325 parts.
 - The JSON storage tree exists and is source-shaped, but it should stay out of
   reader scope until sanitized fixtures prove whether it is authoritative,
   mirrored legacy data, or cache/reference material.
 - Parent/child session relationships live on `session.parent_id`; this machine
-  had 14 parent-linked OpenCode sessions in the metadata check. The shared
-  `parent_session_id` column on Jottrace `sessions` carries the link once a
-  fixture proves the deterministic derivation.
+  had 14 parent-linked OpenCode sessions in the metadata check. The sanitized
+  `tests/fixtures/readers/opencode/sqlite/opencode.sql` fixture preserves the
+  reader-relevant relationship shape with synthetic parent and child sessions,
+  so the shared `parent_session_id` column on Jottrace `sessions` should carry
+  this link once the reader is implemented.
 
 ### Change-detection
 
@@ -554,9 +556,12 @@ choice must be stable across re-reads.
 
 ### Status
 
-Inventory candidate. Full implementation needs a sanitized fixture to settle
-whether the SQLite DB or JSON storage tree is authoritative, plus the session
-id, event ordering key, parent/child linkage, and in-place update detection.
+Inventory candidate with an initial sanitized SQLite reader-shape fixture. The
+fixture records the reader-relevant table subset and provisionally confirms
+`session.id` identity, `session.parent_id` linkage, and the likely message/part
+ordering inputs. Full implementation still needs human fixture approval and a
+decision to ignore or separately prove the coexisting JSON storage tree before
+treating it as reader input.
 
 ## Other readers (named, not designed)
 

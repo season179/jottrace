@@ -17,6 +17,10 @@ content is synthetic and safe to commit.
   `sessions/YYYY/MM/DD/` rollout shape.
 - `codex-cli/archived_sessions/` captures the flat archived Codex rollout
   shape.
+- `opencode/sqlite/opencode.sql` captures the OpenCode SQLite reader-relevant
+  shape observed on 2026-05-06. The fixture is a SQL rebuild script with
+  synthetic rows that preserve session, message, part, and parent-child
+  relationship structure without committing the private source database.
 - `edge-cases/` contains partial-tail, corrupt-line, truncation, and same-size
   rewrite cases for the shared JSONL ingest core.
 
@@ -33,8 +37,9 @@ content is synthetic and safe to commit.
 
 ## Human Review
 
-Review status: pending human approval.
-
-Before using this corpus as the reader-test baseline, a human should scan the
-fixture files and confirm that the synthetic replacements preserve source
-shape without leaking sensitive local content.
+Review status: pending human approval for the Claude CLI, Codex CLI, and
+OpenCode SQLite fixtures before they become the baseline for new reader
+implementation. Cursor fixture capture is still pending because no local
+Cursor `state.vscdb` or
+`cursorDiskKV` source was available on this machine during the 2026-05-06
+fixture pass.

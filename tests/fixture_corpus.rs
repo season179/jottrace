@@ -1,8 +1,12 @@
 mod common;
 
 use common::reader_fixture as fixture;
+use rusqlite::Connection;
 use std::fs;
 use std::path::{Path, PathBuf};
+
+const OPENCODE_PARENT_SESSION_ID: &str = "ses_fixture_parent_00000000000";
+const OPENCODE_CHILD_SESSION_ID: &str = "ses_fixture_child_000000000000";
 
 #[test]
 fn reader_source_inventory_documents_fixture_gate() {
@@ -99,6 +103,60 @@ fn reader_fixture_corpus_has_issue_21_required_shapes() {
         "edge-cases/same-size-rewrite-after.jsonl",
     ] {
         assert!(fixture(path).exists(), "missing fixture {path}");
+    }
+}
+
+#[test]
+fn reader_fixture_corpus_has_sanitized_opencode_sqlite_shape() {
+    let fixture = fs::read_to_string(fixture("opencode/sqlite/opencode.sql"))
+        .expect("read OpenCode SQLite fixture");
+    let conn = Connection::open_in_memory().expect("open fixture db");
+
+    conn.execute_batch(&fixture)
+        .expect("OpenCode fixture SQL should load");
+
+    let parent_id: String = conn
+        .query_row(
+            "SELECT parent_id FROM session WHERE id = ?1",
+            [OPENCODE_CHILD_SESSION_ID],
+            |row| row.get(0),
+        )
+        .expect("child session should have parent link");
+    assert_eq!(parent_id, OPENCODE_PARENT_SESSION_ID);
+
+    for (label, sql, expected) in [
+        (
+            "child session messages",
+            "SELECT count(*) FROM message WHERE session_id = ?1",
+            2,
+        ),
+        (
+            "child session parts",
+            "SELECT count(*) FROM part WHERE session_id = ?1",
+            2,
+        ),
+    ] {
+        let count: i64 = conn
+            .query_row(sql, [OPENCODE_CHILD_SESSION_ID], |row| row.get(0))
+            .unwrap_or_else(|_| panic!("count {label}"));
+        assert_eq!(count, expected, "unexpected count for {label}");
+    }
+}
+
+#[test]
+fn reader_fixture_readme_documents_opencode_fixture_status() {
+    let readme = fs::read_to_string(fixture("README.md")).expect("read reader fixture README");
+
+    for required in [
+        "opencode/sqlite/opencode.sql",
+        "OpenCode SQLite",
+        "session, message, part, and parent-child",
+        "Cursor fixture capture is still pending",
+    ] {
+        assert!(
+            readme.contains(required),
+            "fixture README should document OpenCode/Cursor status: {required}"
+        );
     }
 }
 
