@@ -43,6 +43,10 @@ pub enum JottraceError {
     /// Refuse to reuse a filesystem node as a state file unless it is a regular
     /// file. SQLite needs a durable file path, not a directory or special file.
     NotFile(PathBuf),
+    InvalidSessionMeta {
+        path: PathBuf,
+        message: String,
+    },
     /// Existing loose permissions are surfaced instead of silently chmodded so
     /// the user can notice and decide whether the location is trustworthy.
     InsecureMode {
@@ -95,6 +99,9 @@ impl fmt::Display for JottraceError {
                 write!(f, "{} exists but is not a directory", path.display())
             }
             Self::NotFile(path) => write!(f, "{} exists but is not a file", path.display()),
+            Self::InvalidSessionMeta { path, message } => {
+                write!(f, "{}: {}", path.display(), message)
+            }
             Self::InsecureMode {
                 path,
                 expected,
