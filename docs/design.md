@@ -88,6 +88,8 @@ The first executable surface is intentionally small:
 - `jottrace web` — starts a read-only web UI bound to `127.0.0.1` for browsing
   preserved sessions, events, raw payload previews, and unresolved ingest
   errors from the local SQLite journal.
+- `jottrace update` — downloads the matching GitHub Release artifact and
+  replaces the installed binary without touching the local journal.
 
 Processor, writer, scheduler, and recall commands come later.
 
@@ -119,8 +121,9 @@ Implications:
   `install.sh` UX; it is plumbing, not the user-facing install contract.
 - **The binary must be self-contained.** SQLite is statically linked (e.g.,
   `rusqlite` with the `bundled` feature). No runtime library dependencies.
-- **Update path is "re-run the installer."** No `jottrace update`
-  self-replace command in MVP.
+- **Update path is first-class but installer-compatible.** `jottrace update`
+  uses the same GitHub Release artifact contract as `install.sh`; rerunning
+  the curl installer remains the fallback.
 - **Data dir is separate from binary path.** Binary at
   `~/.local/bin/jottrace`; data at `~/.jottrace/` (DB, single-instance
   lockfile, future config). The two are independent.

@@ -11,10 +11,12 @@ use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt, PermissionsExt};
 pub mod compact;
 pub mod ingest;
 pub mod storage;
+pub mod update;
 pub mod web;
 pub use compact::{CompactMode, CompactOptions, CompactReport, run_compact};
 pub use ingest::{IngestReport, run_ingest};
 pub use storage::{IngestErrorSummary, StatusReport, run_status};
+pub use update::{UpdateReport, run_update};
 
 /// Default per-user data directory name for the current MVP.
 pub const APP_DIR_NAME: &str = ".jottrace";

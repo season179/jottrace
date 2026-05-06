@@ -22,6 +22,7 @@ fn main() -> ExitCode {
         Some("events") => run_events_command(args),
         Some("ingest") => run_ingest_command(),
         Some("status") => run_status_command(),
+        Some("update") | Some("upgrade") => run_update_command(args),
         Some("web") => run_web_command(args),
         Some(command) => {
             eprintln!("unknown command: {command}");
@@ -31,6 +32,12 @@ fn main() -> ExitCode {
             ExitCode::from(2)
         }
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum UpdateCommand {
+    Run,
+    Help,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -288,6 +295,44 @@ fn run_ingest_command() -> ExitCode {
     }
 }
 
+fn run_update_command(args: impl Iterator<Item = String>) -> ExitCode {
+    match parse_update_command(args) {
+        Ok(UpdateCommand::Help) => {
+            print_update_help();
+            ExitCode::SUCCESS
+        }
+        Ok(UpdateCommand::Run) => match jottrace::run_update() {
+            Ok(report) => {
+                println!("jottrace update");
+                println!("current_version: {}", report.current_version);
+                println!("target_version: {}", report.target_version);
+                println!("install_path: {}", report.install_path.display());
+                println!("result: {}", report.result.as_str());
+                ExitCode::SUCCESS
+            }
+            Err(error) => {
+                eprintln!("jottrace update failed: {error}");
+                ExitCode::FAILURE
+            }
+        },
+        Err(message) => {
+            eprintln!("{message}");
+            eprintln!("run `jottrace update --help` for usage");
+            ExitCode::from(2)
+        }
+    }
+}
+
+fn parse_update_command(
+    mut args: impl Iterator<Item = String>,
+) -> std::result::Result<UpdateCommand, String> {
+    match args.next() {
+        None => Ok(UpdateCommand::Run),
+        Some(arg) if arg == "--help" || arg == "-h" => Ok(UpdateCommand::Help),
+        Some(arg) => Err(format!("unknown update option: {arg}")),
+    }
+}
+
 fn run_compact_command(args: impl Iterator<Item = String>) -> ExitCode {
     let options = match parse_compact_command(args) {
         Ok(CompactCommand::Run(options)) => options,
@@ -510,6 +555,8 @@ fn print_help() {
     );
     println!("  jottrace ingest");
     println!("  jottrace status");
+    println!("  jottrace update");
+    println!("  jottrace upgrade");
     println!("  jottrace web [--port <port>] [--once]");
     println!("  jottrace --version");
 }
@@ -541,6 +588,15 @@ fn print_events_help() {
     println!("  --source <source>             Stored source, for example claude_cli");
     println!("  --session <source_session_id>  Stored source session id to inspect");
     println!("  --limit <n>                   Maximum number of events to print");
+}
+
+fn print_update_help() {
+    println!("jottrace update");
+    println!("Replace the installed binary with the matching GitHub Release artifact.");
+    println!();
+    println!("Usage:");
+    println!("  jottrace update");
+    println!("  jottrace upgrade");
 }
 
 fn print_web_help() {
