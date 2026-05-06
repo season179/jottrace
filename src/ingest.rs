@@ -13,6 +13,7 @@ use crate::storage::{
 use crate::{JottraceError, Result};
 
 const CLAUDE_SOURCE: &str = "claude_cli";
+const CLAUDE_LOCAL_AGENT_SOURCE: &str = "claude_local_agent";
 const CODEX_SOURCE: &str = "codex_cli";
 const PI_AGENT_SOURCE: &str = "pi_agent";
 const CLAUDE_INSTALL_DIRS: &[&str] = &[
@@ -24,8 +25,10 @@ const CLAUDE_INSTALL_DIRS: &[&str] = &[
 ];
 const CODEX_INSTALL_DIRS: &[&str] = &[".codex", ".codex-local"];
 const PI_AGENT_SESSIONS_DIR: &str = ".pi/agent/sessions";
-const MAX_CODEX_SESSION_META_BYTES: u64 = 64 * 1024;
-const MAX_PI_SESSION_HEADER_BYTES: u64 = 64 * 1024;
+const CLAUDE_LOCAL_AGENT_SESSIONS_DIR: &str =
+    "Library/Application Support/Claude/local-agent-mode-sessions";
+const CLAUDE_LOCAL_AGENT_AUDIT_FILE_NAME: &str = "audit.jsonl";
+const MAX_SESSION_HEADER_BYTES: u64 = 64 * 1024;
 const FNV_OFFSET_BASIS: u64 = 0xcbf29ce484222325;
 const FNV_PRIME: u64 = 0x100000001b3;
 const INVALID_JSON_ERROR_KIND: &str = "invalid_json";
@@ -56,12 +59,14 @@ struct SourceFile {
     source_session_id: String,
     source_session_id_kind: SourceSessionIdKind,
     parent_source_session_id: Option<String>,
+    metadata_path: Option<PathBuf>,
     path: PathBuf,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum SourceSessionIdKind {
     Known,
+    ClaudeLocalAgentAudit,
     CodexSessionMeta,
 }
 
@@ -91,6 +96,14 @@ struct ParsedMetadata {
     cwd: Option<String>,
     started_at: Option<String>,
     ended_at: Option<String>,
+}
+
+impl ParsedMetadata {
+    fn fill_missing_from(&mut self, other: ParsedMetadata) {
+        fill_missing(&mut self.cwd, other.cwd);
+        fill_missing(&mut self.started_at, other.started_at);
+        fill_missing(&mut self.ended_at, other.ended_at);
+    }
 }
 
 struct SessionUpdate<'a> {
@@ -169,6 +182,41 @@ struct LegacyCodexHeader<'a> {
     timestamp: Option<&'a str>,
 }
 
+#[derive(Debug, Deserialize)]
+struct ClaudeLocalAgentAuditHeader<'a> {
+    #[serde(default, borrow, alias = "sessionId")]
+    session_id: Option<&'a str>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ClaudeLocalAgentMetadata<'a> {
+    #[serde(
+        default,
+        borrow,
+        alias = "workspace_path",
+        alias = "workspacePath",
+        alias = "project_path",
+        alias = "projectPath"
+    )]
+    cwd: Option<&'a str>,
+    #[serde(
+        default,
+        borrow,
+        alias = "startedAt",
+        alias = "created_at",
+        alias = "createdAt"
+    )]
+    started_at: Option<&'a str>,
+    #[serde(
+        default,
+        borrow,
+        alias = "endedAt",
+        alias = "updated_at",
+        alias = "updatedAt"
+    )]
+    ended_at: Option<&'a str>,
+}
+
 pub fn run_ingest() -> Result<IngestReport> {
     let data_dir = crate::data_dir_from_env()?;
     let _lock = crate::acquire_data_lock(&data_dir)?;
@@ -208,6 +256,7 @@ pub fn run_ingest() -> Result<IngestReport> {
 
 fn discover_session_files() -> Result<Vec<SourceFile>> {
     let mut source_files = discover_claude_session_files()?;
+    source_files.extend(discover_claude_local_agent_session_files()?);
     source_files.extend(discover_codex_session_files()?);
     source_files.extend(discover_pi_agent_session_files()?);
     Ok(source_files)
@@ -236,6 +285,7 @@ fn discover_claude_session_files() -> Result<Vec<SourceFile>> {
                 source_session_id,
                 source_session_id_kind: SourceSessionIdKind::Known,
                 parent_source_session_id,
+                metadata_path: None,
                 path,
             })
         })
@@ -247,6 +297,28 @@ fn discover_claude_session_files() -> Result<Vec<SourceFile>> {
             .then_with(|| left.path.cmp(&right.path))
     });
     Ok(source_files)
+}
+
+fn discover_claude_local_agent_session_files() -> Result<Vec<SourceFile>> {
+    let root = home_dir()?.join(CLAUDE_LOCAL_AGENT_SESSIONS_DIR);
+    let mut paths = Vec::new();
+    collect_claude_local_agent_audit_files(&root, &mut paths)?;
+    paths.sort();
+    paths.dedup();
+
+    paths
+        .into_iter()
+        .map(|path| {
+            Ok(SourceFile {
+                source: CLAUDE_LOCAL_AGENT_SOURCE,
+                source_session_id: claude_local_agent_fallback_source_session_id(&path)?,
+                source_session_id_kind: SourceSessionIdKind::ClaudeLocalAgentAudit,
+                parent_source_session_id: None,
+                metadata_path: claude_local_agent_metadata_path(&path),
+                path,
+            })
+        })
+        .collect()
 }
 
 fn discover_codex_session_files() -> Result<Vec<SourceFile>> {
@@ -271,6 +343,7 @@ fn discover_codex_session_files() -> Result<Vec<SourceFile>> {
                 source_session_id,
                 source_session_id_kind: SourceSessionIdKind::CodexSessionMeta,
                 parent_source_session_id: None,
+                metadata_path: None,
                 path,
             })
         })
@@ -294,6 +367,7 @@ fn discover_pi_agent_session_files() -> Result<Vec<SourceFile>> {
                 source_session_id,
                 source_session_id_kind: SourceSessionIdKind::Known,
                 parent_source_session_id: None,
+                metadata_path: None,
                 path,
             })
         })
@@ -304,6 +378,64 @@ fn home_dir() -> Result<PathBuf> {
     env::var_os("HOME")
         .map(PathBuf::from)
         .ok_or(JottraceError::MissingHome)
+}
+
+fn collect_claude_local_agent_audit_files(root: &Path, paths: &mut Vec<PathBuf>) -> Result<()> {
+    let entries = match fs::read_dir(root) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
+        Err(source) => {
+            return Err(JottraceError::Io {
+                path: root.to_path_buf(),
+                source,
+            });
+        }
+    };
+
+    for entry in entries {
+        let entry = entry.map_err(|source| JottraceError::Io {
+            path: root.to_path_buf(),
+            source,
+        })?;
+        let path = entry.path();
+        let file_type = entry.file_type().map_err(|source| JottraceError::Io {
+            path: path.clone(),
+            source,
+        })?;
+        if !file_type.is_dir() {
+            continue;
+        }
+
+        if is_claude_local_agent_session_dir(&path) {
+            push_claude_local_agent_audit_file(&path, paths)?;
+        } else {
+            collect_claude_local_agent_audit_files(&path, paths)?;
+        }
+    }
+
+    Ok(())
+}
+
+fn is_claude_local_agent_session_dir(path: &Path) -> bool {
+    path.file_name()
+        .and_then(|name| name.to_str())
+        .is_some_and(|name| name.starts_with("local_"))
+}
+
+fn push_claude_local_agent_audit_file(session_dir: &Path, paths: &mut Vec<PathBuf>) -> Result<()> {
+    let audit_path = session_dir.join(CLAUDE_LOCAL_AGENT_AUDIT_FILE_NAME);
+    match fs::metadata(&audit_path) {
+        Ok(metadata) if metadata.is_file() => paths.push(audit_path),
+        Ok(_) => {}
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+        Err(source) => {
+            return Err(JottraceError::Io {
+                path: audit_path,
+                source,
+            });
+        }
+    }
+    Ok(())
 }
 
 fn collect_jsonl_files(root: &Path, recursive: bool, paths: &mut Vec<PathBuf>) -> Result<()> {
@@ -437,6 +569,7 @@ fn ingest_jsonl_file(
     let buffer = read_bounded(&source_file.path, pass_size_bytes)?;
     let content_fingerprint = fingerprint(&buffer);
     let committed_len = committed_len(&buffer);
+    let source_metadata = source_metadata(&source_file)?;
 
     let tx = conn
         .transaction()
@@ -491,6 +624,8 @@ fn ingest_jsonl_file(
         committed_len,
     )?;
 
+    let mut metadata = imported.metadata;
+    metadata.fill_missing_from(source_metadata);
     let event_count = generation_event_count(&tx, &source_file, stored.id, generation)?;
     let parent_session_id = resolve_parent_session_id(&tx, &source_file)?;
     update_session_after_import(
@@ -505,7 +640,7 @@ fn ingest_jsonl_file(
             content_fingerprint: &content_fingerprint,
             next_read_offset: imported.next_read_offset,
             event_count,
-            metadata: &imported.metadata,
+            metadata: &metadata,
         },
     )?;
     resolve_invalid_session_meta_error(
@@ -541,7 +676,15 @@ fn resolve_source_file(
         });
     }
 
-    let source_session_id = codex_source_session_id_from_file(&source_file.path)?;
+    let source_session_id = match source_file.source_session_id_kind {
+        SourceSessionIdKind::Known => unreachable!("known source file returned above"),
+        SourceSessionIdKind::ClaudeLocalAgentAudit => {
+            claude_local_agent_source_session_id_from_file(&source_file.path)?
+        }
+        SourceSessionIdKind::CodexSessionMeta => {
+            codex_source_session_id_from_file(&source_file.path)?
+        }
+    };
     reuse_source_file_session_identity(
         conn,
         stored_by_path.as_ref(),
@@ -1179,10 +1322,65 @@ fn event_timestamp<'a>(source: &str, header: &'a EventHeader<'a>) -> Option<&'a 
     None
 }
 
-fn codex_source_session_id_from_file(path: &Path) -> Result<String> {
-    let first_line = read_committed_first_line(
+fn source_metadata(source_file: &SourceFile) -> Result<ParsedMetadata> {
+    if source_file.source == CLAUDE_LOCAL_AGENT_SOURCE {
+        return claude_local_agent_metadata(source_file.metadata_path.as_deref());
+    }
+    Ok(ParsedMetadata::default())
+}
+
+fn claude_local_agent_metadata(metadata_path: Option<&Path>) -> Result<ParsedMetadata> {
+    let Some(path) = metadata_path else {
+        return Ok(ParsedMetadata::default());
+    };
+    let bytes = match fs::read(path) {
+        Ok(bytes) => bytes,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {
+            return Ok(ParsedMetadata::default());
+        }
+        Err(source) => {
+            return Err(JottraceError::Io {
+                path: path.to_path_buf(),
+                source,
+            });
+        }
+    };
+    let metadata = serde_json::from_slice::<ClaudeLocalAgentMetadata<'_>>(&bytes)
+        .map_err(|source| invalid_session_meta(path, source.to_string()))?;
+
+    Ok(ParsedMetadata {
+        cwd: metadata.cwd.map(str::to_string),
+        started_at: metadata.started_at.map(str::to_string),
+        ended_at: metadata.ended_at.map(str::to_string),
+    })
+}
+
+fn fill_missing(slot: &mut Option<String>, value: Option<String>) {
+    if slot.is_none() {
+        *slot = value;
+    }
+}
+
+fn claude_local_agent_source_session_id_from_file(path: &Path) -> Result<String> {
+    let first_line = first_committed_line(
         path,
-        MAX_CODEX_SESSION_META_BYTES,
+        MAX_SESSION_HEADER_BYTES,
+        "claude local-agent audit has no committed header line within the header limit",
+    )?;
+    let header = serde_json::from_slice::<ClaudeLocalAgentAuditHeader<'_>>(&first_line)
+        .map_err(|source| invalid_session_meta(path, source.to_string()))?;
+
+    header
+        .session_id
+        .filter(|session_id| !session_id.is_empty())
+        .map(str::to_string)
+        .ok_or_else(|| invalid_session_meta(path, "claude local-agent audit session_id is missing"))
+}
+
+fn codex_source_session_id_from_file(path: &Path) -> Result<String> {
+    let first_line = first_committed_line(
+        path,
+        MAX_SESSION_HEADER_BYTES,
         "codex session file has no committed session_meta line within the header limit",
     )?;
 
@@ -1209,7 +1407,7 @@ fn codex_source_session_id_from_file(path: &Path) -> Result<String> {
         .ok_or_else(|| invalid_session_meta(path, "codex session_meta payload id is missing"))
 }
 
-fn read_committed_first_line(
+fn first_committed_line(
     path: &Path,
     byte_limit: u64,
     missing_line_message: &str,
@@ -1241,9 +1439,9 @@ fn validate_source_file_header(source_file: &SourceFile) -> Result<()> {
 }
 
 fn validate_pi_source_session_header(path: &Path, source_session_id: &str) -> Result<()> {
-    let first_line = read_committed_first_line(
+    let first_line = first_committed_line(
         path,
-        MAX_PI_SESSION_HEADER_BYTES,
+        MAX_SESSION_HEADER_BYTES,
         "Pi agent session file has no committed session event line within the header limit",
     )?;
     let header = serde_json::from_slice::<EventHeader<'_>>(&first_line)
@@ -1265,6 +1463,22 @@ fn validate_pi_source_session_header(path: &Path, source_session_id: &str) -> Re
         ));
     }
     Ok(())
+}
+
+fn claude_local_agent_fallback_source_session_id(path: &Path) -> Result<String> {
+    let dir_name = path
+        .parent()
+        .and_then(|parent| parent.file_name())
+        .and_then(|name| name.to_str())
+        .ok_or_else(|| invalid_path(path, "local-agent audit path is not valid UTF-8"))?;
+    Ok(dir_name
+        .strip_prefix("local_")
+        .unwrap_or(dir_name)
+        .to_string())
+}
+
+fn claude_local_agent_metadata_path(path: &Path) -> Option<PathBuf> {
+    path.parent().map(|parent| parent.with_extension("json"))
 }
 
 fn source_session_ids_from_path(path: &Path) -> Result<(String, Option<String>)> {

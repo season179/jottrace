@@ -17,6 +17,9 @@ const CLAUDE_FIXTURE_SESSION_ID: &str = "00000000-0000-4000-8000-000000000021";
 const CLAUDE_SIDECHAIN_FIXTURE_SESSION: &str = "claude-cli/projects/-Users-fixture-Workspace-jottrace/00000000-0000-4000-8000-000000000021/subagents/agent-a000000000000021.jsonl";
 const CLAUDE_SIDECHAIN_FIXTURE_META: &str = "claude-cli/projects/-Users-fixture-Workspace-jottrace/00000000-0000-4000-8000-000000000021/subagents/agent-a000000000000021.meta.json";
 const CLAUDE_SIDECHAIN_FIXTURE_SESSION_ID: &str = "agent-a000000000000021";
+const CLAUDE_LOCAL_AGENT_FIXTURE_METADATA: &str = "claude-local-agent/local-agent-mode-sessions/desktop-fixture/workspace-fixture/local_00000000-0000-4000-8000-000000000068.json";
+const CLAUDE_LOCAL_AGENT_FIXTURE_AUDIT: &str = "claude-local-agent/local-agent-mode-sessions/desktop-fixture/workspace-fixture/local_00000000-0000-4000-8000-000000000068/audit.jsonl";
+const CLAUDE_LOCAL_AGENT_FIXTURE_SESSION_ID: &str = "00000000-0000-4000-8000-000000000068";
 const OTHER_CLAUDE_FIXTURE_SESSION_ID: &str = "11111111-1111-4111-8111-111111111111";
 const CODEX_NESTED_FIXTURE_SESSION: &str = "codex-cli/sessions/2026/05/05/rollout-2026-05-05T09-00-00-00000000-0000-4000-8000-000000000021.jsonl";
 const CODEX_NESTED_FIXTURE_SESSION_ID: &str = "00000000-0000-4000-8000-000000000021";
@@ -853,6 +856,149 @@ fn ingest_preserves_archived_codex_cli_session() {
     assert_eq!(source_session_id, CODEX_ARCHIVED_FIXTURE_SESSION_ID);
     assert_eq!(event_count, 6);
     assert_eq!(PathBuf::from(file_path), session_file);
+
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn ingest_preserves_claude_local_agent_audit_fixture_with_metadata_linkage() {
+    let root = temp_root("ingest-claude-local-agent");
+    let data_dir = root.join(".jottrace");
+    let audit_file = install_claude_local_agent_fixture(&root);
+
+    let ingest = run_ingest(&root, &data_dir);
+    assert!(ingest.contains("sessions: 1"));
+    assert!(ingest.contains("events: 6"));
+    assert!(ingest.contains("inserted_events: 6"));
+    assert!(ingest.contains("unresolved_ingest_errors: 0"));
+
+    let conn = Connection::open(db_path(&data_dir)).expect("open preserved db");
+    let (source_session_id, cwd, started_at, ended_at, event_count, file_path): (
+        String,
+        String,
+        String,
+        String,
+        i64,
+        String,
+    ) = conn
+        .query_row(
+            "SELECT source_session_id, cwd, started_at, ended_at, event_count, file_path
+             FROM sessions
+             WHERE source = 'claude_local_agent'",
+            [],
+            |row| {
+                Ok((
+                    row.get(0)?,
+                    row.get(1)?,
+                    row.get(2)?,
+                    row.get(3)?,
+                    row.get(4)?,
+                    row.get(5)?,
+                ))
+            },
+        )
+        .expect("claude local-agent session metadata");
+    assert_eq!(source_session_id, CLAUDE_LOCAL_AGENT_FIXTURE_SESSION_ID);
+    assert_eq!(cwd, "/Users/fixture/Workspace/jottrace");
+    assert_eq!(started_at, "2026-05-06T02:00:01.000Z");
+    assert_eq!(ended_at, "2026-05-06T02:00:06.000Z");
+    assert_eq!(event_count, 6);
+    assert_eq!(PathBuf::from(file_path), audit_file);
+
+    let max_seq: i64 = conn
+        .query_row(
+            "SELECT MAX(seq)
+             FROM events
+             JOIN sessions ON sessions.id = events.session_id
+             WHERE sessions.source = 'claude_local_agent'",
+            [],
+            |row| row.get(0),
+        )
+        .expect("local-agent max seq");
+    assert_eq!(max_seq, 5);
+    assert!(event_payload(&conn, 0, 0).contains(r#""type":"user""#));
+
+    let second = run_ingest(&root, &data_dir);
+    assert!(second.contains("sessions: 1"));
+    assert!(second.contains("events: 6"));
+    assert!(second.contains("inserted_events: 0"));
+
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn ingest_records_invalid_claude_local_agent_audit_without_blocking_other_files() {
+    let root = temp_root("ingest-claude-local-agent-invalid");
+    let data_dir = root.join(".jottrace");
+    install_primary_claude_fixture(&root);
+    let bad_audit = root
+        .join("Library/Application Support/Claude/local-agent-mode-sessions/desktop-fixture/workspace-fixture/local_bad-audit-session")
+        .join("audit.jsonl");
+    write_text_file(
+        &bad_audit,
+        "{\"timestamp\":\"2026-05-06T02:10:00.000Z\",\"type\":\"user\",\"message\":{\"role\":\"user\",\"content\":\"missing session id\"}}\n",
+    );
+
+    let ingest = run_ingest(&root, &data_dir);
+    assert!(ingest.contains("sessions: 2"));
+    assert!(ingest.contains("events: 12"));
+    assert!(ingest.contains("inserted_events: 12"));
+    assert!(ingest.contains("unresolved_ingest_errors: 1"));
+
+    let errors = jottrace::storage::unresolved_ingest_errors_for_path(&db_path(&data_dir), 10)
+        .expect("unresolved ingest errors");
+    assert_eq!(errors.len(), 1);
+    let error = &errors[0];
+    assert_eq!(error.source, "claude_local_agent");
+    assert_eq!(
+        error.source_session_id.as_deref(),
+        Some("bad-audit-session")
+    );
+    assert_eq!(error.file_path, bad_audit);
+    assert_eq!(error.error_kind, "invalid_session_meta");
+    assert!(error.message.contains("session_id"));
+
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn ingest_ignores_claude_browser_session_storage_audit_files() {
+    let root = temp_root("ingest-ignore-claude-browser-storage");
+    let data_dir = root.join(".jottrace");
+    let browser_audit = root
+        .join("Library/Application Support/Claude/Session Storage")
+        .join("audit.jsonl");
+    write_text_file(
+        &browser_audit,
+        "{\"timestamp\":\"2026-05-06T02:20:00.000Z\",\"session_id\":\"browser-storage-session\",\"type\":\"user\"}\n",
+    );
+
+    let ingest = run_ingest(&root, &data_dir);
+    assert!(ingest.contains("sessions: 0"));
+    assert!(ingest.contains("events: 0"));
+    assert!(ingest.contains("inserted_events: 0"));
+    assert!(ingest.contains("unresolved_ingest_errors: 0"));
+
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn ingest_ignores_non_session_audit_files_under_claude_local_agent_root() {
+    let root = temp_root("ingest-ignore-claude-local-agent-debug");
+    let data_dir = root.join(".jottrace");
+    let debug_audit = root
+        .join("Library/Application Support/Claude/local-agent-mode-sessions/desktop-fixture/workspace-fixture/debug")
+        .join("audit.jsonl");
+    write_text_file(
+        &debug_audit,
+        "{\"timestamp\":\"2026-05-06T02:30:00.000Z\",\"session_id\":\"debug-session\",\"type\":\"user\"}\n",
+    );
+
+    let ingest = run_ingest(&root, &data_dir);
+    assert!(ingest.contains("sessions: 0"));
+    assert!(ingest.contains("events: 0"));
+    assert!(ingest.contains("inserted_events: 0"));
+    assert!(ingest.contains("unresolved_ingest_errors: 0"));
 
     let _ = fs::remove_dir_all(root);
 }
@@ -2686,6 +2832,18 @@ fn install_pi_agent_fixture(root: &Path) -> PathBuf {
     );
     copy_reader_fixture(PI_AGENT_FIXTURE_SESSION, &session_file);
     session_file
+}
+
+fn install_claude_local_agent_fixture(root: &Path) -> PathBuf {
+    let base = root.join("Library/Application Support/Claude/local-agent-mode-sessions/desktop-fixture/workspace-fixture");
+    let local_session = format!("local_{CLAUDE_LOCAL_AGENT_FIXTURE_SESSION_ID}");
+    copy_reader_fixture(
+        CLAUDE_LOCAL_AGENT_FIXTURE_METADATA,
+        &base.join(format!("{local_session}.json")),
+    );
+    let audit_file = base.join(local_session).join("audit.jsonl");
+    copy_reader_fixture(CLAUDE_LOCAL_AGENT_FIXTURE_AUDIT, &audit_file);
+    audit_file
 }
 
 fn replace_with_fixture(path: &Path, fixture_relative: &str) {

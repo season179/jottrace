@@ -63,6 +63,33 @@ fn reader_source_inventory_documents_known_sources_in_inventory_table() {
 }
 
 #[test]
+fn reader_source_inventory_documents_claude_local_agent_reader_shape() {
+    let inventory = reader_source_inventory();
+    let table = inventory
+        .split("## Known Source Inventory")
+        .nth(1)
+        .and_then(|tail| tail.split("## Deferred And Ignored Sources").next())
+        .expect("reader source inventory note should contain a known source inventory section");
+    let row = table
+        .lines()
+        .find(|line| line.contains("Claude Desktop / local agent mode"))
+        .expect("inventory table should document Claude Desktop local-agent mode");
+
+    for required in [
+        "source=`claude_local_agent`",
+        "`local_*.json` sidecar metadata",
+        "`audit.jsonl`",
+        "`session_id`",
+        "Browser session storage remains excluded",
+    ] {
+        assert!(
+            row.contains(required),
+            "local-agent inventory row should document {required}"
+        );
+    }
+}
+
+#[test]
 fn reader_source_inventory_documents_deferred_and_privacy_boundaries() {
     let inventory = reader_source_inventory();
 
@@ -223,6 +250,34 @@ fn reader_fixture_corpus_has_issue_64_pi_agent_required_shapes() {
         readme.contains("pi-agent/sessions"),
         "fixture README should document Pi agent fixture coverage"
     );
+}
+
+#[test]
+fn reader_fixture_corpus_has_issue_68_claude_local_agent_shapes() {
+    let metadata = fixture(
+        "claude-local-agent/local-agent-mode-sessions/desktop-fixture/workspace-fixture/local_00000000-0000-4000-8000-000000000068.json",
+    );
+    let audit = fixture(
+        "claude-local-agent/local-agent-mode-sessions/desktop-fixture/workspace-fixture/local_00000000-0000-4000-8000-000000000068/audit.jsonl",
+    );
+
+    assert!(metadata.exists(), "missing local-agent metadata fixture");
+    assert!(audit.exists(), "missing local-agent audit fixture");
+
+    let audit = fs::read_to_string(audit).expect("read local-agent audit fixture");
+    for event_type in [
+        r#""type":"user""#,
+        r#""type":"assistant""#,
+        r#""type":"system""#,
+        r#""type":"result""#,
+        r#""type":"tool-summary""#,
+        r#""type":"rate-limit""#,
+    ] {
+        assert!(
+            audit.contains(event_type),
+            "local-agent audit fixture should include {event_type}"
+        );
+    }
 }
 
 #[test]
