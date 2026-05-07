@@ -61,6 +61,7 @@ pub struct IngestReport {
     pub session_count: u64,
     pub event_count: u64,
     pub inserted_event_count: u64,
+    pub skipped_file_count: u64,
     pub unresolved_ingest_error_count: u64,
 }
 
@@ -372,10 +373,16 @@ pub fn run_ingest() -> Result<IngestReport> {
         )?,
     };
     let mut inserted_event_count = 0;
+    let mut skipped_file_count: u64 = 0;
 
     for source_file in &source_files {
         match ingest_source_file(&mut conn, &mut ingest_state, source_file) {
-            Ok(inserted) => inserted_event_count += inserted,
+            Ok(inserted) => {
+                if inserted == 0 {
+                    skipped_file_count += 1;
+                }
+                inserted_event_count += inserted;
+            }
             Err(error) if is_source_file_ingest_error(&error) => {
                 record_source_file_ingest_error(&mut conn, source_file, &error)?;
             }
@@ -391,6 +398,7 @@ pub fn run_ingest() -> Result<IngestReport> {
         session_count: status.session_count,
         event_count: status.event_count,
         inserted_event_count,
+        skipped_file_count,
         unresolved_ingest_error_count: status.unresolved_ingest_error_count,
     })
 }

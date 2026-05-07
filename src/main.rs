@@ -319,6 +319,7 @@ fn run_ingest_command(args: impl Iterator<Item = String>) -> ExitCode {
             println!("sessions: {}", report.session_count);
             println!("events: {}", report.event_count);
             println!("inserted_events: {}", report.inserted_event_count);
+            println!("skipped_files: {}", report.skipped_file_count);
             println!(
                 "unresolved_ingest_errors: {}",
                 report.unresolved_ingest_error_count
