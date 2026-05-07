@@ -1,5 +1,26 @@
 # Changelog
 
+## v26.5.8 - 2026-05-07
+
+### Summary
+
+- Adds `skipped_files` to the ingest report so unchanged source files are
+  visible at a glance. Changes since `v26.5.7`.
+
+### Changes
+
+- `jottrace ingest` now prints `skipped_files:` in its output, showing how
+  many source files were checked but produced no new inserts. This makes
+  idempotent reruns (especially large Hermes session lists) clearly
+  distinguishable from passes that actually imported new data.
+
+### Commits
+
+- Add skipped_files to ingest report (c99c772)
+
+### Verification
+
+
 ## v26.5.7 - 2026-05-07
 
 ### Summary
