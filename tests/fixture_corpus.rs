@@ -7,6 +7,8 @@ use std::path::{Path, PathBuf};
 
 const OPENCODE_PARENT_SESSION_ID: &str = "ses_fixture_parent_00000000000";
 const OPENCODE_CHILD_SESSION_ID: &str = "ses_fixture_child_000000000000";
+const HERMES_PARENT_SESSION_ID: &str = "hermes_fixture_parent_0000000000";
+const HERMES_CHILD_SESSION_ID: &str = "hermes_fixture_child_00000000000";
 
 #[test]
 fn reader_source_inventory_documents_fixture_gate() {
@@ -150,6 +152,27 @@ fn reader_source_inventory_documents_pi_agent_fixture_findings() {
     }
 }
 
+#[test]
+fn reader_source_inventory_documents_hermes_fixture_findings() {
+    let inventory = reader_source_inventory();
+
+    for required in [
+        "Hermes native SessionDB (#63 fixture-confirmed)",
+        "`~/.hermes/state.db`",
+        "`tests/fixtures/readers/hermes/sqlite/state.sql`",
+        "`sessions.id`",
+        "`messages.timestamp` + `messages.id`",
+        "FTS mirror tables are excluded",
+        "`sessions.parent_session_id`",
+        "per-session content fingerprint",
+    ] {
+        assert!(
+            inventory.contains(required),
+            "inventory note should document Hermes fixture finding: {required}"
+        );
+    }
+}
+
 fn reader_source_inventory() -> String {
     fs::read_to_string("docs/reader-source-inventory.md")
         .expect("reader source inventory design note should exist")
@@ -217,6 +240,44 @@ fn reader_fixture_corpus_has_sanitized_opencode_sqlite_shape() {
 }
 
 #[test]
+fn reader_fixture_corpus_has_sanitized_hermes_sqlite_shape() {
+    let fixture =
+        fs::read_to_string(fixture("hermes/sqlite/state.sql")).expect("read Hermes SQLite fixture");
+    let conn = Connection::open_in_memory().expect("open fixture db");
+
+    conn.execute_batch(&fixture)
+        .expect("Hermes fixture SQL should load");
+
+    let parent_id: String = conn
+        .query_row(
+            "SELECT parent_session_id FROM sessions WHERE id = ?1",
+            [HERMES_CHILD_SESSION_ID],
+            |row| row.get(0),
+        )
+        .expect("child session should have parent link");
+    assert_eq!(parent_id, HERMES_PARENT_SESSION_ID);
+
+    for (label, sql, expected) in [
+        ("sessions", "SELECT count(*) FROM sessions", 2),
+        ("FTS mirror rows", "SELECT count(*) FROM messages_fts", 5),
+    ] {
+        let count: i64 = conn
+            .query_row(sql, [], |row| row.get(0))
+            .unwrap_or_else(|_| panic!("count {label}"));
+        assert_eq!(count, expected, "unexpected count for {label}");
+    }
+
+    let child_message_count: i64 = conn
+        .query_row(
+            "SELECT count(*) FROM messages WHERE session_id = ?1",
+            [HERMES_CHILD_SESSION_ID],
+            |row| row.get(0),
+        )
+        .expect("count child session messages");
+    assert_eq!(child_message_count, 3);
+}
+
+#[test]
 fn reader_fixture_corpus_has_issue_65_factory_shapes() {
     for path in [
         "factory/sessions/-Users-fixture-Workspace-jottrace/00000000-0000-4000-8000-000000000065.jsonl",
@@ -234,6 +295,10 @@ fn reader_fixture_readme_documents_opencode_fixture_status() {
         "opencode/sqlite/opencode.sql",
         "OpenCode SQLite",
         "session, message, part, and parent-child",
+        "hermes/sqlite/state.sql",
+        "Hermes SQLite SessionDB",
+        "sessions, messages, parent linkage",
+        "FTS mirror tables",
         "Cursor fixture capture is still pending",
     ] {
         assert!(

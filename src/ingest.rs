@@ -20,6 +20,7 @@ const PI_AGENT_SOURCE: &str = "pi_agent";
 const GEMINI_SOURCE: &str = "gemini_cli";
 const FACTORY_SOURCE: &str = "factory";
 const OPENCODE_SOURCE: &str = "opencode";
+const HERMES_SOURCE: &str = "hermes";
 const CLAUDE_INSTALL_DIRS: &[&str] = &[
     ".claude",
     ".claude-code",
@@ -36,6 +37,8 @@ const GEMINI_TMP_DIR: &str = ".gemini/tmp";
 const FACTORY_INSTALL_DIRS: &[&str] = &[".factory"];
 const OPENCODE_DB_PATH: &str = ".local/share/opencode/opencode.db";
 const OPENCODE_DB_ERROR_SESSION_ID: &str = "opencode.db";
+const HERMES_DB_PATH: &str = ".hermes/state.db";
+const HERMES_DB_ERROR_SESSION_ID: &str = "state.db";
 const MAX_SESSION_HEADER_BYTES: u64 = 64 * 1024;
 const FACTORY_SESSION_START_MISSING_MESSAGE: &str =
     "factory session file has no committed session_start line within the header limit";
@@ -91,6 +94,7 @@ enum SourceFormat {
     Jsonl,
     GeminiChatJson,
     OpenCodeSqlite,
+    HermesSqlite,
 }
 
 #[derive(Debug, Clone)]
@@ -277,14 +281,14 @@ struct GeminiMessageHeader<'a> {
 }
 
 #[derive(Debug)]
-struct OpenCodeSessionSnapshot {
-    events: Vec<OpenCodeEvent>,
+struct SqliteSessionSnapshot {
+    events: Vec<SourceEvent>,
     metadata: ParsedMetadata,
     source_metadata: String,
 }
 
 #[derive(Debug)]
-struct OpenCodeEvent {
+struct SourceEvent {
     sort_time: i64,
     rank: i64,
     id: String,
@@ -391,6 +395,7 @@ fn discover_session_files() -> Result<Vec<SourceFile>> {
     source_files.extend(discover_gemini_session_files()?);
     source_files.extend(discover_factory_session_files()?);
     source_files.extend(discover_opencode_session_files()?);
+    source_files.extend(discover_hermes_session_files()?);
     Ok(source_files)
 }
 
@@ -586,61 +591,135 @@ fn discover_factory_session_files() -> Result<Vec<SourceFile>> {
 }
 
 fn discover_opencode_session_files() -> Result<Vec<SourceFile>> {
-    let path = home_dir()?.join(OPENCODE_DB_PATH);
+    discover_sqlite_session_files(
+        OPENCODE_DB_PATH,
+        OPENCODE_SOURCE,
+        SourceFormat::OpenCodeSqlite,
+        OPENCODE_DB_ERROR_SESSION_ID,
+        "SELECT id, parent_id
+         FROM session
+         ORDER BY parent_id IS NOT NULL, time_created, id",
+        opencode_source_connection,
+    )
+}
+
+fn discover_hermes_session_files() -> Result<Vec<SourceFile>> {
+    discover_sqlite_session_files(
+        HERMES_DB_PATH,
+        HERMES_SOURCE,
+        SourceFormat::HermesSqlite,
+        HERMES_DB_ERROR_SESSION_ID,
+        "SELECT id, parent_session_id
+         FROM sessions
+         ORDER BY parent_session_id IS NOT NULL, started_at, id",
+        hermes_source_connection,
+    )
+}
+
+fn discover_sqlite_session_files(
+    db_relative_path: &str,
+    source: &'static str,
+    source_format: SourceFormat,
+    error_session_id: &'static str,
+    session_query: &str,
+    open_connection: fn(&Path) -> Result<Connection>,
+) -> Result<Vec<SourceFile>> {
+    let path = home_dir()?.join(db_relative_path);
     match fs::metadata(&path) {
         Ok(metadata) if metadata.is_file() => {}
-        Ok(_) => return Ok(vec![opencode_error_source_file(path)]),
+        Ok(_) => {
+            return Ok(vec![sqlite_error_source_file(
+                source,
+                error_session_id,
+                source_format,
+                path,
+            )]);
+        }
         Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(Vec::new()),
         Err(source) => return Err(JottraceError::Io { path, source }),
     }
 
-    let conn = match opencode_source_connection(&path) {
+    let conn = match open_connection(&path) {
         Ok(conn) => conn,
-        Err(_) => return Ok(vec![opencode_error_source_file(path)]),
+        Err(_) => {
+            return Ok(vec![sqlite_error_source_file(
+                source,
+                error_session_id,
+                source_format,
+                path,
+            )]);
+        }
     };
-    let mut statement = match conn.prepare(
-        "SELECT id, parent_id
-         FROM session
-         ORDER BY parent_id IS NOT NULL, time_created, id",
-    ) {
+    let mut statement = match conn.prepare(session_query) {
         Ok(statement) => statement,
-        Err(_) => return Ok(vec![opencode_error_source_file(path)]),
+        Err(_) => {
+            return Ok(vec![sqlite_error_source_file(
+                source,
+                error_session_id,
+                source_format,
+                path,
+            )]);
+        }
     };
     let rows = match statement.query_map([], |row| Ok((row.get(0)?, row.get(1)?))) {
         Ok(rows) => rows,
-        Err(_) => return Ok(vec![opencode_error_source_file(path)]),
+        Err(_) => {
+            return Ok(vec![sqlite_error_source_file(
+                source,
+                error_session_id,
+                source_format,
+                path,
+            )]);
+        }
     };
 
     let mut source_files = Vec::new();
     for row in rows {
         let (source_session_id, parent_source_session_id): (String, Option<String>) = match row {
             Ok(row) => row,
-            Err(_) => return Ok(vec![opencode_error_source_file(path)]),
+            Err(_) => {
+                return Ok(vec![sqlite_error_source_file(
+                    source,
+                    error_session_id,
+                    source_format,
+                    path,
+                )]);
+            }
         };
         if source_session_id.trim().is_empty() {
-            return Ok(vec![opencode_error_source_file(path)]);
+            return Ok(vec![sqlite_error_source_file(
+                source,
+                error_session_id,
+                source_format,
+                path,
+            )]);
         }
         source_files.push(SourceFile {
-            source: OPENCODE_SOURCE,
+            source,
             source_session_id,
             source_session_id_kind: SourceSessionIdKind::Known,
             parent_source_session_id,
             metadata_path: None,
-            source_format: SourceFormat::OpenCodeSqlite,
+            source_format,
             path: path.clone(),
         });
     }
     Ok(source_files)
 }
 
-fn opencode_error_source_file(path: PathBuf) -> SourceFile {
+fn sqlite_error_source_file(
+    source: &'static str,
+    error_session_id: &str,
+    source_format: SourceFormat,
+    path: PathBuf,
+) -> SourceFile {
     SourceFile {
-        source: OPENCODE_SOURCE,
-        source_session_id: OPENCODE_DB_ERROR_SESSION_ID.to_string(),
+        source,
+        source_session_id: error_session_id.to_string(),
         source_session_id_kind: SourceSessionIdKind::Known,
         parent_source_session_id: None,
         metadata_path: None,
-        source_format: SourceFormat::OpenCodeSqlite,
+        source_format,
         path,
     }
 }
@@ -789,6 +868,15 @@ fn ingest_source_file(
     let file_mtime = file_mtime(&metadata);
     if source_file.source_format == SourceFormat::OpenCodeSqlite {
         return ingest_opencode_sqlite_session(
+            conn,
+            ingest_state,
+            source_file,
+            pass_size,
+            file_mtime,
+        );
+    }
+    if source_file.source_format == SourceFormat::HermesSqlite {
+        return ingest_hermes_sqlite_session(
             conn,
             ingest_state,
             source_file,
@@ -946,7 +1034,9 @@ fn ingest_source_file(
         SourceFormat::GeminiChatJson => {
             import_gemini_chat_json(&tx, &source_file, stored.id, generation, &buffer)?
         }
-        SourceFormat::OpenCodeSqlite => unreachable!("OpenCode SQLite is imported earlier"),
+        SourceFormat::OpenCodeSqlite | SourceFormat::HermesSqlite => {
+            unreachable!("SQLite sources are imported earlier")
+        }
     };
 
     let mut metadata = imported.metadata;
@@ -988,10 +1078,44 @@ fn ingest_opencode_sqlite_session(
     pass_size: i64,
     file_mtime: Option<i64>,
 ) -> Result<u64> {
+    ingest_sqlite_session_snapshot(
+        conn,
+        ingest_state,
+        source_file,
+        pass_size,
+        file_mtime,
+        opencode_session_snapshot(source_file)?,
+    )
+}
+
+fn ingest_hermes_sqlite_session(
+    conn: &mut Connection,
+    ingest_state: &mut IngestState,
+    source_file: &SourceFile,
+    pass_size: i64,
+    file_mtime: Option<i64>,
+) -> Result<u64> {
+    ingest_sqlite_session_snapshot(
+        conn,
+        ingest_state,
+        source_file,
+        pass_size,
+        file_mtime,
+        hermes_session_snapshot(source_file)?,
+    )
+}
+
+fn ingest_sqlite_session_snapshot(
+    conn: &mut Connection,
+    ingest_state: &mut IngestState,
+    source_file: &SourceFile,
+    pass_size: i64,
+    file_mtime: Option<i64>,
+    snapshot: SqliteSessionSnapshot,
+) -> Result<u64> {
     let stored = load_session(conn, source_file)?;
     let parent_session_id = resolve_parent_session_id(conn, source_file)?;
-    let snapshot = opencode_session_snapshot(source_file)?;
-    let content_fingerprint = opencode_events_fingerprint(&snapshot.events);
+    let content_fingerprint = source_events_fingerprint(&snapshot.events);
     if let Some(stored) = &stored
         && stored.content_fingerprint.as_deref() == Some(content_fingerprint.as_str())
     {
@@ -1310,7 +1434,7 @@ fn import_gemini_chat_json(
     })
 }
 
-fn opencode_session_snapshot(source_file: &SourceFile) -> Result<OpenCodeSessionSnapshot> {
+fn opencode_session_snapshot(source_file: &SourceFile) -> Result<SqliteSessionSnapshot> {
     let conn = opencode_source_connection(&source_file.path)?;
     let (mut events, metadata, source_metadata) = opencode_session_event(&conn, source_file)?;
     for table in [
@@ -1327,7 +1451,7 @@ fn opencode_session_snapshot(source_file: &SourceFile) -> Result<OpenCodeSession
             .then_with(|| left.id.cmp(&right.id))
     });
 
-    Ok(OpenCodeSessionSnapshot {
+    Ok(SqliteSessionSnapshot {
         events,
         metadata,
         source_metadata,
@@ -1339,10 +1463,15 @@ fn opencode_source_connection(path: &Path) -> Result<Connection> {
         .map_err(|source| opencode_sqlite_error(path, source))
 }
 
+fn hermes_source_connection(path: &Path) -> Result<Connection> {
+    Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_ONLY)
+        .map_err(|source| hermes_sqlite_error(path, source))
+}
+
 fn opencode_session_event(
     conn: &Connection,
     source_file: &SourceFile,
-) -> Result<(Vec<OpenCodeEvent>, ParsedMetadata, String)> {
+) -> Result<(Vec<SourceEvent>, ParsedMetadata, String)> {
     let event = conn
         .query_row(
             "SELECT s.id, s.project_id, s.parent_id, s.slug, s.directory, s.title,
@@ -1401,8 +1530,8 @@ fn opencode_session_event(
                     "time_created": row.get::<_, Option<i64>>(27)?,
                     "time_updated": row.get::<_, Option<i64>>(28)?,
                     "time_initialized": row.get::<_, Option<i64>>(29)?,
-                    "sandboxes": opencode_json_column(row.get::<_, Option<String>>(30)?),
-                    "commands": opencode_json_column(row.get::<_, Option<String>>(31)?),
+                    "sandboxes": json_text_column(row.get::<_, Option<String>>(30)?),
+                    "commands": json_text_column(row.get::<_, Option<String>>(31)?),
                     "time_created_iso": row.get::<_, Option<String>>(32)?,
                     "time_updated_iso": row.get::<_, Option<String>>(33)?,
                     "time_initialized_iso": row.get::<_, Option<String>>(34)?,
@@ -1419,9 +1548,9 @@ fn opencode_session_event(
                     "summary_additions": summary_additions,
                     "summary_deletions": summary_deletions,
                     "summary_files": summary_files,
-                    "summary_diffs": opencode_json_column(summary_diffs),
-                    "revert": opencode_json_column(revert),
-                    "permission": opencode_json_column(permission),
+                    "summary_diffs": json_text_column(summary_diffs),
+                    "revert": json_text_column(revert),
+                    "permission": json_text_column(permission),
                     "time_created": time_created,
                     "time_updated": time_updated,
                     "time_compacting": time_compacting,
@@ -1442,7 +1571,7 @@ fn opencode_session_event(
                     "project": project_row,
                 });
                 Ok((
-                    OpenCodeEvent {
+                    SourceEvent {
                         sort_time: time_created,
                         rank: 0,
                         id: event_id,
@@ -1473,7 +1602,7 @@ fn opencode_row_events(
     conn: &Connection,
     source_file: &SourceFile,
     table: OpenCodeTable,
-) -> Result<Vec<OpenCodeEvent>> {
+) -> Result<Vec<SourceEvent>> {
     let table_name = table.name();
     let mut statement = conn
         .prepare(table.sql())
@@ -1503,10 +1632,10 @@ fn opencode_row_events(
                     "time_updated": time_updated,
                     "time_created_iso": created_ts,
                     "time_updated_iso": updated_ts,
-                    "data": opencode_json_column(Some(data)),
+                    "data": json_text_column(Some(data)),
                 },
             });
-            Ok(OpenCodeEvent {
+            Ok(SourceEvent {
                 sort_time: time_created,
                 rank: table.rank(),
                 id: event_id,
@@ -1520,13 +1649,195 @@ fn opencode_row_events(
         .map_err(|source| opencode_sqlite_error(&source_file.path, source))
 }
 
-fn opencode_json_column(value: Option<String>) -> serde_json::Value {
+fn hermes_session_snapshot(source_file: &SourceFile) -> Result<SqliteSessionSnapshot> {
+    let conn = hermes_source_connection(&source_file.path)?;
+    let (mut events, metadata, source_metadata) = hermes_session_event(&conn, source_file)?;
+    events.extend(hermes_message_events(&conn, source_file)?);
+    events.sort_by(|left, right| {
+        left.sort_time
+            .cmp(&right.sort_time)
+            .then_with(|| left.rank.cmp(&right.rank))
+            .then_with(|| left.id.cmp(&right.id))
+    });
+
+    Ok(SqliteSessionSnapshot {
+        events,
+        metadata,
+        source_metadata,
+    })
+}
+
+fn hermes_session_event(
+    conn: &Connection,
+    source_file: &SourceFile,
+) -> Result<(Vec<SourceEvent>, ParsedMetadata, String)> {
+    let event = conn
+        .query_row(
+            "SELECT id, source, user_id, model, model_config, system_prompt,
+                    parent_session_id, started_at, ended_at, end_reason,
+                    message_count, tool_call_count, input_tokens, output_tokens,
+                    cache_read_tokens, cache_write_tokens, reasoning_tokens,
+                    billing_provider, billing_base_url, billing_mode,
+                    estimated_cost_usd, actual_cost_usd, cost_status, cost_source,
+                    pricing_version, title, api_call_count,
+                    strftime('%Y-%m-%dT%H:%M:%fZ', started_at, 'unixepoch'),
+                    strftime('%Y-%m-%dT%H:%M:%fZ', ended_at, 'unixepoch'),
+                    CAST(started_at * 1000000 AS INTEGER)
+             FROM sessions
+             WHERE id = ?1",
+            [source_file.source_session_id.as_str()],
+            |row| {
+                let session_id: String = row.get(0)?;
+                let source_name: String = row.get(1)?;
+                let started_ts: Option<String> = row.get(27)?;
+                let ended_ts: Option<String> = row.get(28)?;
+                let sort_time: i64 = row.get(29)?;
+                let metadata = ParsedMetadata {
+                    cwd: None,
+                    started_at: started_ts.clone(),
+                    ended_at: ended_ts.clone(),
+                };
+                let session_row = serde_json::json!({
+                    "id": session_id,
+                    "source": source_name,
+                    "user_id": row.get::<_, Option<String>>(2)?,
+                    "model": row.get::<_, Option<String>>(3)?,
+                    "model_config": json_text_column(row.get::<_, Option<String>>(4)?),
+                    "system_prompt": row.get::<_, Option<String>>(5)?,
+                    "parent_session_id": row.get::<_, Option<String>>(6)?,
+                    "started_at": row.get::<_, f64>(7)?,
+                    "ended_at": row.get::<_, Option<f64>>(8)?,
+                    "end_reason": row.get::<_, Option<String>>(9)?,
+                    "message_count": row.get::<_, Option<i64>>(10)?,
+                    "tool_call_count": row.get::<_, Option<i64>>(11)?,
+                    "input_tokens": row.get::<_, Option<i64>>(12)?,
+                    "output_tokens": row.get::<_, Option<i64>>(13)?,
+                    "cache_read_tokens": row.get::<_, Option<i64>>(14)?,
+                    "cache_write_tokens": row.get::<_, Option<i64>>(15)?,
+                    "reasoning_tokens": row.get::<_, Option<i64>>(16)?,
+                    "billing_provider": row.get::<_, Option<String>>(17)?,
+                    "billing_base_url": row.get::<_, Option<String>>(18)?,
+                    "billing_mode": row.get::<_, Option<String>>(19)?,
+                    "estimated_cost_usd": row.get::<_, Option<f64>>(20)?,
+                    "actual_cost_usd": row.get::<_, Option<f64>>(21)?,
+                    "cost_status": row.get::<_, Option<String>>(22)?,
+                    "cost_source": row.get::<_, Option<String>>(23)?,
+                    "pricing_version": row.get::<_, Option<String>>(24)?,
+                    "title": row.get::<_, Option<String>>(25)?,
+                    "api_call_count": row.get::<_, Option<i64>>(26)?,
+                    "started_at_iso": started_ts,
+                    "ended_at_iso": ended_ts,
+                });
+                let source_metadata = serde_json::json!({
+                    "session": {
+                        "id": session_row["id"].clone(),
+                        "source": session_row["source"].clone(),
+                        "model": session_row["model"].clone(),
+                        "parent_session_id": session_row["parent_session_id"].clone(),
+                        "title": session_row["title"].clone(),
+                        "message_count": session_row["message_count"].clone(),
+                        "tool_call_count": session_row["tool_call_count"].clone(),
+                        "started_at_iso": session_row["started_at_iso"].clone(),
+                        "ended_at_iso": session_row["ended_at_iso"].clone(),
+                    },
+                })
+                .to_string();
+                let payload = serde_json::json!({
+                    "type": "session",
+                    "table": "sessions",
+                    "row": session_row,
+                });
+                Ok((
+                    SourceEvent {
+                        sort_time,
+                        rank: 0,
+                        id: source_file.source_session_id.clone(),
+                        ts: metadata.started_at.clone(),
+                        payload: serde_json::to_vec(&payload).expect("serialize Hermes payload"),
+                    },
+                    metadata,
+                    source_metadata,
+                ))
+            },
+        )
+        .optional()
+        .map_err(|source| hermes_sqlite_error(&source_file.path, source))?
+        .ok_or_else(|| {
+            invalid_session_meta(
+                &source_file.path,
+                format!(
+                    "Hermes session {} is missing",
+                    source_file.source_session_id
+                ),
+            )
+        })?;
+
+    Ok((vec![event.0], event.1, event.2))
+}
+
+fn hermes_message_events(conn: &Connection, source_file: &SourceFile) -> Result<Vec<SourceEvent>> {
+    let mut statement = conn
+        .prepare(
+            "SELECT id, session_id, role, content, tool_call_id, tool_calls,
+                    tool_name, timestamp, token_count, finish_reason, reasoning,
+                    reasoning_details, codex_reasoning_items, reasoning_content,
+                    codex_message_items,
+                    strftime('%Y-%m-%dT%H:%M:%fZ', timestamp, 'unixepoch'),
+                    CAST(timestamp * 1000000 AS INTEGER)
+             FROM messages
+             WHERE session_id = ?1",
+        )
+        .map_err(|source| hermes_sqlite_error(&source_file.path, source))?;
+    let rows = statement
+        .query_map([source_file.source_session_id.as_str()], |row| {
+            let id: i64 = row.get(0)?;
+            let session_id: String = row.get(1)?;
+            let role: String = row.get(2)?;
+            let event_ts: Option<String> = row.get(15)?;
+            let sort_time: i64 = row.get(16)?;
+            let payload = serde_json::json!({
+                "type": "message",
+                "table": "messages",
+                "row": {
+                    "id": id,
+                    "session_id": session_id,
+                    "role": role,
+                    "content": row.get::<_, Option<String>>(3)?,
+                    "tool_call_id": row.get::<_, Option<String>>(4)?,
+                    "tool_calls": json_text_column(row.get::<_, Option<String>>(5)?),
+                    "tool_name": row.get::<_, Option<String>>(6)?,
+                    "timestamp": row.get::<_, f64>(7)?,
+                    "token_count": row.get::<_, Option<i64>>(8)?,
+                    "finish_reason": row.get::<_, Option<String>>(9)?,
+                    "reasoning": row.get::<_, Option<String>>(10)?,
+                    "reasoning_details": json_text_column(row.get::<_, Option<String>>(11)?),
+                    "codex_reasoning_items": json_text_column(row.get::<_, Option<String>>(12)?),
+                    "reasoning_content": row.get::<_, Option<String>>(13)?,
+                    "codex_message_items": json_text_column(row.get::<_, Option<String>>(14)?),
+                    "timestamp_iso": event_ts.clone(),
+                },
+            });
+            Ok(SourceEvent {
+                sort_time,
+                rank: 1,
+                id: format!("{id:020}"),
+                ts: event_ts,
+                payload: serde_json::to_vec(&payload).expect("serialize Hermes payload"),
+            })
+        })
+        .map_err(|source| hermes_sqlite_error(&source_file.path, source))?;
+
+    rows.collect::<std::result::Result<Vec<_>, _>>()
+        .map_err(|source| hermes_sqlite_error(&source_file.path, source))
+}
+
+fn json_text_column(value: Option<String>) -> serde_json::Value {
     value.map_or(serde_json::Value::Null, |value| {
         serde_json::from_str(&value).unwrap_or(serde_json::Value::String(value))
     })
 }
 
-fn opencode_events_fingerprint(events: &[OpenCodeEvent]) -> String {
+fn source_events_fingerprint(events: &[SourceEvent]) -> String {
     let mut hash = FNV_OFFSET_BASIS;
     for event in events {
         update_fingerprint(&mut hash, &event.payload);
@@ -1549,6 +1860,13 @@ fn opencode_sqlite_error(path: &Path, source: rusqlite::Error) -> JottraceError 
     )
 }
 
+fn hermes_sqlite_error(path: &Path, source: rusqlite::Error) -> JottraceError {
+    invalid_session_meta(
+        path,
+        format!("failed to read Hermes SQLite SessionDB: {source}"),
+    )
+}
+
 fn record_source_file_ingest_error(
     conn: &mut Connection,
     source_file: &SourceFile,
@@ -1557,7 +1875,10 @@ fn record_source_file_ingest_error(
     let tx = conn
         .transaction()
         .map_err(|source| sqlite_error(&source_file.path, source))?;
-    let stored_by_path = if source_file.source_format == SourceFormat::OpenCodeSqlite {
+    let stored_by_path = if matches!(
+        source_file.source_format,
+        SourceFormat::OpenCodeSqlite | SourceFormat::HermesSqlite
+    ) {
         load_session(&tx, source_file)?
     } else {
         load_session_by_source_file_path(&tx, source_file)?
