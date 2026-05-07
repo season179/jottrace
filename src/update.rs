@@ -1,9 +1,11 @@
+use serde::Deserialize;
 use std::env;
 use std::fmt;
 use std::fs;
-use std::io;
+use std::io::{self, Write};
 use std::path::{Path, PathBuf};
-use std::process::{Command, Output};
+use std::process::{Command, Output, Stdio};
+use std::thread;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 #[cfg(unix)]
@@ -13,6 +15,19 @@ const REPO: &str = "season179/jottrace";
 const VERSION_ENV: &str = "JOTTRACE_VERSION";
 const RELEASE_BASE_URL_ENV: &str = "JOTTRACE_RELEASE_BASE_URL";
 const UPDATE_INSTALL_PATH_ENV: &str = "JOTTRACE_UPDATE_INSTALL_PATH";
+const AUTO_UPDATE_ENV: &str = "JOTTRACE_AUTO_UPDATE";
+const AUTO_UPDATE_LOCK_PATH_ENV: &str = "JOTTRACE_AUTO_UPDATE_LOCK_PATH";
+const AUTO_UPDATE_COMMAND: &str = "__jottrace-auto-update";
+const AUTO_UPDATE_CONFIG_FILE: &str = "config.json";
+const AUTO_UPDATE_STAMP_FILE: &str = "auto-update-check";
+const AUTO_UPDATE_LOCK_FILE: &str = "auto-update-check.lock";
+const AUTO_UPDATE_INTERVAL_SECS: u64 = 24 * 60 * 60;
+const AUTO_UPDATE_LOCK_STALE_SECS: u64 = 60 * 60;
+
+#[derive(Debug, Deserialize)]
+struct JottraceConfig {
+    auto_update: Option<bool>,
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct UpdateReport {
@@ -108,6 +123,22 @@ impl std::error::Error for UpdateError {
 }
 
 pub type Result<T> = std::result::Result<T, UpdateError>;
+
+pub fn is_auto_update_command(command: &str) -> bool {
+    command == AUTO_UPDATE_COMMAND
+}
+
+pub fn maybe_spawn_auto_update() {
+    let _ = spawn_auto_update_if_due();
+}
+
+pub fn run_auto_update_silent() {
+    let lock_path = trusted_auto_update_lock_path();
+    let _ = run_update();
+    if let Some(lock_path) = lock_path {
+        let _ = fs::remove_file(lock_path);
+    }
+}
 
 pub fn run_update() -> Result<UpdateReport> {
     let target = current_release_target()?;
@@ -260,6 +291,228 @@ fn artifact_binary_version(path: &Path) -> Result<String> {
     })
 }
 
+fn spawn_auto_update_if_due() -> io::Result<bool> {
+    if auto_update_disabled_by_env() {
+        return Ok(false);
+    }
+
+    let exe = env::current_exe()?;
+    if !is_installer_managed_binary(&exe) {
+        return Ok(false);
+    }
+
+    let Ok(data_dir) = crate::data_dir_from_env() else {
+        return Ok(false);
+    };
+    if crate::ensure_private_dir(&data_dir).is_err() {
+        return Ok(false);
+    }
+
+    let stamp = data_dir.join(AUTO_UPDATE_STAMP_FILE);
+    if !auto_update_due(&stamp) {
+        return Ok(false);
+    }
+    let Some(lock) = AutoUpdateLock::acquire(&data_dir)? else {
+        return Ok(false);
+    };
+    if !auto_update_due(&stamp) {
+        return Ok(false);
+    }
+    if !config_allows_auto_update(&data_dir) {
+        return Ok(false);
+    }
+    write_auto_update_stamp(&stamp)?;
+
+    let lock_path = lock.into_path();
+    let child = Command::new(&exe)
+        .arg(AUTO_UPDATE_COMMAND)
+        .env(UPDATE_INSTALL_PATH_ENV, &exe)
+        .env(AUTO_UPDATE_LOCK_PATH_ENV, &lock_path)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn();
+
+    let mut child = match child {
+        Ok(child) => child,
+        Err(source) => {
+            let _ = fs::remove_file(lock_path);
+            return Err(source);
+        }
+    };
+
+    let _ = thread::Builder::new()
+        .name("jottrace-auto-update-wait".to_string())
+        .spawn(move || {
+            let _ = child.wait();
+        });
+
+    Ok(true)
+}
+
+fn auto_update_disabled_by_env() -> bool {
+    env_value(AUTO_UPDATE_ENV).as_deref() == Some("0")
+}
+
+fn config_allows_auto_update(data_dir: &Path) -> bool {
+    let path = data_dir.join(AUTO_UPDATE_CONFIG_FILE);
+    match fs::read_to_string(path) {
+        Ok(contents) if contents.trim().is_empty() => true,
+        Ok(contents) => serde_json::from_str::<JottraceConfig>(&contents)
+            .map(|config| config.auto_update.unwrap_or(true))
+            .unwrap_or(false),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => true,
+        Err(_) => false,
+    }
+}
+
+fn is_installer_managed_binary(exe: &Path) -> bool {
+    let Some(home) = env::var_os("HOME") else {
+        return false;
+    };
+    let expected = PathBuf::from(home).join(".local/bin/jottrace");
+    if fs::symlink_metadata(&expected).is_ok_and(|metadata| metadata.file_type().is_symlink()) {
+        return false;
+    }
+    same_parent_and_file_name(exe, &expected)
+}
+
+fn trusted_auto_update_lock_path() -> Option<PathBuf> {
+    let lock_path = env::var_os(AUTO_UPDATE_LOCK_PATH_ENV).map(PathBuf::from)?;
+    let data_dir = crate::data_dir_from_env().ok()?;
+    let expected = data_dir.join(AUTO_UPDATE_LOCK_FILE);
+    same_parent_and_file_name(&lock_path, &expected).then_some(lock_path)
+}
+
+fn same_parent_and_file_name(left: &Path, right: &Path) -> bool {
+    if left.file_name() != right.file_name() {
+        return false;
+    }
+
+    let Some(left_parent) = left.parent() else {
+        return false;
+    };
+    let Some(right_parent) = right.parent() else {
+        return false;
+    };
+
+    match (
+        fs::canonicalize(left_parent),
+        fs::canonicalize(right_parent),
+    ) {
+        (Ok(left_parent), Ok(right_parent)) => left_parent == right_parent,
+        _ => left_parent == right_parent,
+    }
+}
+
+fn auto_update_due(path: &Path) -> bool {
+    match fs::read_to_string(path) {
+        Ok(contents) => contents
+            .trim()
+            .parse::<u64>()
+            .map(|last_checked| {
+                now_unix_seconds().saturating_sub(last_checked) >= AUTO_UPDATE_INTERVAL_SECS
+            })
+            .unwrap_or(true),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => true,
+        Err(_) => false,
+    }
+}
+
+fn write_auto_update_stamp(path: &Path) -> io::Result<()> {
+    crate::ensure_private_file(path).map_err(jottrace_error_to_io)?;
+    fs::write(path, format!("{}\n", now_unix_seconds()))
+}
+
+struct AutoUpdateLock {
+    path: Option<PathBuf>,
+}
+
+impl AutoUpdateLock {
+    fn acquire(data_dir: &Path) -> io::Result<Option<Self>> {
+        let path = data_dir.join(AUTO_UPDATE_LOCK_FILE);
+        let mut file = match Self::create_file(&path)? {
+            Some(file) => file,
+            None if remove_stale_auto_update_lock(&path)? => {
+                let Some(file) = Self::create_file(&path)? else {
+                    return Ok(None);
+                };
+                file
+            }
+            None => return Ok(None),
+        };
+
+        if let Err(source) = writeln!(
+            file,
+            "pid={}\ncreated_at={}",
+            std::process::id(),
+            now_unix_seconds()
+        ) {
+            let _ = fs::remove_file(&path);
+            return Err(source);
+        }
+
+        Ok(Some(Self { path: Some(path) }))
+    }
+
+    fn create_file(path: &Path) -> io::Result<Option<fs::File>> {
+        let file = match crate::create_private_file(path) {
+            Ok(file) => file,
+            Err(crate::JottraceError::Io { source, .. })
+                if source.kind() == io::ErrorKind::AlreadyExists =>
+            {
+                return Ok(None);
+            }
+            Err(error) => return Err(jottrace_error_to_io(error)),
+        };
+        Ok(Some(file))
+    }
+
+    fn into_path(mut self) -> PathBuf {
+        self.path.take().expect("auto-update lock path")
+    }
+}
+
+impl Drop for AutoUpdateLock {
+    fn drop(&mut self) {
+        if let Some(path) = &self.path {
+            let _ = fs::remove_file(path);
+        }
+    }
+}
+
+fn remove_stale_auto_update_lock(path: &Path) -> io::Result<bool> {
+    let contents = match fs::read_to_string(path) {
+        Ok(contents) => contents,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(true),
+        Err(_) => return Ok(false),
+    };
+
+    let Some(created_at) = lock_created_at(&contents) else {
+        return Ok(false);
+    };
+    if now_unix_seconds().saturating_sub(created_at) < AUTO_UPDATE_LOCK_STALE_SECS {
+        return Ok(false);
+    }
+
+    match fs::remove_file(path) {
+        Ok(()) => Ok(true),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(true),
+        Err(error) => Err(error),
+    }
+}
+
+fn lock_created_at(contents: &str) -> Option<u64> {
+    contents
+        .lines()
+        .find_map(|line| line.strip_prefix("created_at="))
+        .and_then(|value| value.parse().ok())
+}
+
+fn jottrace_error_to_io(error: crate::JottraceError) -> io::Error {
+    io::Error::other(error.to_string())
+}
+
 fn replace_installed_binary(candidate: &Path, install_path: &Path) -> Result<()> {
     let parent = install_path
         .parent()
@@ -323,6 +576,12 @@ fn unique_suffix() -> u128 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map_or(0, |duration| duration.as_nanos())
+}
+
+fn now_unix_seconds() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |duration| duration.as_secs())
 }
 
 #[cfg(test)]
