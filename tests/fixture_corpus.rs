@@ -203,6 +203,11 @@ fn reader_fixture_corpus_has_sanitized_opencode_sqlite_shape() {
             "SELECT count(*) FROM part WHERE session_id = ?1",
             2,
         ),
+        (
+            "child session entries",
+            "SELECT count(*) FROM session_entry WHERE session_id = ?1",
+            1,
+        ),
     ] {
         let count: i64 = conn
             .query_row(sql, [OPENCODE_CHILD_SESSION_ID], |row| row.get(0))
