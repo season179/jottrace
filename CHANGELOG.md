@@ -1,5 +1,52 @@
 # Changelog
 
+## v26.5.6 - 2026-05-07
+
+### Summary
+
+- Expands Jottrace's preserved source coverage across local agent tools and
+  tightens the CLI surface for daily use. Changes since `v26.5.5`.
+
+### Changes
+
+- Added reader support for Pi agent JSONL sessions, Claude local-agent audit
+  JSONL files, Gemini CLI chat JSON files, Factory / Droid-style JSONL sessions,
+  OpenCode SQLite sessions, and Hermes SQLite SessionDB rows.
+- Added fixture-backed reader documentation and inventory updates that make
+  ignored source boundaries explicit.
+- `jottrace -h` and command help are now easier to discover from the CLI.
+- CLI output for high-frequency commands is compact by default, with
+  `--details` preserving the longer diagnostic output.
+- Background auto-update checks can now be disabled with
+  `JOTTRACE_AUTO_UPDATE=0` or persistent config.
+- Codex ingest handles legacy edge cases more reliably.
+- Updated README release examples for `v26.5.6`.
+
+### Commits
+
+- Add Hermes SQLite SessionDB reader (6129e1f)
+- Make CLI output compact by default (31ef71a)
+- Add opt-out background auto-update (65f01e9)
+- Capture OpenCode SQLite sessions (7b4c0ea)
+- Add Factory JSONL ingest (a2e8bbc)
+- Capture Gemini CLI chat sessions (f7b6ebb)
+- Capture Claude local-agent audit sessions (6230e62)
+- Capture Pi agent sessions (0122251)
+- Document ignored reader source boundaries (21ea342)
+- Make CLI help discoverable (a3e8fe0)
+- Add OpenCode reader fixture shape (f697e19)
+- Handle legacy Codex ingest edge cases (96ec5d9)
+- Document reader fixture gate (3913051)
+
+### Verification
+
+- `scripts/check-version.sh v26.5.6`
+- `cargo fmt --check`
+- `cargo clippy --all-targets -- -D warnings`
+- `bash -n install.sh scripts/check-version.sh`
+- `cargo test`
+- Release preflight script
+
 ## v26.5.5 - 2026-05-06
 
 ### Summary
