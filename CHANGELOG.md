@@ -1,5 +1,41 @@
 # Changelog
 
+## v26.5.7 - 2026-05-07
+
+### Summary
+
+- Fixes ingest recovery for previously unresolved source-file errors. Changes
+  since `v26.5.6`.
+
+### Changes
+
+- `jottrace ingest` now resolves prior `invalid_json` rows after all committed
+  JSONL lines parse successfully, including when a new unterminated tail is
+  still waiting for a newline.
+- Unchanged corrupt JSONL files keep their existing unresolved error without
+  re-recording the same failure on every ingest run.
+- Claude local-agent audit ingestion now handles the live `_audit_timestamp`
+  shape and numeric metadata timestamps.
+- Claude local-agent audit files with oversized first records fall back to the
+  path-derived session identity, while short uncommitted headers remain visible
+  as unresolved ingest errors and self-heal when committed.
+- Updated Claude local-agent fixtures to match the live metadata and audit
+  shapes.
+
+### Commits
+
+- Fix ingest error recovery (b582ddc)
+
+### Verification
+
+- `scripts/check-version.sh v26.5.7`
+- `cargo fmt --check`
+- `cargo clippy --all-targets -- -D warnings`
+- `bash -n install.sh scripts/check-version.sh`
+- `cargo test`
+- `jottrace ingest` live verification with `unresolved_ingest_errors: 0`
+- Release preflight script
+
 ## v26.5.6 - 2026-05-07
 
 ### Summary
