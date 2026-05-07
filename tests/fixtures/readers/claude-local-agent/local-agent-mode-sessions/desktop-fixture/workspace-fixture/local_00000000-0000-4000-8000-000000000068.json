@@ -1,9 +1,9 @@
 {
-  "session_id": "00000000-0000-4000-8000-000000000068",
-  "uuid": "local_00000000-0000-4000-8000-000000000068",
+  "sessionId": "local_00000000-0000-4000-8000-000000000068",
+  "cliSessionId": "00000000-0000-4000-8000-000000000068",
   "cwd": "/Users/fixture/Workspace/jottrace",
-  "created_at": "2026-05-06T02:00:00.000Z",
-  "updated_at": "2026-05-06T02:00:06.000Z",
+  "createdAt": 1778032800000,
+  "lastActivityAt": 1778032806000,
   "audit_path": "local_00000000-0000-4000-8000-000000000068/audit.jsonl",
   "metadata_kind": "claude_local_agent_fixture"
 }

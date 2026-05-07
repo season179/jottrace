@@ -443,6 +443,81 @@ fn ingest_records_corrupt_jsonl_without_blocking_unrelated_files() {
     let _ = fs::remove_dir_all(root);
 }
 
+#[test]
+fn ingest_resolves_prior_invalid_json_when_line_becomes_parseable() {
+    let root = temp_root("ingest-corrupt-line-resolves");
+    let data_dir = root.join(".jottrace");
+    let session_file =
+        install_claude_fixture(&root, CORRUPT_FIXTURE_SESSION_ID, CORRUPT_FIXTURE_SESSION);
+
+    let first = run_ingest(&root, &data_dir);
+    assert!(first.contains("unresolved_ingest_errors: 1"));
+
+    write_text_file(
+        &session_file,
+        "{\"timestamp\":\"2026-05-05T09:11:00.000Z\",\"type\":\"user\",\"message\":{\"role\":\"user\",\"content\":\"fixed first line\"}}\n\
+         {\"timestamp\":\"2026-05-05T09:11:02.000Z\",\"type\":\"assistant\",\"message\":{\"role\":\"assistant\",\"content\":[{\"type\":\"text\",\"text\":\"fixed second line\"}]}}\n",
+    );
+
+    let second = run_ingest(&root, &data_dir);
+    assert!(second.contains("unresolved_ingest_errors: 0"));
+
+    let errors = jottrace::storage::unresolved_ingest_errors_for_path(&db_path(&data_dir), 10)
+        .expect("unresolved ingest errors");
+    assert!(errors.is_empty());
+
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn ingest_resolves_prior_invalid_json_when_fixed_before_unterminated_tail() {
+    let root = temp_root("ingest-corrupt-line-resolves-before-tail");
+    let data_dir = root.join(".jottrace");
+    let session_file =
+        install_claude_fixture(&root, CORRUPT_FIXTURE_SESSION_ID, CORRUPT_FIXTURE_SESSION);
+
+    let first = run_ingest(&root, &data_dir);
+    assert!(first.contains("unresolved_ingest_errors: 1"));
+
+    write_text_file(
+        &session_file,
+        "{\"timestamp\":\"2026-05-05T09:11:00.000Z\",\"type\":\"user\",\"message\":{\"role\":\"user\",\"content\":\"fixed first line\"}}\n\
+         {\"timestamp\":\"2026-05-05T09:11:02.000Z\",\"type\":\"assistant\",\"message\":{\"role\":\"assistant\",\"content\":[{\"type\":\"text\",\"text\":\"fixed second line\"}]}}\n\
+         {\"timestamp\":\"2026-05-05T09:11:03.000Z\",\"type\":\"user\"",
+    );
+
+    let second = run_ingest(&root, &data_dir);
+    assert!(second.contains("events: 2"));
+    assert!(second.contains("unresolved_ingest_errors: 0"));
+
+    let errors = jottrace::storage::unresolved_ingest_errors_for_path(&db_path(&data_dir), 10)
+        .expect("unresolved ingest errors");
+    assert!(errors.is_empty());
+
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn ingest_keeps_prior_invalid_json_without_retry_when_file_is_unchanged() {
+    let root = temp_root("ingest-corrupt-line-unchanged");
+    let data_dir = root.join(".jottrace");
+    install_claude_fixture(&root, CORRUPT_FIXTURE_SESSION_ID, CORRUPT_FIXTURE_SESSION);
+
+    let first = run_ingest(&root, &data_dir);
+    assert!(first.contains("unresolved_ingest_errors: 1"));
+
+    let second = run_ingest(&root, &data_dir);
+    assert!(second.contains("unresolved_ingest_errors: 1"));
+
+    let errors = jottrace::storage::unresolved_ingest_errors_for_path(&db_path(&data_dir), 10)
+        .expect("unresolved ingest errors");
+    assert_eq!(errors.len(), 1);
+    assert_eq!(errors[0].error_kind, "invalid_json");
+    assert_eq!(errors[0].occurrence_count, 1);
+
+    let _ = fs::remove_dir_all(root);
+}
+
 #[cfg(unix)]
 #[test]
 fn ingest_records_unreadable_file_without_blocking_unrelated_files() {
@@ -1051,6 +1126,95 @@ fn ingest_records_invalid_claude_local_agent_audit_without_blocking_other_files(
     assert_eq!(error.file_path, bad_audit);
     assert_eq!(error.error_kind, "invalid_session_meta");
     assert!(error.message.contains("session_id"));
+
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn ingest_records_then_resolves_uncommitted_claude_local_agent_audit_header() {
+    let root = temp_root("ingest-claude-local-agent-uncommitted-header");
+    let data_dir = root.join(".jottrace");
+    let audit_file = install_claude_local_agent_fixture(&root);
+    let audit_line = format!(
+        "{{\"_audit_timestamp\":\"2026-05-06T02:35:00.000Z\",\"session_id\":\"{CLAUDE_LOCAL_AGENT_FIXTURE_SESSION_ID}\",\"type\":\"user\"}}"
+    );
+    write_text_file(&audit_file, &audit_line);
+
+    let ingest = run_ingest(&root, &data_dir);
+    assert!(ingest.contains("sessions: 1"));
+    assert!(ingest.contains("events: 0"));
+    assert!(ingest.contains("inserted_events: 0"));
+    assert!(ingest.contains("unresolved_ingest_errors: 1"));
+
+    let errors = jottrace::storage::unresolved_ingest_errors_for_path(&db_path(&data_dir), 10)
+        .expect("unresolved ingest errors");
+    assert_eq!(errors.len(), 1);
+    assert_eq!(errors[0].source, "claude_local_agent");
+    assert_eq!(errors[0].file_path, audit_file);
+    assert_eq!(errors[0].error_kind, "invalid_session_meta");
+    assert!(errors[0].message.contains("no committed header line"));
+
+    write_text_file(&audit_file, &format!("{audit_line}\n"));
+
+    let second = run_ingest(&root, &data_dir);
+    assert!(second.contains("sessions: 1"));
+    assert!(second.contains("events: 1"));
+    assert!(second.contains("unresolved_ingest_errors: 0"));
+
+    let conn = Connection::open(db_path(&data_dir)).expect("open preserved db");
+    let stored_source_session_id: String = conn
+        .query_row(
+            "SELECT source_session_id
+             FROM sessions
+             WHERE source = 'claude_local_agent'",
+            [],
+            |row| row.get(0),
+        )
+        .expect("claude local-agent session id");
+    assert_eq!(
+        stored_source_session_id,
+        CLAUDE_LOCAL_AGENT_FIXTURE_SESSION_ID
+    );
+    let errors = jottrace::storage::unresolved_ingest_errors_for_path(&db_path(&data_dir), 10)
+        .expect("resolved ingest errors");
+    assert!(errors.is_empty());
+
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn ingest_uses_claude_local_agent_path_identity_when_first_audit_line_exceeds_header_limit() {
+    let root = temp_root("ingest-claude-local-agent-large-header");
+    let data_dir = root.join(".jottrace");
+    let audit_file = install_claude_local_agent_fixture(&root);
+    let large_content = "x".repeat(70_000);
+    write_text_file(
+        &audit_file,
+        &format!(
+            "{{\"_audit_timestamp\":\"2026-05-06T02:40:00.000Z\",\"session_id\":\"{CLAUDE_LOCAL_AGENT_FIXTURE_SESSION_ID}\",\"type\":\"user\",\"message\":{{\"role\":\"user\",\"content\":\"{large_content}\"}}}}\n"
+        ),
+    );
+
+    let ingest = run_ingest(&root, &data_dir);
+    assert!(ingest.contains("sessions: 1"));
+    assert!(ingest.contains("events: 1"));
+    assert!(ingest.contains("inserted_events: 1"));
+    assert!(ingest.contains("unresolved_ingest_errors: 0"));
+
+    let conn = Connection::open(db_path(&data_dir)).expect("open preserved db");
+    let stored_source_session_id: String = conn
+        .query_row(
+            "SELECT source_session_id
+             FROM sessions
+             WHERE source = 'claude_local_agent'",
+            [],
+            |row| row.get(0),
+        )
+        .expect("claude local-agent session id");
+    assert_eq!(
+        stored_source_session_id,
+        CLAUDE_LOCAL_AGENT_FIXTURE_SESSION_ID
+    );
 
     let _ = fs::remove_dir_all(root);
 }

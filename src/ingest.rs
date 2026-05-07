@@ -67,6 +67,7 @@ pub struct IngestReport {
 #[derive(Debug, Default)]
 struct IngestState {
     unresolved_invalid_session_meta_paths: HashSet<(String, String)>,
+    unresolved_invalid_json_paths: HashSet<(String, String)>,
 }
 
 #[derive(Debug, Clone)]
@@ -189,6 +190,8 @@ struct EventHeader<'a> {
     cwd: Option<&'a str>,
     #[serde(default, borrow)]
     timestamp: Option<&'a str>,
+    #[serde(default, borrow, rename = "_audit_timestamp")]
+    audit_timestamp: Option<&'a str>,
     #[serde(default, borrow)]
     snapshot: Option<SnapshotHeader<'a>>,
 }
@@ -236,20 +239,20 @@ struct ClaudeLocalAgentMetadata<'a> {
     cwd: Option<&'a str>,
     #[serde(
         default,
-        borrow,
         alias = "startedAt",
         alias = "created_at",
         alias = "createdAt"
     )]
-    started_at: Option<&'a str>,
+    started_at: Option<serde_json::Value>,
     #[serde(
         default,
-        borrow,
         alias = "endedAt",
         alias = "updated_at",
-        alias = "updatedAt"
+        alias = "updatedAt",
+        alias = "last_activity_at",
+        alias = "lastActivityAt"
     )]
-    ended_at: Option<&'a str>,
+    ended_at: Option<serde_json::Value>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -361,6 +364,11 @@ pub fn run_ingest() -> Result<IngestReport> {
             &db_path,
             &conn,
             INVALID_SESSION_META_ERROR_KIND,
+        )?,
+        unresolved_invalid_json_paths: unresolved_source_file_error_paths(
+            &db_path,
+            &conn,
+            INVALID_JSON_ERROR_KIND,
         )?,
     };
     let mut inserted_event_count = 0;
@@ -920,8 +928,12 @@ fn ingest_source_file(
             .as_ref()
             .and_then(|stored| stored.source_metadata.as_deref()),
     )?;
+    let retry_unresolved_invalid_json = ingest_state
+        .unresolved_invalid_json_paths
+        .contains(&source_file_error_path_key(&source_file));
 
     if let Some(stored) = &stored
+        && !retry_unresolved_invalid_json
         && unchanged_by_mtime(stored, pass_size, file_mtime)
     {
         let path_is_current =
@@ -937,6 +949,14 @@ fn ingest_source_file(
                 conn,
                 ingest_state,
                 &source_file,
+                SOURCE_FILE_INGESTED_SUCCESSFULLY_NOTE,
+            )?;
+            resolve_invalid_json_error_if_fully_read(
+                conn,
+                ingest_state,
+                &source_file,
+                stored.next_read_offset,
+                pass_size,
                 SOURCE_FILE_INGESTED_SUCCESSFULLY_NOTE,
             )?;
             return Ok(0);
@@ -961,6 +981,14 @@ fn ingest_source_file(
             &source_file,
             SOURCE_FILE_INGESTED_SUCCESSFULLY_NOTE,
         )?;
+        resolve_invalid_json_error_if_fully_read(
+            &tx,
+            ingest_state,
+            &source_file,
+            stored.next_read_offset,
+            pass_size,
+            SOURCE_FILE_INGESTED_SUCCESSFULLY_NOTE,
+        )?;
         tx.commit()
             .map_err(|source| sqlite_error(&source_file.path, source))?;
         return Ok(0);
@@ -979,10 +1007,17 @@ fn ingest_source_file(
         .map_err(|source| sqlite_error(&source_file.path, source))?;
     insert_session_if_missing(&tx, &source_file)?;
     let stored = load_session(&tx, &source_file)?.expect("session row should exist after insert");
-    let import_mode = import_mode(&source_file, &stored, pass_size, &content_fingerprint);
+    let import_mode = import_mode(
+        &source_file,
+        &stored,
+        pass_size,
+        &content_fingerprint,
+        retry_unresolved_invalid_json,
+    );
 
     if import_mode == ImportMode::Skip {
         let parent_session_id = resolve_parent_session_id(&tx, &source_file)?;
+        let read_boundary = invalid_json_resolution_boundary(&source_file, &buffer, pass_size)?;
         update_skipped_session(
             &tx,
             SkippedSessionUpdate {
@@ -1003,6 +1038,14 @@ fn ingest_source_file(
             &source_file,
             SOURCE_FILE_INGESTED_SUCCESSFULLY_NOTE,
         )?;
+        resolve_invalid_json_error_if_fully_read(
+            &tx,
+            ingest_state,
+            &source_file,
+            stored.next_read_offset,
+            read_boundary,
+            SOURCE_FILE_INGESTED_SUCCESSFULLY_NOTE,
+        )?;
         tx.commit()
             .map_err(|source| sqlite_error(&source_file.path, source))?;
         return Ok(0);
@@ -1012,9 +1055,10 @@ fn ingest_source_file(
         ImportMode::Append | ImportMode::Skip => stored.current_generation,
         ImportMode::Rewrite => stored.current_generation + 1,
     };
+    let read_boundary = invalid_json_resolution_boundary(&source_file, &buffer, pass_size)?;
     let imported = match source_file.source_format {
         SourceFormat::Jsonl => {
-            let committed_len = committed_len(&buffer);
+            let committed_len = read_boundary as usize;
             let start_offset = match import_mode {
                 ImportMode::Append => stored.next_read_offset.max(0) as usize,
                 ImportMode::Rewrite | ImportMode::Skip => 0,
@@ -1063,6 +1107,14 @@ fn ingest_source_file(
         &tx,
         ingest_state,
         &source_file,
+        SOURCE_FILE_INGESTED_SUCCESSFULLY_NOTE,
+    )?;
+    resolve_invalid_json_error_if_fully_read(
+        &tx,
+        ingest_state,
+        &source_file,
+        imported.next_read_offset,
+        read_boundary,
         SOURCE_FILE_INGESTED_SUCCESSFULLY_NOTE,
     )?;
 
@@ -2056,14 +2108,22 @@ fn import_mode(
     stored: &StoredSession,
     pass_size: i64,
     content_fingerprint: &str,
+    retry_unresolved_invalid_json: bool,
 ) -> ImportMode {
     match stored.file_size {
-        None => ImportMode::Append,
         Some(file_size)
             if file_size == pass_size
                 && stored.content_fingerprint.as_deref() == Some(content_fingerprint) =>
         {
             ImportMode::Skip
+        }
+        None => ImportMode::Append,
+        Some(_)
+            if retry_unresolved_invalid_json
+                && source_file.source_format == SourceFormat::Jsonl
+                && pass_size >= stored.next_read_offset =>
+        {
+            ImportMode::Append
         }
         Some(file_size)
             if source_file.source_format == SourceFormat::Jsonl && pass_size > file_size =>
@@ -2072,6 +2132,17 @@ fn import_mode(
         }
         Some(_) => ImportMode::Rewrite,
     }
+}
+
+fn invalid_json_resolution_boundary(
+    source_file: &SourceFile,
+    buffer: &[u8],
+    pass_size: i64,
+) -> Result<i64> {
+    if source_file.source_format != SourceFormat::Jsonl {
+        return Ok(pass_size);
+    }
+    i64_from_usize(committed_len(buffer), &source_file.path)
 }
 
 fn update_skipped_session(tx: &Transaction<'_>, update: SkippedSessionUpdate<'_>) -> Result<()> {
@@ -2339,11 +2410,44 @@ fn resolve_invalid_session_meta_error(
     source_file: &SourceFile,
     resolution_note: &str,
 ) -> Result<()> {
+    resolve_source_file_error(
+        conn,
+        &mut ingest_state.unresolved_invalid_session_meta_paths,
+        source_file,
+        INVALID_SESSION_META_ERROR_KIND,
+        resolution_note,
+    )
+}
+
+fn resolve_invalid_json_error_if_fully_read(
+    conn: &Connection,
+    ingest_state: &mut IngestState,
+    source_file: &SourceFile,
+    next_read_offset: i64,
+    pass_size: i64,
+    resolution_note: &str,
+) -> Result<()> {
+    if next_read_offset < pass_size || ingest_state.unresolved_invalid_json_paths.is_empty() {
+        return Ok(());
+    }
+    resolve_source_file_error(
+        conn,
+        &mut ingest_state.unresolved_invalid_json_paths,
+        source_file,
+        INVALID_JSON_ERROR_KIND,
+        resolution_note,
+    )
+}
+
+fn resolve_source_file_error(
+    conn: &Connection,
+    unresolved_paths: &mut HashSet<(String, String)>,
+    source_file: &SourceFile,
+    error_kind: &str,
+    resolution_note: &str,
+) -> Result<()> {
     let path_key = source_file_error_path_key(source_file);
-    if !ingest_state
-        .unresolved_invalid_session_meta_paths
-        .remove(&path_key)
-    {
+    if !unresolved_paths.remove(&path_key) {
         return Ok(());
     }
 
@@ -2359,7 +2463,7 @@ fn resolve_invalid_session_meta_error(
             resolution_note,
             source_file.source,
             source_file.path.to_string_lossy(),
-            INVALID_SESSION_META_ERROR_KIND,
+            error_kind,
         ],
     )
     .map_err(|source| sqlite_error(&source_file.path, source))?;
@@ -2548,6 +2652,10 @@ fn event_timestamp<'a>(source: &str, header: &'a EventHeader<'a>) -> Option<&'a 
         return ts;
     }
 
+    if source == CLAUDE_LOCAL_AGENT_SOURCE {
+        return header.audit_timestamp;
+    }
+
     if source == CODEX_SOURCE {
         return header
             .payload
@@ -2583,12 +2691,118 @@ fn claude_local_agent_metadata(metadata_path: Option<&Path>) -> Result<ParsedMet
     };
     let metadata = serde_json::from_slice::<ClaudeLocalAgentMetadata<'_>>(&bytes)
         .map_err(|source| invalid_session_meta(path, source.to_string()))?;
+    let started_at = claude_local_agent_metadata_timestamp(path, "createdAt", metadata.started_at)?;
+    let ended_at =
+        claude_local_agent_metadata_timestamp(path, "lastActivityAt", metadata.ended_at)?;
 
     Ok(ParsedMetadata {
         cwd: metadata.cwd.map(str::to_string),
-        started_at: metadata.started_at.map(str::to_string),
-        ended_at: metadata.ended_at.map(str::to_string),
+        started_at,
+        ended_at,
     })
+}
+
+fn claude_local_agent_metadata_timestamp(
+    path: &Path,
+    field: &str,
+    value: Option<serde_json::Value>,
+) -> Result<Option<String>> {
+    match value {
+        None => Ok(None),
+        Some(serde_json::Value::String(value)) => Ok(Some(value)),
+        Some(serde_json::Value::Number(value)) => {
+            let epoch_millis = json_timestamp_number_to_epoch_millis(&value).ok_or_else(|| {
+                invalid_session_meta(
+                    path,
+                    format!("claude local-agent {field} timestamp is outside supported range"),
+                )
+            })?;
+            epoch_millis_to_utc_iso(epoch_millis)
+                .map(Some)
+                .ok_or_else(|| {
+                    invalid_session_meta(
+                        path,
+                        format!("claude local-agent {field} timestamp is outside supported range"),
+                    )
+                })
+        }
+        Some(_) => Err(invalid_session_meta(
+            path,
+            format!("claude local-agent {field} timestamp must be a string or number"),
+        )),
+    }
+}
+
+fn json_timestamp_number_to_epoch_millis(value: &serde_json::Number) -> Option<i128> {
+    if let Some(value) = value.as_i64() {
+        return integer_timestamp_to_epoch_millis(i128::from(value));
+    }
+    if let Some(value) = value.as_u64() {
+        return integer_timestamp_to_epoch_millis(i128::from(value));
+    }
+
+    float_timestamp_to_epoch_millis(value.as_f64()?)
+}
+
+fn integer_timestamp_to_epoch_millis(value: i128) -> Option<i128> {
+    let magnitude = if value < 0 {
+        value.checked_neg()?
+    } else {
+        value
+    };
+    if magnitude >= 10_000_000_000 {
+        Some(value)
+    } else {
+        value.checked_mul(1_000)
+    }
+}
+
+fn float_timestamp_to_epoch_millis(value: f64) -> Option<i128> {
+    if !value.is_finite() {
+        return None;
+    }
+    let scaled = if value.abs() >= 10_000_000_000_f64 {
+        value
+    } else {
+        value * 1_000.0
+    };
+    if !scaled.is_finite() || scaled < i128::MIN as f64 || scaled > i128::MAX as f64 {
+        return None;
+    }
+    Some(scaled.round() as i128)
+}
+
+fn epoch_millis_to_utc_iso(epoch_millis: i128) -> Option<String> {
+    let seconds = epoch_millis.div_euclid(1_000);
+    let millisecond = epoch_millis.rem_euclid(1_000);
+    let days = seconds.div_euclid(86_400);
+    let second_of_day = seconds.rem_euclid(86_400);
+    let (year, month, day) = civil_from_days(days)?;
+    if !(0_i128..=9999_i128).contains(&year) {
+        return None;
+    }
+
+    let hour = second_of_day / 3_600;
+    let minute = (second_of_day % 3_600) / 60;
+    let second = second_of_day % 60;
+    Some(format!(
+        "{year:04}-{month:02}-{day:02}T{hour:02}:{minute:02}:{second:02}.{millisecond:03}Z"
+    ))
+}
+
+fn civil_from_days(days_since_unix_epoch: i128) -> Option<(i128, i128, i128)> {
+    let z = days_since_unix_epoch.checked_add(719_468)?;
+    let era = if z >= 0 { z } else { z - 146_096 } / 146_097;
+    let day_of_era = z - era * 146_097;
+    let year_of_era =
+        (day_of_era - day_of_era / 1_460 + day_of_era / 36_524 - day_of_era / 146_096) / 365;
+    let year = year_of_era + era * 400;
+    let day_of_year = day_of_era - (365 * year_of_era + year_of_era / 4 - year_of_era / 100);
+    let month_prime = (5 * day_of_year + 2) / 153;
+    let day = day_of_year - (153 * month_prime + 2) / 5 + 1;
+    let month = month_prime + if month_prime < 10 { 3 } else { -9 };
+    let year = year + if month <= 2 { 1 } else { 0 };
+    Some((year, month, day))
 }
 
 fn fill_missing(slot: &mut Option<String>, value: Option<String>) {
@@ -2598,11 +2812,14 @@ fn fill_missing(slot: &mut Option<String>, value: Option<String>) {
 }
 
 fn claude_local_agent_source_session_id_from_file(path: &Path) -> Result<String> {
-    let first_line = first_committed_line(
+    let Some(first_line) = first_committed_line(
         path,
         MAX_SESSION_HEADER_BYTES,
         "claude local-agent audit has no committed header line within the header limit",
-    )?;
+    )?
+    else {
+        return claude_local_agent_fallback_source_session_id(path);
+    };
     let header = serde_json::from_slice::<ClaudeLocalAgentAuditHeader<'_>>(&first_line)
         .map_err(|source| invalid_session_meta(path, source.to_string()))?;
 
@@ -2618,7 +2835,13 @@ fn codex_source_session_id_from_file(path: &Path) -> Result<String> {
         path,
         MAX_SESSION_HEADER_BYTES,
         "codex session file has no committed session_meta line within the header limit",
-    )?;
+    )?
+    .ok_or_else(|| {
+        invalid_session_meta(
+            path,
+            "codex session file has no committed session_meta line within the header limit",
+        )
+    })?;
 
     let header = serde_json::from_slice::<EventHeader<'_>>(&first_line)
         .map_err(|source| invalid_session_meta(path, source.to_string()))?;
@@ -2648,7 +2871,8 @@ fn factory_source_session_id_from_file(path: &Path) -> Result<String> {
         path,
         MAX_SESSION_HEADER_BYTES,
         FACTORY_SESSION_START_MISSING_MESSAGE,
-    )?;
+    )?
+    .ok_or_else(|| invalid_session_meta(path, FACTORY_SESSION_START_MISSING_MESSAGE))?;
     let header = serde_json::from_slice::<EventHeader<'_>>(&first_line)
         .map_err(|source| invalid_session_meta(path, source.to_string()))?;
     if header.event_type != Some("session_start") {
@@ -2668,7 +2892,7 @@ fn first_committed_line(
     path: &Path,
     byte_limit: u64,
     missing_line_message: &str,
-) -> Result<Vec<u8>> {
+) -> Result<Option<Vec<u8>>> {
     let file = File::open(path).map_err(|source| JottraceError::Io {
         path: path.to_path_buf(),
         source,
@@ -2682,10 +2906,13 @@ fn first_committed_line(
             source,
         })?;
     if read == 0 || !first_line.ends_with(b"\n") {
+        if read as u64 == byte_limit {
+            return Ok(None);
+        }
         return Err(invalid_session_meta(path, missing_line_message));
     }
     first_line.pop();
-    Ok(first_line)
+    Ok(Some(first_line))
 }
 
 fn validate_source_file_header(source_file: &SourceFile) -> Result<()> {
@@ -2700,7 +2927,13 @@ fn validate_pi_source_session_header(path: &Path, source_session_id: &str) -> Re
         path,
         MAX_SESSION_HEADER_BYTES,
         "Pi agent session file has no committed session event line within the header limit",
-    )?;
+    )?
+    .ok_or_else(|| {
+        invalid_session_meta(
+            path,
+            "Pi agent session file has no committed session event line within the header limit",
+        )
+    })?;
     let header = serde_json::from_slice::<EventHeader<'_>>(&first_line)
         .map_err(|source| invalid_session_meta(path, source.to_string()))?;
     if header.event_type != Some("session") {
