@@ -57,7 +57,7 @@ pub struct CompactReport {
     pub unresolved_ingest_errors: u64,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 struct EventStorageStats {
     raw_events: u64,
     zstd_events: u64,
@@ -92,6 +92,13 @@ type ApplyBatchFn =
     fn(&std::path::Path, &mut Connection, Vec<CompactionUpdate>) -> Result<AppliedBatch>;
 
 pub fn run_compact(options: CompactOptions) -> Result<CompactReport> {
+    run_compact_with_diagnostics(options, true)
+}
+
+pub fn run_compact_with_diagnostics(
+    options: CompactOptions,
+    include_diagnostics: bool,
+) -> Result<CompactReport> {
     validate_compact_options(options)?;
 
     let data_dir = data_dir_from_env()?;
@@ -101,19 +108,24 @@ pub fn run_compact(options: CompactOptions) -> Result<CompactReport> {
     };
     let db_path = data_dir.join(DB_FILE_NAME);
     let mut conn = open_database(&db_path)?;
-    let before = event_storage_stats(&db_path, &conn)?;
-    let sqlite_reclaimable_bytes_before = sqlite_reclaimable_bytes(&db_path, &conn)?;
+    let before = if include_diagnostics {
+        event_storage_stats(&db_path, &conn)?
+    } else {
+        EventStorageStats::default()
+    };
+    let sqlite_reclaimable_bytes_before = if include_diagnostics {
+        sqlite_reclaimable_bytes(&db_path, &conn)?
+    } else {
+        0
+    };
     let (raw_analysis, after) = match options.mode {
         CompactMode::DryRun => {
             let analysis =
                 scan_raw_payload_candidates(&db_path, &mut conn, options.batch_size, None)?;
-            let after = EventStorageStats {
-                raw_events: before.raw_events.saturating_sub(analysis.eligible_events),
-                zstd_events: before.zstd_events + analysis.eligible_events,
-                unsupported_codec_events: before.unsupported_codec_events,
-                stored_bytes: before
-                    .stored_bytes
-                    .saturating_sub(analysis.estimated_bytes_saved),
+            let after = if include_diagnostics {
+                compacted_storage_estimate(&before, analysis.eligible_events, &analysis)
+            } else {
+                EventStorageStats::default()
             };
             (analysis, after)
         }
@@ -124,13 +136,10 @@ pub fn run_compact(options: CompactOptions) -> Result<CompactReport> {
                 options.batch_size,
                 Some(apply_update_batch),
             )?;
-            let after = EventStorageStats {
-                raw_events: before.raw_events.saturating_sub(analysis.converted_events),
-                zstd_events: before.zstd_events + analysis.converted_events,
-                unsupported_codec_events: before.unsupported_codec_events,
-                stored_bytes: before
-                    .stored_bytes
-                    .saturating_sub(analysis.estimated_bytes_saved),
+            let after = if include_diagnostics {
+                compacted_storage_estimate(&before, analysis.converted_events, &analysis)
+            } else {
+                EventStorageStats::default()
             };
             (analysis, after)
         }
@@ -140,7 +149,11 @@ pub fn run_compact(options: CompactOptions) -> Result<CompactReport> {
             (RawPayloadAnalysis::default(), before)
         }
     };
-    let sqlite_reclaimable_bytes = sqlite_reclaimable_bytes(&db_path, &conn)?;
+    let sqlite_reclaimable_bytes = if include_diagnostics || options.mode != CompactMode::DryRun {
+        sqlite_reclaimable_bytes(&db_path, &conn)?
+    } else {
+        0
+    };
     let unresolved_ingest_errors = unresolved_ingest_error_count_from_connection(&db_path, &conn)?;
 
     Ok(CompactReport {
@@ -165,6 +178,21 @@ pub fn run_compact(options: CompactOptions) -> Result<CompactReport> {
         sqlite_reclaimable_bytes,
         unresolved_ingest_errors,
     })
+}
+
+fn compacted_storage_estimate(
+    before: &EventStorageStats,
+    converted_events: u64,
+    analysis: &RawPayloadAnalysis,
+) -> EventStorageStats {
+    EventStorageStats {
+        raw_events: before.raw_events.saturating_sub(converted_events),
+        zstd_events: before.zstd_events + converted_events,
+        unsupported_codec_events: before.unsupported_codec_events,
+        stored_bytes: before
+            .stored_bytes
+            .saturating_sub(analysis.estimated_bytes_saved),
+    }
 }
 
 fn validate_compact_options(options: CompactOptions) -> Result<()> {
