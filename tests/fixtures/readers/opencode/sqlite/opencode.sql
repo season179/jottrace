@@ -259,3 +259,28 @@ INSERT INTO `part` (
     1770000007000,
     '{"type":"text","text":"Synthetic child-session response.","time":{"start":1770000005000,"end":1770000007000}}'
 );
+
+INSERT INTO `session_entry` (
+    `id`,
+    `session_id`,
+    `type`,
+    `time_created`,
+    `time_updated`,
+    `data`
+) VALUES
+(
+    'ent_fixture_parent_summary_000',
+    'ses_fixture_parent_00000000000',
+    'summary',
+    1770000003000,
+    1770000003000,
+    '{"kind":"summary","text":"Synthetic parent session entry."}'
+),
+(
+    'ent_fixture_child_checkpoint',
+    'ses_fixture_child_000000000000',
+    'checkpoint',
+    1770000006000,
+    1770000006000,
+    '{"kind":"checkpoint","status":"synthetic child checkpoint"}'
+);
