@@ -38,6 +38,9 @@ const FACTORY_FIXTURE_SESSION_ID: &str = "00000000-0000-4000-8000-000000000065";
 const OPENCODE_FIXTURE_SQL: &str = "opencode/sqlite/opencode.sql";
 const OPENCODE_PARENT_SESSION_ID: &str = "ses_fixture_parent_00000000000";
 const OPENCODE_CHILD_SESSION_ID: &str = "ses_fixture_child_000000000000";
+const HERMES_FIXTURE_SQL: &str = "hermes/sqlite/state.sql";
+const HERMES_PARENT_SESSION_ID: &str = "hermes_fixture_parent_0000000000";
+const HERMES_CHILD_SESSION_ID: &str = "hermes_fixture_child_00000000000";
 const CORRUPT_FIXTURE_SESSION: &str = "edge-cases/corrupt-line.jsonl";
 const CORRUPT_FIXTURE_SESSION_ID: &str = "00000000-0000-4000-8000-000000000000";
 const UNREADABLE_FIXTURE_SESSION_ID: &str = "00000000-0000-4000-8000-000000000001";
@@ -1638,6 +1641,199 @@ fn ingest_preserves_opencode_sqlite_sessions_from_sanitized_fixture() {
         serde_json::from_str(&source_metadata).expect("OpenCode metadata should be JSON");
     assert_eq!(source_metadata["project"]["name"], "fixture-jottrace");
     assert_eq!(source_metadata["session"]["slug"], "fixture-child-session");
+
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn ingest_preserves_hermes_sqlite_sessions_from_sanitized_fixture() {
+    let root = temp_root("ingest-hermes-sqlite");
+    let data_dir = root.join(".jottrace");
+    let source_db = install_hermes_fixture(&root);
+
+    let ingest = run_ingest(&root, &data_dir);
+    assert!(ingest.contains("sessions: 2"));
+    assert!(ingest.contains("events: 7"));
+    assert!(ingest.contains("inserted_events: 7"));
+    assert!(ingest.contains("unresolved_ingest_errors: 0"));
+
+    let conn = Connection::open(db_path(&data_dir)).expect("open preserved db");
+    let (child_parent_id, child_file_path, child_event_count, child_ended_at): (
+        Option<i64>,
+        String,
+        i64,
+        String,
+    ) = conn
+        .query_row(
+            "SELECT parent_session_id, file_path, event_count, ended_at
+             FROM sessions
+             WHERE source = 'hermes'
+               AND source_session_id = ?1",
+            [HERMES_CHILD_SESSION_ID],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+        )
+        .expect("Hermes child session metadata");
+    assert!(child_parent_id.is_some());
+    assert_eq!(PathBuf::from(child_file_path), source_db);
+    assert_eq!(child_event_count, 4);
+    assert_eq!(child_ended_at, "2026-02-02T02:42:10.000Z");
+
+    let parent_source_session_id: String = conn
+        .query_row(
+            "SELECT parent.source_session_id
+             FROM sessions child
+             JOIN sessions parent ON parent.id = child.parent_session_id
+             WHERE child.source = 'hermes'
+               AND child.source_session_id = ?1",
+            [HERMES_CHILD_SESSION_ID],
+            |row| row.get(0),
+        )
+        .expect("Hermes parent session link");
+    assert_eq!(parent_source_session_id, HERMES_PARENT_SESSION_ID);
+
+    let mut child_events = Vec::new();
+    jottrace::storage::for_each_decoded_event_payload_for_session(
+        &db_path(&data_dir),
+        "hermes",
+        HERMES_CHILD_SESSION_ID,
+        None,
+        |payload| {
+            child_events.push(
+                serde_json::from_slice::<serde_json::Value>(payload)
+                    .expect("Hermes payload should be JSON"),
+            );
+            Ok(())
+        },
+    )
+    .expect("decoded Hermes child events");
+    assert_eq!(
+        child_events
+            .iter()
+            .map(|event| event["type"].as_str().expect("event type"))
+            .collect::<Vec<_>>(),
+        vec!["session", "message", "message", "message"]
+    );
+    assert_eq!(child_events[1]["row"]["id"], 12);
+    assert_eq!(child_events[2]["row"]["id"], 10);
+    assert_eq!(child_events[3]["row"]["id"], 11);
+    assert_eq!(child_events[1]["row"]["role"], "user");
+    assert_eq!(child_events[2]["row"]["tool_name"], "read_fixture_metadata");
+    assert_eq!(
+        child_events[3]["row"]["content"],
+        "Hermes fixture import completed."
+    );
+
+    let source_metadata: String = conn
+        .query_row(
+            "SELECT source_metadata
+             FROM sessions
+             WHERE source = 'hermes'
+               AND source_session_id = ?1",
+            [HERMES_CHILD_SESSION_ID],
+            |row| row.get(0),
+        )
+        .expect("Hermes source metadata");
+    let source_metadata: serde_json::Value =
+        serde_json::from_str(&source_metadata).expect("Hermes metadata should be JSON");
+    assert_eq!(source_metadata["session"]["source"], "hermes-cli");
+    assert_eq!(source_metadata["session"]["model"], "fixture-model");
+
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn ingest_is_idempotent_for_unchanged_hermes_sqlite_fixture() {
+    let root = temp_root("ingest-hermes-idempotent");
+    let data_dir = root.join(".jottrace");
+    install_hermes_fixture(&root);
+
+    let first = run_ingest(&root, &data_dir);
+    assert!(first.contains("events: 7"));
+    assert!(first.contains("inserted_events: 7"));
+
+    let second = run_ingest(&root, &data_dir);
+    assert!(second.contains("sessions: 2"));
+    assert!(second.contains("events: 7"));
+    assert!(second.contains("inserted_events: 0"));
+
+    let conn = Connection::open(db_path(&data_dir)).expect("open preserved db");
+    assert_eq!(generation_counts(&conn), vec![(0, 7)]);
+
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn ingest_preserves_changed_hermes_sqlite_session_as_next_generation() {
+    let root = temp_root("ingest-hermes-rewrite");
+    let data_dir = root.join(".jottrace");
+    let source_db = install_hermes_fixture(&root);
+
+    let first = run_ingest(&root, &data_dir);
+    assert!(first.contains("events: 7"));
+    assert!(first.contains("inserted_events: 7"));
+
+    Connection::open(&source_db)
+        .expect("open source Hermes db")
+        .execute_batch(
+            "UPDATE messages
+             SET content = 'Hermes fixture import completed after revision.',
+                 timestamp = 1770000140.0
+             WHERE id = 11;
+             UPDATE sessions
+             SET ended_at = 1770000140.0
+             WHERE id = 'hermes_fixture_child_00000000000';",
+        )
+        .expect("rewrite Hermes fixture row");
+
+    let second = run_ingest(&root, &data_dir);
+    assert!(second.contains("sessions: 2"));
+    assert!(second.contains("events: 11"));
+    assert!(second.contains("inserted_events: 4"));
+
+    let conn = Connection::open(db_path(&data_dir)).expect("open preserved db");
+    let (current_generation, event_count, ended_at): (i64, i64, String) = conn
+        .query_row(
+            "SELECT current_generation, event_count, ended_at
+             FROM sessions
+             WHERE source = 'hermes'
+               AND source_session_id = ?1",
+            [HERMES_CHILD_SESSION_ID],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .expect("Hermes rewritten session state");
+    assert_eq!(current_generation, 1);
+    assert_eq!(event_count, 4);
+    assert_eq!(ended_at, "2026-02-02T02:42:20.000Z");
+    assert_eq!(generation_counts(&conn), vec![(0, 7), (1, 4)]);
+
+    assert!(event_payload(&conn, 1, 3).contains("after revision"));
+
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn ingest_records_invalid_hermes_sqlite_without_blocking_unrelated_files() {
+    let root = temp_root("ingest-hermes-invalid");
+    let data_dir = root.join(".jottrace");
+    install_primary_claude_fixture(&root);
+    let bad_db = root.join(".hermes/state.db");
+    write_text_file(&bad_db, "not a sqlite database");
+
+    let ingest = run_ingest(&root, &data_dir);
+    assert!(ingest.contains("sessions: 2"));
+    assert!(ingest.contains("events: 12"));
+    assert!(ingest.contains("inserted_events: 12"));
+    assert!(ingest.contains("unresolved_ingest_errors: 1"));
+
+    let errors = jottrace::storage::unresolved_ingest_errors_for_path(&db_path(&data_dir), 10)
+        .expect("unresolved ingest errors");
+    assert_eq!(errors.len(), 1);
+    let error = &errors[0];
+    assert_eq!(error.source, "hermes");
+    assert_eq!(error.source_session_id.as_deref(), Some("state.db"));
+    assert_eq!(error.file_path, bad_db);
+    assert_eq!(error.error_kind, "invalid_session_meta");
+    assert!(error.message.contains("Hermes SQLite SessionDB"));
 
     let _ = fs::remove_dir_all(root);
 }
@@ -3728,14 +3924,33 @@ fn install_factory_fixture(root: &Path) -> PathBuf {
 }
 
 fn install_opencode_fixture(root: &Path) -> PathBuf {
-    let db_path = root.join(".local/share/opencode/opencode.db");
+    install_sqlite_fixture(
+        root,
+        ".local/share/opencode/opencode.db",
+        OPENCODE_FIXTURE_SQL,
+        "OpenCode",
+    )
+}
+
+fn install_hermes_fixture(root: &Path) -> PathBuf {
+    install_sqlite_fixture(root, ".hermes/state.db", HERMES_FIXTURE_SQL, "Hermes")
+}
+
+fn install_sqlite_fixture(
+    root: &Path,
+    db_relative_path: &str,
+    fixture_relative_path: &str,
+    label: &str,
+) -> PathBuf {
+    let db_path = root.join(db_relative_path);
     if let Some(parent) = db_path.parent() {
-        fs::create_dir_all(parent).expect("create OpenCode fixture parent");
+        fs::create_dir_all(parent).unwrap_or_else(|_| panic!("create {label} fixture parent"));
     }
-    let sql = fs::read_to_string(reader_fixture(OPENCODE_FIXTURE_SQL))
-        .expect("read OpenCode fixture SQL");
-    let conn = Connection::open(&db_path).expect("open OpenCode fixture db");
-    conn.execute_batch(&sql).expect("load OpenCode fixture SQL");
+    let sql = fs::read_to_string(reader_fixture(fixture_relative_path))
+        .unwrap_or_else(|_| panic!("read {label} fixture SQL"));
+    let conn = Connection::open(&db_path).unwrap_or_else(|_| panic!("open {label} fixture db"));
+    conn.execute_batch(&sql)
+        .unwrap_or_else(|_| panic!("load {label} fixture SQL"));
     db_path
 }
 

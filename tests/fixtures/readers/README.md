@@ -1,9 +1,9 @@
 # Reader Fixture Corpus
 
 This corpus started as the issue #21 reader-fixture seed set and now includes
-the Claude local-agent, OpenCode SQLite, issue #64 Pi agent, and issue #67
-Gemini CLI slices. It is
-source-shaped from inspected local agent artifacts, but all content is
+the Claude local-agent, Hermes SQLite SessionDB, OpenCode SQLite, issue #64 Pi
+agent, and issue #67 Gemini CLI slices. It is source-shaped from inspected
+local agent artifacts, but all content is
 synthetic and safe to commit.
 
 ## Coverage
@@ -23,6 +23,11 @@ synthetic and safe to commit.
   shape observed on 2026-05-06. The fixture is a SQL rebuild script with
   synthetic rows that preserve session, message, part, and parent-child
   relationship structure without committing the private source database.
+- `hermes/sqlite/state.sql` captures the Hermes SQLite SessionDB
+  reader-relevant shape observed on 2026-05-07. The fixture is a SQL rebuild
+  script with synthetic rows that preserve sessions, messages, parent linkage,
+  and FTS mirror tables without committing the private source database. Reader
+  tests assert that the FTS mirrors are ignored as duplicated search indexes.
 - `pi-agent/sessions/--Users-fixture-Workspace-jottrace--/` captures the Pi
   agent `~/.pi/agent/sessions/<encoded-cwd>/` JSONL shape with session,
   message, model-change, and thinking-level-change events.
@@ -54,8 +59,8 @@ synthetic and safe to commit.
 ## Human Review
 
 Review status: pending human approval for the Claude CLI, Claude local-agent,
-Codex CLI, OpenCode SQLite, Pi agent, Gemini CLI, and Factory fixtures before
-they become the baseline for new reader implementation.
+Codex CLI, Hermes SQLite SessionDB, OpenCode SQLite, Pi agent, Gemini CLI, and
+Factory fixtures before they become the baseline for new reader implementation.
 Cursor fixture capture is still pending because no local Cursor `state.vscdb` or
 `cursorDiskKV` source was available on this machine during the 2026-05-06
 fixture pass.

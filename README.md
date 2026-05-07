@@ -4,10 +4,11 @@ Jottrace preserves local AI coding-session transcripts into a private SQLite
 journal you control.
 
 Today it can ingest Claude CLI / Claude Code, Codex CLI, Factory /
-Droid-style JSONL session files, and Gemini CLI chat JSON files. It also
-preserves Claude subagent sidechain sessions and reports the local journal
-status from the command line. Cursor, OpenCode, and other readers are tracked
-in the design docs, but are not implemented as user-facing ingest sources yet.
+Droid-style JSONL session files, Gemini CLI chat JSON files, OpenCode SQLite,
+and Hermes SQLite SessionDB rows. It also preserves Claude subagent sidechain
+sessions and reports the local journal status from the command line. Cursor
+and other readers are tracked in the design docs, but are not implemented as
+user-facing ingest sources yet.
 
 ## Features
 
@@ -15,7 +16,7 @@ in the design docs, but are not implemented as user-facing ingest sources yet.
 - Keep local state in `~/.jottrace/db.sqlite`, or another directory via
   `JOTTRACE_HOME`.
 - Check the data directory and database with `jottrace doctor`.
-- Ingest Claude, Codex, Factory, and Gemini session files with
+- Ingest Claude, Codex, Factory, Gemini, OpenCode, and Hermes sessions with
   `jottrace ingest`.
 - Inspect stored session, event, schema, and ingest-error counts with
   `jottrace status`.
@@ -112,6 +113,16 @@ It also scans Factory / Droid-style sessions under:
 For Factory, Jottrace reads nested `sessions/<encoded-cwd>/*.jsonl` files,
 uses the first committed `session_start.id` as the stable session id, and links
 matching sibling `.settings.json` files through deterministic source metadata.
+
+For OpenCode, Jottrace reads `~/.local/share/opencode/opencode.db`, using
+`session.id` as the stable session id. It preserves the session row plus
+ordered message, part, and session-entry rows while ignoring non-authoritative
+sidecar storage until a fixture proves it is reader-scope.
+
+For Hermes, Jottrace reads `~/.hermes/state.db`, using `sessions.id` as the
+stable session id. It preserves each session row plus ordered `messages` rows,
+links `sessions.parent_session_id` when the parent row exists, and ignores FTS
+mirror tables.
 
 The ingest command stores raw source event/message payloads and cheap
 deterministic session metadata, then prints discovered file count, total
