@@ -162,6 +162,29 @@ rerun the installer fallback:
 curl -fsSL https://raw.githubusercontent.com/season179/jottrace/main/install.sh | bash
 ```
 
+When Jottrace appears to be running from the `install.sh` location
+(`~/.local/bin/jottrace`), normal commands quietly start a throttled background
+update check. The foreground command is not delayed and does not print update
+status. If the background check, download, validation, or replacement fails,
+the existing binary is left in place.
+
+To disable background auto-update checks for one command or shell session:
+
+```sh
+JOTTRACE_AUTO_UPDATE=0 jottrace status
+```
+
+To disable them persistently, create `~/.jottrace/config.json`:
+
+```json
+{
+  "auto_update": false
+}
+```
+
+These opt-outs only affect background auto-updates. You can still run
+`jottrace update` or `jottrace upgrade` manually.
+
 ## Build From Source
 
 ```sh

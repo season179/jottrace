@@ -5,10 +5,9 @@ use std::process::ExitCode;
 fn main() -> ExitCode {
     // The first env arg is the executable path; commands start after it.
     let mut args = env::args().skip(1);
+    let command = args.next();
 
-    // Match on &str values so command dispatch stays simple and avoids cloning
-    // the user-provided argument just to inspect it.
-    match args.next().as_deref() {
+    match command.as_deref() {
         None | Some("--help") | Some("-h") => {
             print_help();
             ExitCode::SUCCESS
@@ -24,6 +23,9 @@ fn main() -> ExitCode {
         Some("status") => run_status_command(args),
         Some("update") | Some("upgrade") => run_update_command(args),
         Some("web") => run_web_command(args),
+        Some(command) if jottrace::update::is_auto_update_command(command) => {
+            run_auto_update_background_command(args)
+        }
         Some(command) => {
             eprintln!("unknown command: {command}");
             eprintln!("run `jottrace --help` for usage");
@@ -90,6 +92,7 @@ fn run_events_command(args: impl Iterator<Item = String>) -> ExitCode {
             return ExitCode::from(2);
         }
     };
+    jottrace::update::maybe_spawn_auto_update();
 
     let db_path = match jottrace::storage::db_path_from_env() {
         Ok(db_path) => db_path,
@@ -209,6 +212,7 @@ fn run_web_command(args: impl Iterator<Item = String>) -> ExitCode {
             return ExitCode::from(2);
         }
     };
+    jottrace::update::maybe_spawn_auto_update();
 
     let db_path = match jottrace::storage::db_path_from_env() {
         Ok(db_path) => db_path,
@@ -286,6 +290,7 @@ fn run_ingest_command(args: impl Iterator<Item = String>) -> ExitCode {
             return ExitCode::from(2);
         }
     }
+    jottrace::update::maybe_spawn_auto_update();
 
     match jottrace::run_ingest() {
         Ok(report) => {
@@ -347,6 +352,14 @@ fn run_update_command(args: impl Iterator<Item = String>) -> ExitCode {
     }
 }
 
+fn run_auto_update_background_command(mut args: impl Iterator<Item = String>) -> ExitCode {
+    if args.next().is_some() {
+        return ExitCode::from(2);
+    }
+    jottrace::update::run_auto_update_silent();
+    ExitCode::SUCCESS
+}
+
 fn run_compact_command(args: impl Iterator<Item = String>) -> ExitCode {
     let options = match parse_compact_command(args) {
         Ok(CompactCommand::Run(options)) => options,
@@ -360,6 +373,7 @@ fn run_compact_command(args: impl Iterator<Item = String>) -> ExitCode {
             return ExitCode::from(2);
         }
     };
+    jottrace::update::maybe_spawn_auto_update();
 
     match jottrace::run_compact(options) {
         Ok(report) => {
@@ -498,6 +512,7 @@ fn run_doctor_command(args: impl Iterator<Item = String>) -> ExitCode {
             return ExitCode::from(2);
         }
     }
+    jottrace::update::maybe_spawn_auto_update();
 
     // Keep the CLI responsible for presentation while the library owns the
     // filesystem checks. That makes future commands easier to test directly.
@@ -560,6 +575,7 @@ fn run_status_command(args: impl Iterator<Item = String>) -> ExitCode {
             return ExitCode::from(2);
         }
     }
+    jottrace::update::maybe_spawn_auto_update();
 
     match jottrace::run_status() {
         Ok(report) => {
