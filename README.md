@@ -25,6 +25,7 @@ in the design docs, but are not implemented as user-facing ingest sources yet.
   rewritten or truncated source files as new generations.
 - Record corrupt or unreadable source-file errors without blocking unrelated
   sessions.
+- Inspect and compact eligible raw payload rows with `jottrace compact`.
 - Browse preserved sessions, events, and unresolved ingest errors locally with
   `jottrace web`.
 - Update the installed binary from GitHub Releases with `jottrace update`.
@@ -60,17 +61,24 @@ jottrace --version
 jottrace doctor
 jottrace ingest
 jottrace status
+jottrace compact
 jottrace web
 ```
 
 `jottrace -h` is the fastest CLI discovery path. It prints the top-level
 commands and points to `jottrace <command> --help` for command-specific usage.
+High-frequency agent-facing commands use compact stdout by default:
+`status`, `doctor`, `ingest`, and `compact` print the action-relevant counts
+and next steps without journal paths or long diagnostics. Add `--details` to
+those commands when you need the database path, schema version, recent
+ingest-error fields, or full compaction counters. `jottrace events` keeps its
+explicit `--limit` / `--all` bounded-output contract.
 
 `jottrace doctor` creates or checks the local data directory at `~/.jottrace`
 and reports whether its permissions are private. On Unix systems, the directory
 is expected to use mode `0700`; the SQLite database is expected to use mode
-`0600`. It also reports unresolved ingest errors and shows recent error details
-when any exist.
+`0600`. It also reports unresolved ingest-error counts; use
+`jottrace doctor --details` to show recent error details.
 
 `jottrace ingest` scans these Claude install directories under `HOME`:
 
@@ -106,12 +114,20 @@ uses the first committed `session_start.id` as the stable session id, and links
 matching sibling `.settings.json` files through deterministic source metadata.
 
 The ingest command stores raw source event/message payloads and cheap
-deterministic session metadata, then prints the database path, discovered file
-count, total session/event counts, inserted event count, and unresolved
-ingest-error count.
+deterministic session metadata, then prints discovered file count, total
+session/event counts, inserted event count, and unresolved ingest-error count.
+Use `jottrace ingest --details` to include the database path.
 
 `jottrace status` initializes `~/.jottrace/db.sqlite` if needed and reports
-the schema version plus session, event, and unresolved ingest-error counts.
+session, event, and unresolved ingest-error counts. Use
+`jottrace status --details` to include the database path and schema version.
+
+`jottrace compact` reports eligible raw payload rows and estimated savings
+without mutating the journal. Use `jottrace compact --apply` to rewrite
+eligible rows as zstd and `jottrace compact --vacuum` to reclaim free SQLite
+pages after applying. Use `jottrace compact --details` to include the database
+path, before/after codec counts, skipped-row counters, stored byte totals, and
+SQLite reclaimable-page counters.
 
 `jottrace web` starts a read-only web UI bound to `127.0.0.1`, prints the URL
 and database path, and serves data from the existing SQLite journal. The UI lets
@@ -198,6 +214,7 @@ Run the development binary with:
 cargo run -- doctor
 cargo run -- ingest
 cargo run -- status
+cargo run -- compact
 cargo run -- web
 ```
 

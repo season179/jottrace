@@ -229,6 +229,28 @@ fn doctor_creates_private_data_dir() {
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(stdout.contains("jottrace doctor"));
     assert!(stdout.contains("permissions: private (ok)"));
+    assert!(stdout.contains("unresolved_ingest_errors: 0"));
+    assert!(!stdout.contains("data_dir: "));
+    assert!(!stdout.contains("next: "));
+
+    let detailed = Command::new(binary())
+        .args(["doctor", "--details"])
+        .env("JOTTRACE_HOME", &data_dir)
+        .output()
+        .expect("run jottrace doctor --details");
+
+    assert!(
+        detailed.status.success(),
+        "stdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&detailed.stdout),
+        String::from_utf8_lossy(&detailed.stderr)
+    );
+
+    let detailed_stdout = String::from_utf8_lossy(&detailed.stdout);
+    assert!(detailed_stdout.contains("jottrace doctor"));
+    assert!(detailed_stdout.contains(&format!("data_dir: {} (ok)", data_dir.display())));
+    assert!(detailed_stdout.contains("permissions: private (ok)"));
+    assert!(detailed_stdout.contains("unresolved_ingest_errors: 0"));
 
     #[cfg(unix)]
     assert_eq!(mode(&data_dir), 0o700);
@@ -259,6 +281,24 @@ fn status_reports_empty_fresh_database() {
     assert!(stdout.contains("sessions: 0"));
     assert!(stdout.contains("events: 0"));
     assert!(stdout.contains("unresolved_ingest_errors: 0"));
+    assert!(!stdout.contains("db: "));
+    assert!(!stdout.contains("schema_version: "));
+
+    let detailed = Command::new(binary())
+        .args(["status", "--details"])
+        .env("JOTTRACE_HOME", &data_dir)
+        .output()
+        .expect("run jottrace status --details");
+
+    assert!(
+        detailed.status.success(),
+        "stdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&detailed.stdout),
+        String::from_utf8_lossy(&detailed.stderr)
+    );
+    let detailed_stdout = String::from_utf8_lossy(&detailed.stdout);
+    assert!(detailed_stdout.contains(&format!("db: {}", db_path(&data_dir).display())));
+    assert!(detailed_stdout.contains("schema_version: "));
 
     let db_path = db_path(&data_dir);
     assert!(
@@ -296,10 +336,31 @@ fn doctor_reports_unresolved_ingest_errors() {
 
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(stdout.contains("unresolved_ingest_errors: 1"));
-    assert!(stdout.contains(CORRUPT_FIXTURE_SESSION_ID));
-    assert!(stdout.contains("line: 2"));
-    assert!(stdout.contains("kind: invalid_json"));
-    assert!(stdout.contains("message: "));
+    assert!(stdout.contains("next: run `jottrace doctor --details`"));
+    assert!(!stdout.contains("data_dir: "));
+    assert!(!stdout.contains(CORRUPT_FIXTURE_SESSION_ID));
+    assert!(!stdout.contains("kind: invalid_json"));
+    assert!(!stdout.contains("message: "));
+
+    let detailed = Command::new(binary())
+        .args(["doctor", "--details"])
+        .env("JOTTRACE_HOME", &data_dir)
+        .output()
+        .expect("run jottrace doctor --details");
+
+    assert!(
+        detailed.status.success(),
+        "stdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&detailed.stdout),
+        String::from_utf8_lossy(&detailed.stderr)
+    );
+
+    let detailed_stdout = String::from_utf8_lossy(&detailed.stdout);
+    assert!(detailed_stdout.contains("data_dir: "));
+    assert!(detailed_stdout.contains(CORRUPT_FIXTURE_SESSION_ID));
+    assert!(detailed_stdout.contains("line: 2"));
+    assert!(detailed_stdout.contains("kind: invalid_json"));
+    assert!(detailed_stdout.contains("message: "));
 
     let _ = fs::remove_dir_all(root);
 }
@@ -702,7 +763,27 @@ fn ingest_preserves_claude_cli_fixture_and_status_reports_counts() {
     let data_dir = root.join(".jottrace");
     let session_file = install_primary_claude_fixture(&root);
 
-    run_ingest(&root, &data_dir);
+    let ingest = run_ingest(&root, &data_dir);
+    assert!(ingest.contains("sessions: 1"));
+    assert!(ingest.contains("events: 12"));
+    assert!(ingest.contains("inserted_events: 12"));
+    assert!(ingest.contains("unresolved_ingest_errors: 0"));
+    assert!(!ingest.contains("db: "));
+
+    let detailed_ingest = Command::new(binary())
+        .args(["ingest", "--details"])
+        .env("HOME", &root)
+        .env("JOTTRACE_HOME", &data_dir)
+        .output()
+        .expect("run jottrace ingest --details");
+    assert!(
+        detailed_ingest.status.success(),
+        "stdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&detailed_ingest.stdout),
+        String::from_utf8_lossy(&detailed_ingest.stderr)
+    );
+    let detailed_stdout = String::from_utf8_lossy(&detailed_ingest.stdout);
+    assert!(detailed_stdout.contains(&format!("db: {}", db_path(&data_dir).display())));
 
     let status = Command::new(binary())
         .arg("status")
@@ -2365,19 +2446,43 @@ fn compact_dry_run_reports_savings_without_mutating_payloads() {
     let stdout = String::from_utf8(output.stdout).expect("compact stdout should be utf-8");
     assert!(stdout.contains("jottrace compact"));
     assert!(stdout.contains("mode: dry-run"));
-    assert!(stdout.contains("raw_events_before: 1"));
-    assert!(stdout.contains("zstd_events_before: 0"));
     assert!(stdout.contains("eligible_raw_events: 1"));
-    assert!(stdout.contains("converted_events: 0"));
     assert!(stdout.contains("unresolved_ingest_errors: 0"));
+    assert!(stdout.contains("next: rerun with `jottrace compact --apply`"));
+    assert!(!stdout.contains("db: "));
+    assert!(!stdout.contains("raw_events_before: "));
+    assert!(!stdout.contains("zstd_events_before: "));
+    assert!(!stdout.contains("converted_events: "));
+    assert!(!stdout.contains("stored_bytes_before: "));
+    assert!(!stdout.contains("sqlite_reclaimable_bytes: "));
     assert!(
         compact_metric(&stdout, "estimated_bytes_saved") > 0,
         "{stdout}"
     );
+
+    let detailed = Command::new(binary())
+        .args(["compact", "--details"])
+        .env("JOTTRACE_HOME", &data_dir)
+        .output()
+        .expect("run jottrace compact --details");
+
     assert!(
-        compact_metric(&stdout, "stored_bytes_after")
-            < compact_metric(&stdout, "stored_bytes_before"),
-        "{stdout}"
+        detailed.status.success(),
+        "stdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&detailed.stdout),
+        String::from_utf8_lossy(&detailed.stderr)
+    );
+    let detailed_stdout =
+        String::from_utf8(detailed.stdout).expect("compact stdout should be utf-8");
+    assert!(detailed_stdout.contains(&format!("db: {}", db_path(&data_dir).display())));
+    assert!(detailed_stdout.contains("raw_events_before: 1"));
+    assert!(detailed_stdout.contains("zstd_events_before: 0"));
+    assert!(detailed_stdout.contains("eligible_raw_events: 1"));
+    assert!(detailed_stdout.contains("converted_events: 0"));
+    assert!(
+        compact_metric(&detailed_stdout, "stored_bytes_after")
+            < compact_metric(&detailed_stdout, "stored_bytes_before"),
+        "{detailed_stdout}"
     );
 
     let conn = Connection::open(db_path(&data_dir)).expect("open preserved db");
@@ -2404,7 +2509,7 @@ fn compact_apply_rewrites_only_eligible_raw_rows_and_is_idempotent() {
     drop(conn);
 
     let output = Command::new(binary())
-        .args(["compact", "--apply", "--batch-size", "2"])
+        .args(["compact", "--apply", "--batch-size", "2", "--details"])
         .env("JOTTRACE_HOME", &data_dir)
         .output()
         .expect("run jottrace compact --apply");
@@ -2450,7 +2555,7 @@ fn compact_apply_rewrites_only_eligible_raw_rows_and_is_idempotent() {
     drop(conn);
 
     let second = Command::new(binary())
-        .args(["compact", "--apply"])
+        .args(["compact", "--apply", "--details"])
         .env("JOTTRACE_HOME", &data_dir)
         .output()
         .expect("rerun jottrace compact --apply");
@@ -2475,7 +2580,7 @@ fn compact_vacuum_reclaims_free_sqlite_pages_after_apply() {
     insert_single_raw_compaction_session(&data_dir, &payload);
 
     let apply = Command::new(binary())
-        .args(["compact", "--apply"])
+        .args(["compact", "--apply", "--details"])
         .env("JOTTRACE_HOME", &data_dir)
         .output()
         .expect("run jottrace compact --apply");
@@ -2492,7 +2597,7 @@ fn compact_vacuum_reclaims_free_sqlite_pages_after_apply() {
     );
 
     let vacuum = Command::new(binary())
-        .args(["compact", "--vacuum"])
+        .args(["compact", "--vacuum", "--details"])
         .env("JOTTRACE_HOME", &data_dir)
         .output()
         .expect("run jottrace compact --vacuum");

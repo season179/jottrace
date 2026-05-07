@@ -178,6 +178,19 @@ pub struct DoctorReport {
     pub recent_ingest_errors: Vec<IngestErrorSummary>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DoctorOptions {
+    pub include_recent_errors: bool,
+}
+
+impl Default for DoctorOptions {
+    fn default() -> Self {
+        Self {
+            include_recent_errors: true,
+        }
+    }
+}
+
 /// Resolve the data directory from the environment.
 ///
 /// `JOTTRACE_HOME` comes first because tests and future integrations need a
@@ -193,17 +206,25 @@ pub fn data_dir_from_env() -> Result<PathBuf> {
 
 /// Verify the local runtime can safely create and protect its private state.
 pub fn run_doctor() -> Result<DoctorReport> {
+    run_doctor_with_options(DoctorOptions::default())
+}
+
+pub fn run_doctor_with_options(options: DoctorOptions) -> Result<DoctorReport> {
     let data_dir = data_dir_from_env()?;
     ensure_private_dir(&data_dir)?;
     let db_path = data_dir.join(storage::DB_FILE_NAME);
     let conn = storage::open_database(&db_path)?;
     let unresolved_ingest_error_count =
         storage::unresolved_ingest_error_count_from_connection(&db_path, &conn)?;
-    let ingest_errors = storage::unresolved_ingest_errors_from_connection(
-        &db_path,
-        &conn,
-        DOCTOR_INGEST_ERROR_LIMIT,
-    )?;
+    let ingest_errors = if options.include_recent_errors {
+        storage::unresolved_ingest_errors_from_connection(
+            &db_path,
+            &conn,
+            DOCTOR_INGEST_ERROR_LIMIT,
+        )?
+    } else {
+        Vec::new()
+    };
     Ok(DoctorReport {
         data_dir,
         unresolved_ingest_error_count,

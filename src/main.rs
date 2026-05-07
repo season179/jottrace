@@ -68,8 +68,25 @@ enum WebCommand {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct CompactCliOptions {
+    compact_options: jottrace::CompactOptions,
+    details: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum CompactCommand {
-    Run(jottrace::CompactOptions),
+    Run(CompactCliOptions),
+    Help,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct DetailOptions {
+    details: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DetailCommand {
+    Run(DetailOptions),
     Help,
 }
 
@@ -278,24 +295,26 @@ fn parse_web_command(
 }
 
 fn run_ingest_command(args: impl Iterator<Item = String>) -> ExitCode {
-    match parse_simple_command("ingest", args) {
-        Ok(SimpleCommand::Help) => {
+    let options = match parse_detail_command("ingest", args) {
+        Ok(DetailCommand::Help) => {
             print_ingest_help();
             return ExitCode::SUCCESS;
         }
-        Ok(SimpleCommand::Run) => {}
+        Ok(DetailCommand::Run(options)) => options,
         Err(message) => {
             eprintln!("{message}");
             eprintln!("run `jottrace ingest --help` for usage");
             return ExitCode::from(2);
         }
-    }
+    };
     jottrace::update::maybe_spawn_auto_update();
 
     match jottrace::run_ingest() {
         Ok(report) => {
             println!("jottrace ingest");
-            println!("db: {}", report.db_path.display());
+            if options.details {
+                println!("db: {}", report.db_path.display());
+            }
             println!("files: {}", report.file_count);
             println!("sessions: {}", report.session_count);
             println!("events: {}", report.event_count);
@@ -322,6 +341,23 @@ fn parse_simple_command(
         Some(arg) if arg == "--help" || arg == "-h" => Ok(SimpleCommand::Help),
         Some(arg) => Err(format!("unknown {command} option: {arg}")),
     }
+}
+
+fn parse_detail_command(
+    command: &str,
+    args: impl Iterator<Item = String>,
+) -> std::result::Result<DetailCommand, String> {
+    let mut options = DetailOptions { details: false };
+
+    for arg in args {
+        match arg.as_str() {
+            "--help" | "-h" => return Ok(DetailCommand::Help),
+            "--details" => options.details = true,
+            _ => return Err(format!("unknown {command} option: {arg}")),
+        }
+    }
+
+    Ok(DetailCommand::Run(options))
 }
 
 fn run_update_command(args: impl Iterator<Item = String>) -> ExitCode {
@@ -361,8 +397,8 @@ fn run_auto_update_background_command(mut args: impl Iterator<Item = String>) ->
 }
 
 fn run_compact_command(args: impl Iterator<Item = String>) -> ExitCode {
-    let options = match parse_compact_command(args) {
-        Ok(CompactCommand::Run(options)) => options,
+    let cli_options = match parse_compact_command(args) {
+        Ok(CompactCommand::Run(cli_options)) => cli_options,
         Ok(CompactCommand::Help) => {
             print_compact_help();
             return ExitCode::SUCCESS;
@@ -375,45 +411,56 @@ fn run_compact_command(args: impl Iterator<Item = String>) -> ExitCode {
     };
     jottrace::update::maybe_spawn_auto_update();
 
-    match jottrace::run_compact(options) {
+    match jottrace::compact::run_compact_with_diagnostics(
+        cli_options.compact_options,
+        cli_options.details,
+    ) {
         Ok(report) => {
             println!("jottrace compact");
-            println!("db: {}", report.db_path.display());
             println!("mode: {}", compact_mode_name(report.mode));
-            if report.mode != jottrace::CompactMode::Vacuum {
+            if cli_options.details {
+                println!("db: {}", report.db_path.display());
+            }
+            if cli_options.details && report.mode != jottrace::CompactMode::Vacuum {
                 println!("batch_size: {}", report.batch_size);
             }
-            println!("raw_events_before: {}", report.raw_events_before);
-            println!("zstd_events_before: {}", report.zstd_events_before);
-            println!("raw_events_after: {}", report.raw_events_after);
-            println!("zstd_events_after: {}", report.zstd_events_after);
-            println!(
-                "unsupported_codec_events: {}",
-                report.unsupported_codec_events
-            );
             println!("eligible_raw_events: {}", report.eligible_raw_events);
-            println!("converted_events: {}", report.converted_events);
-            println!("skipped_raw_events: {}", report.skipped_raw_events);
-            println!("skipped_small_events: {}", report.skipped_small_events);
-            println!(
-                "skipped_not_smaller_events: {}",
-                report.skipped_not_smaller_events
-            );
-            println!(
-                "skipped_round_trip_failed_events: {}",
-                report.skipped_round_trip_failed_events
-            );
-            println!("stored_bytes_before: {}", report.stored_bytes_before);
-            println!("stored_bytes_after: {}", report.stored_bytes_after);
+            if cli_options.details || report.mode == jottrace::CompactMode::Apply {
+                println!("converted_events: {}", report.converted_events);
+            }
             println!("estimated_bytes_saved: {}", report.estimated_bytes_saved);
-            println!(
-                "sqlite_reclaimable_bytes_before: {}",
-                report.sqlite_reclaimable_bytes_before
-            );
-            println!(
-                "sqlite_reclaimable_bytes: {}",
-                report.sqlite_reclaimable_bytes
-            );
+            if cli_options.details {
+                println!("raw_events_before: {}", report.raw_events_before);
+                println!("zstd_events_before: {}", report.zstd_events_before);
+                println!("raw_events_after: {}", report.raw_events_after);
+                println!("zstd_events_after: {}", report.zstd_events_after);
+                println!(
+                    "unsupported_codec_events: {}",
+                    report.unsupported_codec_events
+                );
+                println!("skipped_raw_events: {}", report.skipped_raw_events);
+                println!("skipped_small_events: {}", report.skipped_small_events);
+                println!(
+                    "skipped_not_smaller_events: {}",
+                    report.skipped_not_smaller_events
+                );
+                println!(
+                    "skipped_round_trip_failed_events: {}",
+                    report.skipped_round_trip_failed_events
+                );
+                println!("stored_bytes_before: {}", report.stored_bytes_before);
+                println!("stored_bytes_after: {}", report.stored_bytes_after);
+                println!(
+                    "sqlite_reclaimable_bytes_before: {}",
+                    report.sqlite_reclaimable_bytes_before
+                );
+            }
+            if cli_options.details || report.mode != jottrace::CompactMode::DryRun {
+                println!(
+                    "sqlite_reclaimable_bytes: {}",
+                    report.sqlite_reclaimable_bytes
+                );
+            }
             println!(
                 "unresolved_ingest_errors: {}",
                 report.unresolved_ingest_errors
@@ -423,9 +470,11 @@ fn run_compact_command(args: impl Iterator<Item = String>) -> ExitCode {
                     "next: rerun with `jottrace compact --apply` to rewrite eligible payloads"
                 );
             }
-            println!(
-                "disk_reclaim: after applying, run `jottrace compact --vacuum` to reclaim free SQLite pages"
-            );
+            if cli_options.details || report.mode == jottrace::CompactMode::Apply {
+                println!(
+                    "disk_reclaim: after applying, run `jottrace compact --vacuum` to reclaim free SQLite pages"
+                );
+            }
             ExitCode::SUCCESS
         }
         Err(error) => {
@@ -439,12 +488,14 @@ fn parse_compact_command(
     mut args: impl Iterator<Item = String>,
 ) -> std::result::Result<CompactCommand, String> {
     let mut options = jottrace::CompactOptions::default();
+    let mut details = false;
     let mut explicit_mode = false;
     let mut batch_size_provided = false;
 
     while let Some(arg) = args.next() {
         match arg.as_str() {
             "--help" | "-h" => return Ok(CompactCommand::Help),
+            "--details" => details = true,
             "--apply" => {
                 if explicit_mode {
                     return Err("compact accepts only one of --apply or --vacuum".to_string());
@@ -488,7 +539,10 @@ fn parse_compact_command(
         }
     }
 
-    Ok(CompactCommand::Run(options))
+    Ok(CompactCommand::Run(CompactCliOptions {
+        compact_options: options,
+        details,
+    }))
 }
 
 fn compact_mode_name(mode: jottrace::CompactMode) -> &'static str {
@@ -500,58 +554,67 @@ fn compact_mode_name(mode: jottrace::CompactMode) -> &'static str {
 }
 
 fn run_doctor_command(args: impl Iterator<Item = String>) -> ExitCode {
-    match parse_simple_command("doctor", args) {
-        Ok(SimpleCommand::Help) => {
+    let options = match parse_detail_command("doctor", args) {
+        Ok(DetailCommand::Help) => {
             print_doctor_help();
             return ExitCode::SUCCESS;
         }
-        Ok(SimpleCommand::Run) => {}
+        Ok(DetailCommand::Run(options)) => options,
         Err(message) => {
             eprintln!("{message}");
             eprintln!("run `jottrace doctor --help` for usage");
             return ExitCode::from(2);
         }
-    }
+    };
     jottrace::update::maybe_spawn_auto_update();
 
     // Keep the CLI responsible for presentation while the library owns the
     // filesystem checks. That makes future commands easier to test directly.
-    match jottrace::run_doctor() {
+    match jottrace::run_doctor_with_options(jottrace::DoctorOptions {
+        include_recent_errors: options.details,
+    }) {
         Ok(report) => {
             println!("jottrace doctor");
-            println!("data_dir: {} (ok)", report.data_dir.display());
+            if options.details {
+                println!("data_dir: {} (ok)", report.data_dir.display());
+            }
             println!("permissions: private (ok)");
             println!(
                 "unresolved_ingest_errors: {}",
                 report.unresolved_ingest_error_count
             );
-            if !report.recent_ingest_errors.is_empty() {
+            if !options.details && report.unresolved_ingest_error_count > 0 {
+                println!("next: run `jottrace doctor --details` to inspect recent ingest errors");
+            }
+            if options.details && !report.recent_ingest_errors.is_empty() {
                 println!(
                     "recent_ingest_errors: {}",
                     report.recent_ingest_errors.len()
                 );
             }
-            for ingest_error in &report.recent_ingest_errors {
-                println!("recent_ingest_error:");
-                println!("  source: {}", ingest_error.source);
-                if let Some(source_session_id) = &ingest_error.source_session_id {
-                    println!("  source_session_id: {source_session_id}");
+            if options.details {
+                for ingest_error in &report.recent_ingest_errors {
+                    println!("recent_ingest_error:");
+                    println!("  source: {}", ingest_error.source);
+                    if let Some(source_session_id) = &ingest_error.source_session_id {
+                        println!("  source_session_id: {source_session_id}");
+                    }
+                    println!("  file: {}", ingest_error.file_path.display());
+                    if let Some(line_number) = ingest_error.line_number {
+                        println!("  line: {line_number}");
+                    }
+                    if let Some(byte_offset) = ingest_error.byte_offset {
+                        println!("  byte_offset: {byte_offset}");
+                    }
+                    if let Some(generation) = ingest_error.generation {
+                        println!("  generation: {generation}");
+                    }
+                    println!("  kind: {}", ingest_error.error_kind);
+                    println!("  first_seen_at: {}", ingest_error.first_seen_at);
+                    println!("  last_seen_at: {}", ingest_error.last_seen_at);
+                    println!("  occurrences: {}", ingest_error.occurrence_count);
+                    println!("  message: {}", ingest_error.message);
                 }
-                println!("  file: {}", ingest_error.file_path.display());
-                if let Some(line_number) = ingest_error.line_number {
-                    println!("  line: {line_number}");
-                }
-                if let Some(byte_offset) = ingest_error.byte_offset {
-                    println!("  byte_offset: {byte_offset}");
-                }
-                if let Some(generation) = ingest_error.generation {
-                    println!("  generation: {generation}");
-                }
-                println!("  kind: {}", ingest_error.error_kind);
-                println!("  first_seen_at: {}", ingest_error.first_seen_at);
-                println!("  last_seen_at: {}", ingest_error.last_seen_at);
-                println!("  occurrences: {}", ingest_error.occurrence_count);
-                println!("  message: {}", ingest_error.message);
             }
             ExitCode::SUCCESS
         }
@@ -563,25 +626,27 @@ fn run_doctor_command(args: impl Iterator<Item = String>) -> ExitCode {
 }
 
 fn run_status_command(args: impl Iterator<Item = String>) -> ExitCode {
-    match parse_simple_command("status", args) {
-        Ok(SimpleCommand::Help) => {
+    let options = match parse_detail_command("status", args) {
+        Ok(DetailCommand::Help) => {
             print_status_help();
             return ExitCode::SUCCESS;
         }
-        Ok(SimpleCommand::Run) => {}
+        Ok(DetailCommand::Run(options)) => options,
         Err(message) => {
             eprintln!("{message}");
             eprintln!("run `jottrace status --help` for usage");
             return ExitCode::from(2);
         }
-    }
+    };
     jottrace::update::maybe_spawn_auto_update();
 
     match jottrace::run_status() {
         Ok(report) => {
             println!("jottrace status");
-            println!("db: {}", report.db_path.display());
-            println!("schema_version: {}", report.schema_version);
+            if options.details {
+                println!("db: {}", report.db_path.display());
+                println!("schema_version: {}", report.schema_version);
+            }
             println!("sessions: {}", report.session_count);
             println!("events: {}", report.event_count);
             println!(
@@ -604,13 +669,13 @@ fn print_help() {
     println!("Preserve AI coding-session transcripts into a local journal.");
     println!();
     println!("Usage:");
-    println!("  jottrace compact [--apply|--vacuum] [--batch-size <n>]");
-    println!("  jottrace doctor");
+    println!("  jottrace compact [--apply|--vacuum] [--batch-size <n>] [--details]");
+    println!("  jottrace doctor [--details]");
     println!(
         "  jottrace events --source <source> --session <source_session_id> (--limit <n>|--all)"
     );
-    println!("  jottrace ingest");
-    println!("  jottrace status");
+    println!("  jottrace ingest [--details]");
+    println!("  jottrace status [--details]");
     println!("  jottrace update");
     println!("  jottrace upgrade");
     println!("  jottrace web [--port <port>] [--once]");
@@ -623,12 +688,13 @@ fn print_compact_help() {
     println!("Report or rewrite eligible raw event payloads as zstd.");
     println!();
     println!("Usage:");
-    println!("  jottrace compact [--apply|--vacuum] [--batch-size <n>]");
+    println!("  jottrace compact [--apply|--vacuum] [--batch-size <n>] [--details]");
     println!();
     println!("Options:");
     println!("  --apply           Rewrite eligible raw payload rows in bounded batches");
     println!("  --vacuum          Reclaim free SQLite pages after compaction");
     println!("  --batch-size <n>  Raw rows to inspect per batch (default: 1000, max: 10000)");
+    println!("  --details         Include database path and full compaction counters");
 }
 
 fn print_events_help() {
@@ -652,7 +718,10 @@ fn print_doctor_help() {
     println!("Check the journal directory, database, permissions, and ingest errors.");
     println!();
     println!("Usage:");
-    println!("  jottrace doctor");
+    println!("  jottrace doctor [--details]");
+    println!();
+    println!("Options:");
+    println!("  --details  Include data directory and recent ingest-error fields");
 }
 
 fn print_ingest_help() {
@@ -660,7 +729,10 @@ fn print_ingest_help() {
     println!("Preserve Claude and Codex JSONL sessions into the local journal.");
     println!();
     println!("Usage:");
-    println!("  jottrace ingest");
+    println!("  jottrace ingest [--details]");
+    println!();
+    println!("Options:");
+    println!("  --details  Include the database path");
 }
 
 fn print_status_help() {
@@ -668,7 +740,10 @@ fn print_status_help() {
     println!("Print journal schema, session, event, and ingest-error counts.");
     println!();
     println!("Usage:");
-    println!("  jottrace status");
+    println!("  jottrace status [--details]");
+    println!();
+    println!("Options:");
+    println!("  --details  Include the database path and schema version");
 }
 
 fn print_update_help() {
