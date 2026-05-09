@@ -304,7 +304,7 @@ struct SourceEvent {
 enum OpenCodeTable {
     Message,
     Part,
-    SessionEntry,
+    SessionMessage,
 }
 
 impl OpenCodeTable {
@@ -312,7 +312,7 @@ impl OpenCodeTable {
         match self {
             Self::Message => "message",
             Self::Part => "part",
-            Self::SessionEntry => "session_entry",
+            Self::SessionMessage => "session_message",
         }
     }
 
@@ -320,7 +320,7 @@ impl OpenCodeTable {
         match self {
             Self::Message => 1,
             Self::Part => 2,
-            Self::SessionEntry => 3,
+            Self::SessionMessage => 3,
         }
     }
 
@@ -342,12 +342,12 @@ impl OpenCodeTable {
                  FROM part
                  WHERE session_id = ?1"
             }
-            Self::SessionEntry => {
+            Self::SessionMessage => {
                 "SELECT id, session_id, NULL, type, time_created, time_updated,
                         strftime('%Y-%m-%dT%H:%M:%fZ', time_created / 1000.0, 'unixepoch'),
                         strftime('%Y-%m-%dT%H:%M:%fZ', time_updated / 1000.0, 'unixepoch'),
                         data
-                 FROM session_entry
+                 FROM session_message
                  WHERE session_id = ?1"
             }
         }
@@ -1500,7 +1500,7 @@ fn opencode_session_snapshot(source_file: &SourceFile) -> Result<SqliteSessionSn
     for table in [
         OpenCodeTable::Message,
         OpenCodeTable::Part,
-        OpenCodeTable::SessionEntry,
+        OpenCodeTable::SessionMessage,
     ] {
         events.extend(opencode_row_events(&conn, source_file, table)?);
     }

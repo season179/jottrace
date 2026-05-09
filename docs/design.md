@@ -564,7 +564,7 @@ source without modification.
   `~/.local/share/opencode/storage/{session,message,part,project,session_diff}/`.
 - SQLite appears to be the complete current store in the 2026-05-06 source
   check. The observed database has `session`, `message`, `part`,
-  `session_entry`, `project`, `workspace`, `event`, and `event_sequence`
+  `session_message`, `project`, `workspace`, `event`, and `event_sequence`
   tables; local counts were 62 sessions, 766 messages, and 3,325 parts.
 - The JSON storage tree exists and is source-shaped, but it should stay out of
   reader scope until sanitized fixtures prove whether it is authoritative,

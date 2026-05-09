@@ -1776,7 +1776,7 @@ fn ingest_preserves_opencode_sqlite_sessions_from_sanitized_fixture() {
             "part",
             "message",
             "part",
-            "session_entry"
+            "session_message"
         ]
     );
     assert_eq!(child_events[1]["row"]["data"]["role"], "user");

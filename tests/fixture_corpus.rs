@@ -227,8 +227,8 @@ fn reader_fixture_corpus_has_sanitized_opencode_sqlite_shape() {
             2,
         ),
         (
-            "child session entries",
-            "SELECT count(*) FROM session_entry WHERE session_id = ?1",
+            "child session messages",
+            "SELECT count(*) FROM session_message WHERE session_id = ?1",
             1,
         ),
     ] {

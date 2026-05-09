@@ -61,14 +61,14 @@ CREATE TABLE `part` (
     CONSTRAINT `fk_part_message_id_message_id_fk` FOREIGN KEY (`message_id`) REFERENCES `message`(`id`) ON DELETE CASCADE
 );
 
-CREATE TABLE `session_entry` (
+CREATE TABLE `session_message` (
     `id` text PRIMARY KEY,
     `session_id` text NOT NULL,
     `type` text NOT NULL,
     `time_created` integer NOT NULL,
     `time_updated` integer NOT NULL,
     `data` text NOT NULL,
-    CONSTRAINT `fk_session_entry_session_id_session_id_fk` FOREIGN KEY (`session_id`) REFERENCES `session`(`id`) ON DELETE CASCADE
+    CONSTRAINT `fk_session_message_session_id_session_id_fk` FOREIGN KEY (`session_id`) REFERENCES `session`(`id`) ON DELETE CASCADE
 );
 
 CREATE TABLE `event_sequence` (
@@ -260,7 +260,7 @@ INSERT INTO `part` (
     '{"type":"text","text":"Synthetic child-session response.","time":{"start":1770000005000,"end":1770000007000}}'
 );
 
-INSERT INTO `session_entry` (
+INSERT INTO `session_message` (
     `id`,
     `session_id`,
     `type`,
