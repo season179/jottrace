@@ -1,5 +1,36 @@
 # Changelog
 
+## v26.5.9 - 2026-05-09
+
+### Summary
+
+- Fixes OpenCode SQLite ingestion after upstream renamed the per-session entry
+  table to `session_message`. Changes since `v26.5.8`.
+
+### Changes
+
+- The OpenCode reader now queries `session_message` instead of the removed
+  `session_entry` table, restoring ingestion for opencode databases on the
+  current schema (drizzle migration `20260312043431_session_message_cursor`
+  and later).
+- OpenCode reader fixture, fixture corpus, CLI test expectations, and the
+  reader design notes have been updated to match the renamed table.
+- Existing `invalid_session_meta` ingest errors recorded against the missing
+  `session_entry` table self-resolve on the next successful ingest of each
+  affected session.
+
+### Commits
+
+- Rename OpenCode session_entry to session_message (ebcdd66)
+
+### Verification
+
+- `scripts/check-version.sh v26.5.9`
+- `cargo fmt --check`
+- `cargo clippy --all-targets -- -D warnings`
+- `cargo test`
+- `jottrace ingest` live verification with `unresolved_ingest_errors: 0`
+
 ## v26.5.8 - 2026-05-07
 
 ### Summary
