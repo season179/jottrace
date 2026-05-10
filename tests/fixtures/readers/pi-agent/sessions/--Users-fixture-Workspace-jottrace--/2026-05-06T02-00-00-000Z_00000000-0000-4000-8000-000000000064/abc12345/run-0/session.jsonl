@@ -1,0 +1,4 @@
+{"type":"session","id":"00000000-0000-4000-8000-000000000164","timestamp":"2026-05-06T02:01:00.000Z","cwd":"/Users/fixture/Workspace/jottrace","version":3}
+{"type":"model_change","id":"model-fixture-164","parentId":null,"timestamp":"2026-05-06T02:01:01.000Z","provider":"openrouter","modelId":"fixture-model"}
+{"type":"message","id":"user-fixture-164","parentId":"model-fixture-164","timestamp":"2026-05-06T02:01:02.000Z","message":{"role":"user","timestamp":"2026-05-06T02:01:02.000Z","content":[{"type":"text","text":"Subagent run for fixture."}]}}
+{"type":"message","id":"assistant-fixture-164","parentId":"user-fixture-164","timestamp":"2026-05-06T02:01:03.000Z","message":{"role":"assistant","timestamp":"2026-05-06T02:01:03.000Z","model":"fixture-model","provider":"openrouter","api":"responses","stopReason":"end","usage":{"inputTokens":40,"outputTokens":12},"content":[{"type":"text","text":"Subagent reply."}]}}

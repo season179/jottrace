@@ -42,6 +42,8 @@ const HERMES_DB_ERROR_SESSION_ID: &str = "state.db";
 const MAX_SESSION_HEADER_BYTES: u64 = 64 * 1024;
 const FACTORY_SESSION_START_MISSING_MESSAGE: &str =
     "factory session file has no committed session_start line within the header limit";
+const PI_AGENT_SESSION_HEADER_MISSING_MESSAGE: &str =
+    "Pi agent session file has no committed session event line within the header limit";
 const FNV_OFFSET_BASIS: u64 = 0xcbf29ce484222325;
 const FNV_PRIME: u64 = 0x100000001b3;
 const INVALID_JSON_ERROR_KIND: &str = "invalid_json";
@@ -89,6 +91,7 @@ enum SourceSessionIdKind {
     CodexSessionMeta,
     GeminiChatJson,
     FactorySessionStart,
+    PiAgentSessionHeader,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -561,21 +564,41 @@ fn discover_pi_agent_session_files() -> Result<Vec<SourceFile>> {
     paths.sort();
     paths.dedup();
 
-    paths
+    let mut source_files = paths
         .into_iter()
         .map(|path| {
-            let source_session_id = pi_source_session_id_from_path(&path)?;
+            let (source_session_id, source_session_id_kind, parent_source_session_id) =
+                if let Some(nested) = pi_agent_nested_run_info(&path) {
+                    (
+                        nested.placeholder_source_session_id,
+                        SourceSessionIdKind::PiAgentSessionHeader,
+                        Some(nested.parent_source_session_id),
+                    )
+                } else {
+                    (
+                        pi_source_session_id_from_path(&path)?,
+                        SourceSessionIdKind::Known,
+                        None,
+                    )
+                };
             Ok(SourceFile {
                 source: PI_AGENT_SOURCE,
                 source_session_id,
-                source_session_id_kind: SourceSessionIdKind::Known,
-                parent_source_session_id: None,
+                source_session_id_kind,
+                parent_source_session_id,
                 metadata_path: None,
                 source_format: SourceFormat::Jsonl,
                 path,
             })
         })
-        .collect()
+        .collect::<Result<Vec<_>>>()?;
+    source_files.sort_by(|left, right| {
+        left.parent_source_session_id
+            .is_some()
+            .cmp(&right.parent_source_session_id.is_some())
+            .then_with(|| left.path.cmp(&right.path))
+    });
+    Ok(source_files)
 }
 
 fn discover_factory_session_files() -> Result<Vec<SourceFile>> {
@@ -1327,6 +1350,10 @@ fn resolve_source_file(
         }
         SourceSessionIdKind::FactorySessionStart => (
             factory_source_session_id_from_file(&source_file.path)?,
+            None,
+        ),
+        SourceSessionIdKind::PiAgentSessionHeader => (
+            pi_agent_source_session_id_from_file(&source_file.path)?,
             None,
         ),
         SourceSessionIdKind::Known => unreachable!("known source files return early"),
@@ -2931,29 +2958,7 @@ fn validate_source_file_header(source_file: &SourceFile) -> Result<()> {
 }
 
 fn validate_pi_source_session_header(path: &Path, source_session_id: &str) -> Result<()> {
-    let first_line = first_committed_line(
-        path,
-        MAX_SESSION_HEADER_BYTES,
-        "Pi agent session file has no committed session event line within the header limit",
-    )?
-    .ok_or_else(|| {
-        invalid_session_meta(
-            path,
-            "Pi agent session file has no committed session event line within the header limit",
-        )
-    })?;
-    let header = serde_json::from_slice::<EventHeader<'_>>(&first_line)
-        .map_err(|source| invalid_session_meta(path, source.to_string()))?;
-    if header.event_type != Some("session") {
-        return Err(invalid_session_meta(
-            path,
-            "Pi agent session file does not start with a session event",
-        ));
-    }
-    let id = header
-        .id
-        .filter(|id| !id.is_empty())
-        .ok_or_else(|| invalid_session_meta(path, "Pi agent session id is missing"))?;
+    let id = pi_agent_source_session_id_from_file(path)?;
     if id != source_session_id {
         return Err(invalid_session_meta(
             path,
@@ -3032,6 +3037,57 @@ fn pi_source_session_id_from_path(path: &Path) -> Result<String> {
         return Err(invalid_path(path, "Pi agent session id suffix is empty"));
     }
     Ok(source_session_id.to_string())
+}
+
+fn pi_agent_source_session_id_from_file(path: &Path) -> Result<String> {
+    let first_line = first_committed_line(
+        path,
+        MAX_SESSION_HEADER_BYTES,
+        PI_AGENT_SESSION_HEADER_MISSING_MESSAGE,
+    )?
+    .ok_or_else(|| invalid_session_meta(path, PI_AGENT_SESSION_HEADER_MISSING_MESSAGE))?;
+    let header = serde_json::from_slice::<EventHeader<'_>>(&first_line)
+        .map_err(|source| invalid_session_meta(path, source.to_string()))?;
+    if header.event_type != Some("session") {
+        return Err(invalid_session_meta(
+            path,
+            "Pi agent session file does not start with a session event",
+        ));
+    }
+    header
+        .id
+        .map(str::to_string)
+        .filter(|id| !id.is_empty())
+        .ok_or_else(|| invalid_session_meta(path, "Pi agent session id is missing"))
+}
+
+struct PiAgentNestedRunInfo {
+    parent_source_session_id: String,
+    placeholder_source_session_id: String,
+}
+
+fn pi_agent_nested_run_info(path: &Path) -> Option<PiAgentNestedRunInfo> {
+    if path.file_stem()?.to_str()? != "session" {
+        return None;
+    }
+    let run_dir = path.parent()?;
+    let run_name = run_dir.file_name()?.to_str()?;
+    let run_index = run_name.strip_prefix("run-")?;
+    if run_index.is_empty() || !run_index.chars().all(|ch| ch.is_ascii_digit()) {
+        return None;
+    }
+    let short_dir = run_dir.parent()?;
+    let short_name = short_dir.file_name()?.to_str()?;
+    let parent_dir = short_dir.parent()?;
+    let parent_dir_name = parent_dir.file_name()?.to_str()?;
+    let (_, parent_uuid) = parent_dir_name.rsplit_once('_')?;
+    if !is_uuid_stem(parent_uuid) {
+        return None;
+    }
+    Some(PiAgentNestedRunInfo {
+        parent_source_session_id: parent_uuid.to_string(),
+        placeholder_source_session_id: format!("{parent_dir_name}/{short_name}/{run_name}"),
+    })
 }
 
 fn parent_source_session_id_from_path(path: &Path, file_stem: &str) -> Option<String> {

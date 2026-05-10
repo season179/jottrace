@@ -28,6 +28,8 @@ const CODEX_ARCHIVED_FIXTURE_SESSION_ID: &str = "00000000-0000-4000-8000-0000000
 const CODEX_LEGACY_FIXTURE_SESSION_ID: &str = "22222222-2222-4222-8222-222222222222";
 const PI_AGENT_FIXTURE_SESSION: &str = "pi-agent/sessions/--Users-fixture-Workspace-jottrace--/2026-05-06T02-00-00-000Z_00000000-0000-4000-8000-000000000064.jsonl";
 const PI_AGENT_FIXTURE_SESSION_ID: &str = "00000000-0000-4000-8000-000000000064";
+const PI_AGENT_NESTED_RUN_FIXTURE_SESSION: &str = "pi-agent/sessions/--Users-fixture-Workspace-jottrace--/2026-05-06T02-00-00-000Z_00000000-0000-4000-8000-000000000064/abc12345/run-0/session.jsonl";
+const PI_AGENT_NESTED_RUN_FIXTURE_SESSION_ID: &str = "00000000-0000-4000-8000-000000000164";
 const GEMINI_FIXTURE_SESSION: &str =
     "gemini-cli/tmp/fixture-project/chats/session-2026-05-06T09-00-gemini000.json";
 const GEMINI_FIXTURE_SESSION_ID: &str = "33333333-3333-4333-8333-333333333333";
@@ -1431,6 +1433,35 @@ fn ingest_is_idempotent_for_unchanged_pi_agent_fixture() {
         )
         .expect("pi event count");
     assert_eq!(event_count, 6);
+
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn ingest_links_pi_agent_nested_run_session_to_parent() {
+    let root = temp_root("ingest-pi-agent-nested-run");
+    let data_dir = root.join(".jottrace");
+    install_pi_agent_fixture(&root);
+    let nested_session_file = install_pi_agent_nested_run_fixture(&root);
+
+    let ingest = run_ingest(&root, &data_dir);
+    assert!(ingest.contains("sessions: 2"));
+    assert!(ingest.contains("unresolved_ingest_errors: 0"));
+
+    let conn = Connection::open(db_path(&data_dir)).expect("open preserved db");
+    let (source_session_id, file_path, parent_source_session_id): (String, String, String) = conn
+        .query_row(
+            "SELECT child.source_session_id, child.file_path, parent.source_session_id
+             FROM sessions AS child
+             JOIN sessions AS parent ON parent.id = child.parent_session_id
+             WHERE child.source = 'pi_agent' AND child.source_session_id = ?1",
+            [PI_AGENT_NESTED_RUN_FIXTURE_SESSION_ID],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .expect("nested pi agent session should be linked to its parent");
+    assert_eq!(source_session_id, PI_AGENT_NESTED_RUN_FIXTURE_SESSION_ID);
+    assert_eq!(PathBuf::from(file_path), nested_session_file);
+    assert_eq!(parent_source_session_id, PI_AGENT_FIXTURE_SESSION_ID);
 
     let _ = fs::remove_dir_all(root);
 }
@@ -4055,6 +4086,16 @@ fn install_pi_agent_fixture(root: &Path) -> PathBuf {
             .expect("Pi fixture path should be under pi-agent"),
     );
     copy_reader_fixture(PI_AGENT_FIXTURE_SESSION, &session_file);
+    session_file
+}
+
+fn install_pi_agent_nested_run_fixture(root: &Path) -> PathBuf {
+    let session_file = root.join(".pi/agent").join(
+        PI_AGENT_NESTED_RUN_FIXTURE_SESSION
+            .strip_prefix("pi-agent/")
+            .expect("Pi nested run fixture path should be under pi-agent"),
+    );
+    copy_reader_fixture(PI_AGENT_NESTED_RUN_FIXTURE_SESSION, &session_file);
     session_file
 }
 
