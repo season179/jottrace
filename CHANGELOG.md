@@ -1,5 +1,32 @@
 # Changelog
 
+## v26.5.10 - 2026-05-10
+
+### Summary
+
+- Restores Pi agent ingestion for nested subagent run sessions, which were
+  previously rejected with `invalid_session_meta` errors. Changes since
+  `v26.5.9`.
+
+### Changes
+
+- Pi agent discovery now recognises nested subagent runs at
+  `~/.pi/agent/sessions/<encoded-cwd>/<timestamp>_<parent-session-id>/<short>/run-N/session.jsonl`
+  and resolves their session id from the first JSONL `session` event instead
+  of the literal `session` filename stem.
+- Nested run sessions are linked to their parent session via the parent UUID
+  extracted from the run directory's grandparent, and pi-agent files are now
+  ingested in parent-first order so linkage resolves on the first pass.
+- Existing `invalid_session_meta` ingest errors recorded against nested
+  Pi agent run files self-resolve on the next successful ingest of each
+  affected session.
+- Reader source inventory documents the nested run shape alongside the
+  top-level layout.
+
+### Commits
+
+- Ingest pi-agent nested subagent run sessions (c629f3b)
+
 ## v26.5.9 - 2026-05-09
 
 ### Summary
