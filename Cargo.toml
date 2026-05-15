@@ -1,11 +1,12 @@
 [package]
 name = "jottrace"
-version = "26.5.10"
+version = "26.5.11"
 edition = "2024"
 license = "MIT"
 description = "Preserve AI coding-session transcripts into a local journal"
 
 [dependencies]
+libc = "0.2"
 rusqlite = { version = "0.39.0", default-features = false, features = ["bundled"] }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = { version = "1.0", features = ["raw_value"] }

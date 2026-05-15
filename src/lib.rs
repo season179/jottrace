@@ -1,12 +1,17 @@
+use std::collections::HashSet;
 use std::env;
 use std::fmt;
 use std::fs::{self, File, OpenOptions};
-use std::io::{self, Write};
+use std::io::{self, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
+use std::sync::{LazyLock, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 #[cfg(unix)]
-use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt, PermissionsExt};
+use std::os::unix::{
+    fs::{DirBuilderExt, OpenOptionsExt, PermissionsExt},
+    io::AsRawFd,
+};
 
 pub mod compact;
 pub mod ingest;
@@ -29,6 +34,8 @@ pub const PRIVATE_DIR_MODE: u32 = 0o700;
 /// current user, with no group/world access.
 pub const PRIVATE_FILE_MODE: u32 = 0o600;
 const DOCTOR_INGEST_ERROR_LIMIT: usize = 5;
+static DATA_LOCK_PROCESS_PATHS: LazyLock<Mutex<HashSet<PathBuf>>> =
+    LazyLock::new(|| Mutex::new(HashSet::new()));
 
 #[derive(Debug)]
 pub enum JottraceError {
@@ -232,17 +239,87 @@ pub fn run_doctor_with_options(options: DoctorOptions) -> Result<DoctorReport> {
     })
 }
 
+// The in-process guard plus OS/file lock are authoritative. `jottrace.lock`
+// stores diagnostic metadata for humans and is removed on clean shutdown for
+// tidiness; its mere presence is not a Unix lock.
 pub(crate) struct DataLock {
+    // Field order matters: `_file` must drop before `_process_guard` so the OS
+    // lock releases before another acquirer can pass the in-process check.
+    _file: File,
+    _process_guard: ProcessDataLock,
     path: PathBuf,
     token: String,
+}
+
+struct ProcessDataLock {
+    path: PathBuf,
 }
 
 pub(crate) fn acquire_data_lock(data_dir: &Path) -> Result<DataLock> {
     ensure_private_dir(data_dir)?;
     let path = data_dir.join(LOCK_FILE_NAME);
+    let process_guard = acquire_process_data_lock(&path)?;
     let token = lock_token();
 
-    let mut file = match create_private_file(&path) {
+    let file = acquire_data_lock_file(&path, &token)?;
+
+    Ok(DataLock {
+        _file: file,
+        _process_guard: process_guard,
+        path,
+        token,
+    })
+}
+
+fn acquire_process_data_lock(path: &Path) -> Result<ProcessDataLock> {
+    // `flock` behavior for duplicate locks inside one process varies by
+    // platform and kernel. Track the path in-process too, preserving the old
+    // atomic `create_new` behavior for same-process callers.
+    let mut paths = locked_process_paths();
+    if !paths.insert(path.to_path_buf()) {
+        return Err(JottraceError::LockHeld(path.to_path_buf()));
+    }
+    Ok(ProcessDataLock {
+        path: path.to_path_buf(),
+    })
+}
+
+fn locked_process_paths() -> std::sync::MutexGuard<'static, HashSet<PathBuf>> {
+    DATA_LOCK_PROCESS_PATHS
+        .lock()
+        .unwrap_or_else(|error| error.into_inner())
+}
+
+impl Drop for ProcessDataLock {
+    fn drop(&mut self) {
+        let mut paths = locked_process_paths();
+        paths.remove(&self.path);
+    }
+}
+
+#[cfg(unix)]
+fn acquire_data_lock_file(path: &Path, token: &str) -> Result<File> {
+    ensure_private_file(path)?;
+    // The private data dir is 0700, so opening an existing file is within the
+    // same-user trust model; the OS lock below decides ownership.
+    let mut file = private_open_options()
+        .read(true)
+        .write(true)
+        .create(true)
+        .open(path)
+        .map_err(|source| JottraceError::Io {
+            path: path.to_path_buf(),
+            source,
+        })?;
+
+    acquire_os_file_lock(&file, path)?;
+    write_data_lock_metadata(&mut file, path, token)?;
+    Ok(file)
+}
+
+#[cfg(not(unix))]
+fn acquire_data_lock_file(path: &Path, token: &str) -> Result<File> {
+    let mut file = match create_private_file(path) {
         Ok(file) => file,
         Err(JottraceError::Io {
             path: error_path,
@@ -252,26 +329,64 @@ pub(crate) fn acquire_data_lock(data_dir: &Path) -> Result<DataLock> {
         }
         Err(error) => return Err(error),
     };
+    write_data_lock_metadata(&mut file, path, token)?;
+    Ok(file)
+}
 
-    if let Err(source) = writeln!(file, "{token}") {
-        let _ = fs::remove_file(&path);
-        return Err(JottraceError::Io {
-            path: path.clone(),
+fn write_data_lock_metadata(file: &mut File, path: &Path, token: &str) -> Result<()> {
+    let metadata = format!("{token}\n");
+
+    // Write first, then trim. That avoids the empty-file window that
+    // truncate-then-write would create when replacing stale metadata.
+    let result: io::Result<()> = (|| {
+        file.seek(SeekFrom::Start(0))?;
+        file.write_all(metadata.as_bytes())?;
+        file.set_len(metadata.len() as u64)?;
+        Ok(())
+    })();
+
+    result.map_err(|source| {
+        let _ = fs::remove_file(path);
+        JottraceError::Io {
+            path: path.to_path_buf(),
             source,
-        });
+        }
+    })
+}
+
+#[cfg(unix)]
+fn acquire_os_file_lock(file: &File, path: &Path) -> Result<()> {
+    let result = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) };
+    if result == 0 {
+        return Ok(());
     }
 
-    Ok(DataLock { path, token })
+    let source = io::Error::last_os_error();
+    if source.kind() == io::ErrorKind::WouldBlock {
+        return Err(JottraceError::LockHeld(path.to_path_buf()));
+    }
+    Err(JottraceError::Io {
+        path: path.to_path_buf(),
+        source,
+    })
+}
+
+fn remove_data_lock_file_if_owned(path: &Path, token: &str) {
+    let contents = match fs::read_to_string(path) {
+        Ok(contents) => contents,
+        Err(_) => return,
+    };
+    if contents.trim_end() == token {
+        let _ = fs::remove_file(path);
+    }
 }
 
 impl Drop for DataLock {
     fn drop(&mut self) {
-        let Ok(contents) = fs::read_to_string(&self.path) else {
-            return;
-        };
-        if contents.trim_end() == self.token {
-            let _ = fs::remove_file(&self.path);
-        }
+        // The process guard and OS lock are authoritative. The file content is
+        // diagnostic metadata for humans and is removed on clean shutdown.
+        remove_data_lock_file_if_owned(&self.path, &self.token);
+        // Dropping `_file` closes the fd and releases the OS lock.
     }
 }
 
@@ -475,6 +590,47 @@ mod tests {
             assert_eq!(mode(&root).expect("dir mode"), PRIVATE_DIR_MODE);
             assert_eq!(mode(&file_path).expect("file mode"), PRIVATE_FILE_MODE);
         }
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn acquire_data_lock_reports_live_contention() {
+        let root = temp_root("live-lock");
+        fs::create_dir_all(&root).expect("create root");
+        fs::set_permissions(&root, fs::Permissions::from_mode(PRIVATE_DIR_MODE))
+            .expect("set private permissions");
+        let _held = acquire_data_lock(&root).expect("hold lock");
+
+        let Err(error) = acquire_data_lock(&root) else {
+            panic!("live lock should be held");
+        };
+        assert!(matches!(error, JottraceError::LockHeld(_)));
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn acquire_data_lock_ignores_stale_metadata_without_os_lock() {
+        let root = temp_root("stale-metadata");
+        fs::create_dir_all(&root).expect("create root");
+        fs::set_permissions(&root, fs::Permissions::from_mode(PRIVATE_DIR_MODE))
+            .expect("set private permissions");
+        let lock_path = root.join(LOCK_FILE_NAME);
+        fs::write(&lock_path, "pid=123\nstarted_at_ns=0").expect("write lock");
+        fs::set_permissions(&lock_path, fs::Permissions::from_mode(PRIVATE_FILE_MODE))
+            .expect("set private file permissions");
+
+        let lock = acquire_data_lock(&root).expect("stale metadata should not block");
+
+        assert_eq!(
+            fs::read_to_string(&lock_path)
+                .expect("read lock")
+                .trim_end(),
+            lock.token
+        );
 
         let _ = fs::remove_dir_all(root);
     }

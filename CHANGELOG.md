@@ -1,5 +1,37 @@
 # Changelog
 
+## v26.5.11 - 2026-05-15
+
+### Summary
+
+- Replaces the brittle DB-mutating command sentinel with OS-level locking on
+  Unix, so stale `jottrace.lock` metadata no longer blocks future ingests after
+  an interrupted process. Changes since `v26.5.10`.
+
+### Changes
+
+- `ingest`, `compact --apply`, and `compact --vacuum` now hold a non-blocking
+  Unix `flock` on `~/.jottrace/jottrace.lock`; the file contents are diagnostic
+  metadata rather than the authoritative lock state.
+- Same-process callers are also guarded by an in-process path lock so
+  multi-threaded use preserves the old atomic single-writer behavior even on
+  platforms with different duplicate-lock semantics.
+- Stale lock metadata is overwritten once the OS lock is acquired, and clean
+  shutdown removes metadata only when it still belongs to the current process.
+- Non-Unix builds keep the previous atomic `create_new` lock-file behavior
+  instead of failing with an unsupported-platform error.
+
+### Commits
+
+- Add OS-level data lock recovery for DB-mutating commands
+
+### Verification
+
+- `cargo fmt --check`
+- `cargo test acquire_data_lock`
+- `cargo test ingest_reports_lock_contention_as_clear_cli_failure`
+- `cargo run -- ingest` live verification with `unresolved_ingest_errors: 0`
+
 ## v26.5.10 - 2026-05-10
 
 ### Summary

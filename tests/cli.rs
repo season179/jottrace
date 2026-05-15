@@ -10,7 +10,10 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use rusqlite::Connection;
 
 #[cfg(unix)]
-use std::os::unix::fs::{MetadataExt, PermissionsExt};
+use std::os::unix::{
+    fs::{MetadataExt, PermissionsExt},
+    io::AsRawFd,
+};
 
 const CLAUDE_FIXTURE_SESSION: &str = "claude-cli/projects/-Users-fixture-Workspace-jottrace/00000000-0000-4000-8000-000000000021.jsonl";
 const CLAUDE_FIXTURE_SESSION_ID: &str = "00000000-0000-4000-8000-000000000021";
@@ -810,16 +813,17 @@ fn ingest_skips_unchanged_same_size_claude_cli_file_after_fingerprint_check() {
     let _ = fs::remove_dir_all(root);
 }
 
+#[cfg(unix)]
 #[test]
 fn ingest_reports_lock_contention_as_clear_cli_failure() {
     let root = temp_root("ingest-lock-held");
     let data_dir = root.join(".jottrace");
     install_primary_claude_fixture(&root);
-    let mut lock_file = jottrace::create_private_file(&data_dir.join(jottrace::LOCK_FILE_NAME))
+    let lock_file = jottrace::create_private_file(&data_dir.join(jottrace::LOCK_FILE_NAME))
         .expect("create held lock");
-    lock_file
-        .write_all(b"held by integration test\n")
-        .expect("write held lock");
+    // Simulate a live DB-mutating process holding the OS-level data lock.
+    let lock_result = unsafe { libc::flock(lock_file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) };
+    assert_eq!(lock_result, 0);
 
     let output = Command::new(binary())
         .arg("ingest")
