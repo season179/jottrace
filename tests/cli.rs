@@ -4273,6 +4273,1208 @@ fn decoded_event_types(data_dir: &Path, source: &str, source_session_id: &str) -
     event_types
 }
 
+fn run_pack(data_dir: &Path, archive: &Path) -> String {
+    let output = Command::new(binary())
+        .args(["pack", "--output"])
+        .arg(archive)
+        .env("JOTTRACE_HOME", data_dir)
+        .output()
+        .expect("run jottrace pack");
+    assert!(
+        output.status.success(),
+        "stdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    String::from_utf8(output.stdout).expect("stdout should be utf-8")
+}
+
+fn run_settle(data_dir: &Path, archive: &Path, force: bool) -> std::process::Output {
+    let mut command = Command::new(binary());
+    command
+        .arg("settle")
+        .arg(archive)
+        .env("JOTTRACE_HOME", data_dir);
+    if force {
+        command.arg("--force");
+    }
+    command.output().expect("run jottrace settle")
+}
+
+#[test]
+fn pack_then_settle_round_trips_ingested_claude_fixture() {
+    let root = temp_root("pack-roundtrip");
+    let src_data = root.join("src/.jottrace");
+    let dst_data = root.join("dst/.jottrace");
+    let archive = root.join("journal.tar.gz");
+    install_primary_claude_fixture(&root);
+
+    let ingest = run_ingest(&root, &src_data);
+    assert!(ingest.contains("sessions: 1"));
+    assert!(ingest.contains("events: 12"));
+
+    let pack_stdout = run_pack(&src_data, &archive);
+    // The archive carries the same session/event totals the source DB reports,
+    // so users can sanity-check the receipt before copying the file.
+    assert!(pack_stdout.contains("sessions: 1"));
+    assert!(pack_stdout.contains("events: 12"));
+    assert!(
+        archive.exists(),
+        "pack must produce the archive at --output"
+    );
+    #[cfg(unix)]
+    assert_eq!(
+        mode(&archive),
+        0o600,
+        "archive permissions should be 0600 since it can contain private transcripts"
+    );
+
+    let settle = run_settle(&dst_data, &archive, false);
+    assert!(
+        settle.status.success(),
+        "stdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&settle.stdout),
+        String::from_utf8_lossy(&settle.stderr)
+    );
+    let settle_stdout = String::from_utf8_lossy(&settle.stdout);
+    assert!(settle_stdout.contains("sessions: 1"));
+    assert!(settle_stdout.contains("events: 12"));
+
+    #[cfg(unix)]
+    {
+        assert_eq!(mode(&dst_data), 0o700);
+        assert_eq!(mode(&db_path(&dst_data)), 0o600);
+    }
+    // The lock file is a runtime artifact and would cause `LockHeld` confusion
+    // on the receiving machine if it travelled in the archive.
+    assert!(!dst_data.join(jottrace::LOCK_FILE_NAME).exists());
+
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn pack_refuses_to_overwrite_existing_archive() {
+    let root = temp_root("pack-no-clobber");
+    let data_dir = root.join(".jottrace");
+    let archive = root.join("journal.tar.gz");
+    install_primary_claude_fixture(&root);
+    run_ingest(&root, &data_dir);
+    run_pack(&data_dir, &archive);
+
+    let second = Command::new(binary())
+        .args(["pack", "--output"])
+        .arg(&archive)
+        .env("JOTTRACE_HOME", &data_dir)
+        .output()
+        .expect("run second pack");
+    assert!(!second.status.success(), "second pack should refuse");
+    let stderr = String::from_utf8_lossy(&second.stderr);
+    assert!(stderr.contains("already exists"));
+
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn settle_refuses_existing_journal_without_force() {
+    let root = temp_root("settle-no-clobber");
+    let src_data = root.join("src/.jottrace");
+    let dst_data = root.join("dst/.jottrace");
+    let archive = root.join("journal.tar.gz");
+    install_primary_claude_fixture(&root);
+    run_ingest(&root, &src_data);
+    run_pack(&src_data, &archive);
+
+    // First settle populates the destination journal.
+    let first = run_settle(&dst_data, &archive, false);
+    assert!(first.status.success());
+
+    // Second settle should refuse without --force.
+    let refused = run_settle(&dst_data, &archive, false);
+    assert!(!refused.status.success());
+    let stderr = String::from_utf8_lossy(&refused.stderr);
+    assert!(stderr.contains("already contains journal data"));
+    assert!(stderr.contains("--force"));
+
+    // --force should succeed.
+    let forced = run_settle(&dst_data, &archive, true);
+    assert!(
+        forced.status.success(),
+        "stdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&forced.stdout),
+        String::from_utf8_lossy(&forced.stderr)
+    );
+
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn pack_help_does_not_initialize_database() {
+    let root = temp_root("pack-help");
+    let data_dir = root.join(".jottrace");
+
+    for help_arg in ["-h", "--help"] {
+        let output = Command::new(binary())
+            .args(["pack", help_arg])
+            .env("JOTTRACE_HOME", &data_dir)
+            .output()
+            .expect("run jottrace pack help");
+        assert!(output.status.success());
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(stdout.contains("jottrace pack"));
+        assert!(stdout.contains("--output"));
+        assert!(!db_path(&data_dir).exists());
+    }
+
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn settle_reports_missing_archive() {
+    let root = temp_root("settle-missing");
+    let data_dir = root.join(".jottrace");
+
+    let output = Command::new(binary())
+        .args(["settle"])
+        .arg(root.join("does-not-exist.tar.gz"))
+        .env("JOTTRACE_HOME", &data_dir)
+        .output()
+        .expect("run jottrace settle");
+    assert!(!output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("not a readable archive file"));
+
+    let _ = fs::remove_dir_all(root);
+}
+
+#[cfg(unix)]
+#[test]
+fn settle_rejects_archive_with_symlink_entry() {
+    use std::os::unix::fs::symlink;
+
+    let root = temp_root("settle-symlink");
+    let staging = root.join("staging");
+    let archive = root.join("evil.tar.gz");
+    let data_dir = root.join(".jottrace");
+
+    // A crafted archive containing a symlink that points outside the journal.
+    // Without the file_type guard, settle's chmod walk would follow the link
+    // and re-permission the target.
+    fs::create_dir_all(&staging).expect("create staging");
+    fs::write(staging.join("db.sqlite"), b"").expect("write placeholder db");
+    symlink("/etc/passwd", staging.join("evil")).expect("create symlink");
+    let tar = Command::new("tar")
+        .args(["-czf"])
+        .arg(&archive)
+        .args(["-C"])
+        .arg(&staging)
+        .arg(".")
+        .status()
+        .expect("run tar to build fixture");
+    assert!(tar.success());
+
+    let output = run_settle(&data_dir, &archive, false);
+    assert!(
+        !output.status.success(),
+        "settle should refuse archives containing symlinks"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("unsafe entry"));
+    assert!(stderr.contains("symbolic link"));
+
+    let _ = fs::remove_dir_all(root);
+}
+
+#[cfg(unix)]
+#[test]
+fn settle_never_writes_symlink_into_journal_home() {
+    use std::os::unix::fs::symlink;
+
+    let root = temp_root("settle-symlink-stage");
+    let fixture = root.join("staging");
+    let archive = root.join("evil.tar.gz");
+    let data_dir = root.join(".jottrace");
+
+    // Build an archive that contains BOTH a regular file and a malicious
+    // symlink. With staging extraction the symlink should never appear under
+    // the live journal directory — it only lands inside the disposable
+    // staging subtree, which is removed when validation rejects it.
+    fs::create_dir_all(&fixture).expect("create fixture");
+    fs::write(fixture.join("db.sqlite"), b"").expect("write placeholder db");
+    symlink("/etc/passwd", fixture.join("evil")).expect("create symlink");
+    let tar = Command::new("tar")
+        .args(["-czf"])
+        .arg(&archive)
+        .args(["-C"])
+        .arg(&fixture)
+        .arg(".")
+        .status()
+        .expect("run tar to build fixture");
+    assert!(tar.success());
+
+    let output = run_settle(&data_dir, &archive, false);
+    assert!(!output.status.success());
+
+    assert!(!data_dir.join("evil").exists());
+    assert!(!data_dir.join("db.sqlite").exists());
+    let symlinked = std::fs::symlink_metadata(data_dir.join("evil"));
+    assert!(
+        symlinked.is_err(),
+        "leftover symlink must not exist after a failed settle"
+    );
+    // The staging dir must also be cleaned up so it does not block the next
+    // settle attempt under the non-empty check.
+    assert!(!data_dir.join(".pending-settle").exists());
+
+    let _ = fs::remove_dir_all(root);
+}
+
+#[cfg(unix)]
+#[test]
+fn settle_preserves_existing_journal_when_archive_is_corrupt() {
+    let root = temp_root("settle-corrupt-archive");
+    let src_data = root.join("src/.jottrace");
+    let dst_data = root.join("dst/.jottrace");
+    let good_archive = root.join("good.tar.gz");
+    let bad_archive = root.join("truncated.tar.gz");
+    install_primary_claude_fixture(&root);
+    run_ingest(&root, &src_data);
+    run_pack(&src_data, &good_archive);
+    run_settle(&dst_data, &good_archive, false);
+
+    // Snapshot the live db.sqlite so we can prove --force did not touch it.
+    let before = fs::read(db_path(&dst_data)).expect("read db before settle");
+
+    // Truncate a real archive so tar errors midway. Without staging this
+    // would happen AFTER `clear_journal_contents` and the user would lose
+    // their previous journal to nothing.
+    let bytes = fs::read(&good_archive).expect("read good archive");
+    fs::write(&bad_archive, &bytes[..200]).expect("write truncated archive");
+
+    let output = run_settle(&dst_data, &bad_archive, true);
+    assert!(
+        !output.status.success(),
+        "tar must reject a truncated input"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.to_lowercase().contains("tar"));
+
+    let after = fs::read(db_path(&dst_data)).expect("read db after failed settle");
+    assert_eq!(
+        before, after,
+        "a failed settle must not modify the existing journal"
+    );
+    assert!(!dst_data.join(".pending-settle").exists());
+
+    let _ = fs::remove_dir_all(root);
+}
+
+#[cfg(unix)]
+#[test]
+fn settle_preserves_existing_journal_when_archive_lacks_database() {
+    // A tarball with no `db.sqlite` is a plausible mistake (wrong archive,
+    // partial pack on a different machine). Without validation, settle --force
+    // would happily wipe the live journal, then `status_for_path` would create
+    // a fresh empty database in its place — silent data loss with a 0-event
+    // success report.
+    let root = temp_root("settle-archive-no-db");
+    let src_data = root.join("src/.jottrace");
+    let dst_data = root.join("dst/.jottrace");
+    let good_archive = root.join("good.tar.gz");
+    let empty_archive = root.join("no-db.tar.gz");
+    install_primary_claude_fixture(&root);
+    run_ingest(&root, &src_data);
+    run_pack(&src_data, &good_archive);
+    run_settle(&dst_data, &good_archive, false);
+
+    let before = fs::read(db_path(&dst_data)).expect("read db before settle");
+
+    // Build an archive that contains only an unrelated file.
+    let fixture = root.join("decoy");
+    fs::create_dir_all(&fixture).expect("create decoy");
+    fs::write(fixture.join("README"), b"not a journal").expect("write decoy entry");
+    let tar = Command::new("tar")
+        .args(["-czf"])
+        .arg(&empty_archive)
+        .args(["-C"])
+        .arg(&fixture)
+        .arg(".")
+        .status()
+        .expect("run tar to build decoy");
+    assert!(tar.success());
+
+    let output = run_settle(&dst_data, &empty_archive, true);
+    assert!(
+        !output.status.success(),
+        "settle must refuse an archive that omits db.sqlite"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("db.sqlite"));
+    assert!(stderr.contains("does not contain"));
+
+    let after = fs::read(db_path(&dst_data)).expect("read db after failed settle");
+    assert_eq!(
+        before, after,
+        "a failed settle must not modify the existing journal"
+    );
+    assert!(!dst_data.join(".pending-settle").exists());
+
+    let _ = fs::remove_dir_all(root);
+}
+
+#[cfg(unix)]
+#[test]
+fn settle_preserves_existing_journal_when_archive_database_is_blank() {
+    // A zero-byte `db.sqlite` is treated by SQLite as a freshly created
+    // database with `user_version = 0`. `storage::open_database` would migrate
+    // it to LATEST_SCHEMA_VERSION and report success on the very kind of
+    // broken archive we want to reject. The validator must reach into the
+    // user_version pragma BEFORE we touch the live journal.
+    let root = temp_root("settle-archive-blank-db");
+    let src_data = root.join("src/.jottrace");
+    let dst_data = root.join("dst/.jottrace");
+    let good_archive = root.join("good.tar.gz");
+    let blank_archive = root.join("blank-db.tar.gz");
+    install_primary_claude_fixture(&root);
+    run_ingest(&root, &src_data);
+    run_pack(&src_data, &good_archive);
+    run_settle(&dst_data, &good_archive, false);
+
+    let before = fs::read(db_path(&dst_data)).expect("read db before settle");
+
+    let fixture = root.join("blank");
+    fs::create_dir_all(&fixture).expect("create blank fixture");
+    fs::write(fixture.join("db.sqlite"), b"").expect("write zero-byte db");
+    let tar = Command::new("tar")
+        .args(["-czf"])
+        .arg(&blank_archive)
+        .args(["-C"])
+        .arg(&fixture)
+        .arg(".")
+        .status()
+        .expect("run tar to build blank fixture");
+    assert!(tar.success());
+
+    let output = run_settle(&dst_data, &blank_archive, true);
+    assert!(
+        !output.status.success(),
+        "settle must refuse an archive whose db.sqlite has no Jottrace schema"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("Jottrace"));
+
+    let after = fs::read(db_path(&dst_data)).expect("read db after failed settle");
+    assert_eq!(
+        before, after,
+        "a failed settle must not modify the existing journal"
+    );
+    assert!(!dst_data.join(".pending-settle").exists());
+
+    let _ = fs::remove_dir_all(root);
+}
+
+#[cfg(unix)]
+#[test]
+fn settle_preserves_existing_journal_when_archive_db_has_lookalike_tables() {
+    // A `db.sqlite` whose `user_version` falls in Jottrace's accepted range
+    // could still expose tables named `sessions`/`events`/`ingest_errors`
+    // with completely unrelated columns. The name-only check would have
+    // waved this archive through; the column-aware probe must refuse it
+    // before `clear_journal_contents` wipes the live data.
+    let root = temp_root("settle-archive-lookalike-tables");
+    let src_data = root.join("src/.jottrace");
+    let dst_data = root.join("dst/.jottrace");
+    let good_archive = root.join("good.tar.gz");
+    let lookalike_archive = root.join("lookalike.tar.gz");
+    install_primary_claude_fixture(&root);
+    run_ingest(&root, &src_data);
+    run_pack(&src_data, &good_archive);
+    run_settle(&dst_data, &good_archive, false);
+
+    let before = fs::read(db_path(&dst_data)).expect("read db before settle");
+
+    let fixture = root.join("lookalike");
+    fs::create_dir_all(&fixture).expect("create lookalike fixture");
+    let lookalike_db_path = fixture.join("db.sqlite");
+    {
+        let conn = Connection::open(&lookalike_db_path).expect("create lookalike sqlite db");
+        // Same table names, none of the columns Jottrace's queries touch.
+        conn.execute("CREATE TABLE sessions (only TEXT)", [])
+            .expect("create lookalike sessions");
+        conn.execute("CREATE TABLE events (only TEXT)", [])
+            .expect("create lookalike events");
+        conn.execute("CREATE TABLE ingest_errors (only TEXT)", [])
+            .expect("create lookalike ingest_errors");
+        conn.pragma_update(None, "user_version", 5_i64)
+            .expect("set user_version");
+    }
+    let tar = Command::new("tar")
+        .args(["-czf"])
+        .arg(&lookalike_archive)
+        .args(["-C"])
+        .arg(&fixture)
+        .arg(".")
+        .status()
+        .expect("run tar to build lookalike fixture");
+    assert!(tar.success());
+
+    let output = run_settle(&dst_data, &lookalike_archive, true);
+    assert!(
+        !output.status.success(),
+        "settle must refuse a SQLite database whose tables have unrelated schemas"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("Jottrace database")
+            && (stderr.contains("no such column") || stderr.contains("unexpected schema")),
+        "stderr should explain why the database was rejected, got: {stderr}"
+    );
+
+    let after = fs::read(db_path(&dst_data)).expect("read db after failed settle");
+    assert_eq!(
+        before, after,
+        "a failed settle must not modify the existing journal"
+    );
+    assert!(!dst_data.join(".pending-settle").exists());
+
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn pack_refuses_when_journal_has_no_database() {
+    // A JOTTRACE_HOME without `db.sqlite` (e.g. auto-created by the updater
+    // before any ingest has run) used to produce a "successful" archive that
+    // `settle` later rejected — silent failure on the producing side. Pack
+    // must surface the missing database immediately so the user does not ship
+    // a useless tar.gz to another machine.
+    let root = temp_root("pack-empty-journal");
+    let data_dir = root.join(".jottrace");
+    fs::create_dir_all(&data_dir).expect("create empty journal");
+    #[cfg(unix)]
+    {
+        fs::set_permissions(&data_dir, fs::Permissions::from_mode(0o700))
+            .expect("set private permissions on empty journal");
+    }
+    let archive = root.join("empty-journal.tar.gz");
+
+    let output = Command::new(binary())
+        .args(["pack", "--output"])
+        .arg(&archive)
+        .env("JOTTRACE_HOME", &data_dir)
+        .output()
+        .expect("run jottrace pack");
+    assert!(
+        !output.status.success(),
+        "pack must refuse a journal directory with no db.sqlite"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("no db.sqlite") || stderr.contains("has no db.sqlite"),
+        "stderr should explain the missing database, got: {stderr}"
+    );
+    assert!(
+        !archive.exists(),
+        "pack must not leave a partial archive after refusing the journal"
+    );
+
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn pack_excludes_stale_pending_settle_directory() {
+    // A previous `settle` that crashed mid-flight can leave a `.pending-settle`
+    // directory in the live journal. Packing it would yield an archive whose
+    // own settle creates `.pending-settle/.pending-settle`, breaking the
+    // staged-rename step after `clear_journal_contents` had already wiped
+    // the receiving journal. Pack must skip the staging dir.
+    let root = temp_root("pack-skip-pending-settle");
+    let src_data = root.join("src/.jottrace");
+    let dst_data = root.join("dst/.jottrace");
+    let archive = root.join("journal.tar.gz");
+    install_primary_claude_fixture(&root);
+    run_ingest(&root, &src_data);
+
+    // Simulate a crashed settle by hand: drop a stray `.pending-settle/`
+    // entry into the source journal that pack would otherwise pick up.
+    let stale = src_data.join(".pending-settle");
+    fs::create_dir_all(&stale).expect("seed stale pending-settle dir");
+    fs::write(stale.join("leftover"), b"crash debris").expect("seed stale file");
+
+    run_pack(&src_data, &archive);
+
+    // Listing the archive: the staging dir must not appear.
+    let list = Command::new("tar")
+        .args(["-tzf"])
+        .arg(&archive)
+        .output()
+        .expect("list packed archive");
+    assert!(list.status.success());
+    let entries = String::from_utf8_lossy(&list.stdout);
+    assert!(
+        !entries.contains(".pending-settle"),
+        "packed archive must not contain the staging dir, got entries:\n{entries}"
+    );
+
+    // And the resulting archive must settle cleanly end-to-end.
+    let settle = run_settle(&dst_data, &archive, false);
+    assert!(
+        settle.status.success(),
+        "stdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&settle.stdout),
+        String::from_utf8_lossy(&settle.stderr)
+    );
+
+    let _ = fs::remove_dir_all(root);
+}
+
+#[cfg(unix)]
+#[test]
+fn settle_allows_destination_with_only_runtime_sentinels() {
+    // On installer-managed binaries, `maybe_spawn_auto_update` can drop an
+    // `auto-update-check` stamp into a freshly created `JOTTRACE_HOME`
+    // before any ingest has run. The user's first settle then sees a
+    // non-empty directory and refuses without `--force` — which would
+    // suggest the new machine had real journal data worth protecting, even
+    // though those files are runtime artefacts the receiving machine
+    // re-creates as needed. The empty check must look past them.
+    let root = temp_root("settle-with-only-runtime-sentinels");
+    let src_data = root.join("src/.jottrace");
+    let dst_data = root.join("dst/.jottrace");
+    let archive = root.join("journal.tar.gz");
+    install_primary_claude_fixture(&root);
+    run_ingest(&root, &src_data);
+    run_pack(&src_data, &archive);
+
+    // Seed only runtime sentinels on the destination — no real journal data.
+    fs::create_dir_all(&dst_data).expect("create destination dir");
+    fs::set_permissions(&dst_data, fs::Permissions::from_mode(0o700)).expect("set private mode");
+    fs::write(dst_data.join("auto-update-check"), b"").expect("seed auto-update sentinel");
+
+    let output = run_settle(&dst_data, &archive, false);
+    assert!(
+        output.status.success(),
+        "settle without --force should treat a directory holding only runtime sentinels as empty; stdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(db_path(&dst_data).exists(), "db.sqlite should be restored");
+
+    let _ = fs::remove_dir_all(root);
+}
+
+#[cfg(unix)]
+#[test]
+fn settle_rejects_archive_with_top_level_pending_settle_entry() {
+    // A crafted (or older/broken) archive may carry a `.pending-settle/`
+    // entry at the top level. Without preflight rejection, extraction would
+    // create `data_dir/.pending-settle/.pending-settle/`, validation would
+    // pass, `clear_journal_contents` would wipe the live journal, and the
+    // rename of `staging/.pending-settle` over `data_dir/.pending-settle`
+    // (the live staging dir) would fail — destroying the user's data.
+    let root = temp_root("settle-archive-with-staging-entry");
+    let src_data = root.join("src/.jottrace");
+    let dst_data = root.join("dst/.jottrace");
+    let good_archive = root.join("good.tar.gz");
+    let bad_archive = root.join("with-staging.tar.gz");
+    install_primary_claude_fixture(&root);
+    run_ingest(&root, &src_data);
+    run_pack(&src_data, &good_archive);
+    run_settle(&dst_data, &good_archive, false);
+
+    let before = fs::read(db_path(&dst_data)).expect("read db before settle");
+
+    // Build a fixture by extracting the good archive, planting a
+    // `.pending-settle/` entry next to `db.sqlite`, and repacking.
+    let fixture = root.join("fixture");
+    fs::create_dir_all(&fixture).expect("create fixture root");
+    let extract = Command::new("tar")
+        .args(["-xzf"])
+        .arg(&good_archive)
+        .args(["-C"])
+        .arg(&fixture)
+        .status()
+        .expect("extract good archive");
+    assert!(extract.success());
+    let stale = fixture.join(".pending-settle");
+    fs::create_dir_all(&stale).expect("seed staging entry");
+    fs::write(stale.join("leftover"), b"crashed settle").expect("seed stale file");
+    let tar = Command::new("tar")
+        .args(["-czf"])
+        .arg(&bad_archive)
+        .args(["-C"])
+        .arg(&fixture)
+        .arg(".")
+        .status()
+        .expect("repack with staging entry");
+    assert!(tar.success());
+
+    let output = run_settle(&dst_data, &bad_archive, true);
+    assert!(
+        !output.status.success(),
+        "settle must refuse an archive carrying a .pending-settle/ entry"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("reserved top-level entry"),
+        "stderr should explain why the archive was rejected, got: {stderr}"
+    );
+
+    let after = fs::read(db_path(&dst_data)).expect("read db after failed settle");
+    assert_eq!(
+        before, after,
+        "a failed settle must not modify the existing journal"
+    );
+    // Pre-flight rejection means staging is never even created on this path.
+    assert!(!dst_data.join(".pending-settle").exists());
+
+    let _ = fs::remove_dir_all(root);
+}
+
+#[cfg(unix)]
+#[test]
+fn settle_rejects_archive_with_top_level_lock_file_entry() {
+    // A hand-crafted archive (or a manual `tar` of `~/.jottrace` made without
+    // jottrace's pack helper) could include a top-level `jottrace.lock` entry.
+    // Promotion would either rename a staged regular file over the inode our
+    // `_lock` is flocking — breaking mutual exclusion with concurrent
+    // ingest/compact runs — or fail outright if the staged entry is the wrong
+    // kind, after `clear_journal_contents` had already wiped the live data.
+    let root = temp_root("settle-archive-with-lock-entry");
+    let src_data = root.join("src/.jottrace");
+    let dst_data = root.join("dst/.jottrace");
+    let good_archive = root.join("good.tar.gz");
+    let bad_archive = root.join("with-lock.tar.gz");
+    install_primary_claude_fixture(&root);
+    run_ingest(&root, &src_data);
+    run_pack(&src_data, &good_archive);
+    run_settle(&dst_data, &good_archive, false);
+
+    let before = fs::read(db_path(&dst_data)).expect("read db before settle");
+
+    let fixture = root.join("fixture");
+    fs::create_dir_all(&fixture).expect("create fixture root");
+    let extract = Command::new("tar")
+        .args(["-xzf"])
+        .arg(&good_archive)
+        .args(["-C"])
+        .arg(&fixture)
+        .status()
+        .expect("extract good archive");
+    assert!(extract.success());
+    fs::write(fixture.join(jottrace::LOCK_FILE_NAME), b"pid=999").expect("seed lock-file entry");
+    let tar = Command::new("tar")
+        .args(["-czf"])
+        .arg(&bad_archive)
+        .args(["-C"])
+        .arg(&fixture)
+        .arg(".")
+        .status()
+        .expect("repack with lock-file entry");
+    assert!(tar.success());
+
+    let output = run_settle(&dst_data, &bad_archive, true);
+    assert!(
+        !output.status.success(),
+        "settle must refuse an archive carrying a top-level jottrace.lock entry"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("reserved top-level entry"),
+        "stderr should explain why the archive was rejected, got: {stderr}"
+    );
+
+    let after = fs::read(db_path(&dst_data)).expect("read db after failed settle");
+    assert_eq!(
+        before, after,
+        "a failed settle must not modify the existing journal"
+    );
+    assert!(!dst_data.join(".pending-settle").exists());
+
+    let _ = fs::remove_dir_all(root);
+}
+
+#[cfg(unix)]
+#[test]
+fn settle_preserves_existing_journal_when_archive_db_missing_post_v1_columns() {
+    // An archive whose `db.sqlite` claims `user_version = LATEST_SCHEMA_VERSION`
+    // but is missing a column added by a later migration (here:
+    // `sessions.source_metadata` from migration 008) skips the migration
+    // runner entirely. Without column-probe coverage of post-v1 schema, the
+    // validator would have nodded the archive through. The receiving machine
+    // would then fail on the first ingest after the live journal had already
+    // been wiped.
+    let root = temp_root("settle-archive-missing-late-column");
+    let src_data = root.join("src/.jottrace");
+    let dst_data = root.join("dst/.jottrace");
+    let good_archive = root.join("good.tar.gz");
+    let stripped_archive = root.join("stripped.tar.gz");
+    install_primary_claude_fixture(&root);
+    run_ingest(&root, &src_data);
+    run_pack(&src_data, &good_archive);
+    run_settle(&dst_data, &good_archive, false);
+
+    let before = fs::read(db_path(&dst_data)).expect("read db before settle");
+
+    // Construct a Jottrace-shaped DB at LATEST_SCHEMA_VERSION but with the
+    // `source_metadata` column omitted from `sessions`.
+    let fixture = root.join("stripped");
+    fs::create_dir_all(&fixture).expect("create stripped fixture");
+    let stripped_db = fixture.join("db.sqlite");
+    {
+        let conn = Connection::open(&stripped_db).expect("create stripped sqlite db");
+        conn.execute_batch(
+            "CREATE TABLE sessions (
+                id INTEGER PRIMARY KEY,
+                source TEXT NOT NULL,
+                source_session_id TEXT NOT NULL,
+                file_path TEXT,
+                cwd TEXT,
+                parent_session_id INTEGER,
+                started_at TEXT,
+                ended_at TEXT,
+                current_generation INTEGER NOT NULL DEFAULT 0,
+                file_mtime INTEGER,
+                file_size INTEGER,
+                content_fingerprint TEXT,
+                next_read_offset INTEGER NOT NULL DEFAULT 0,
+                event_count INTEGER NOT NULL DEFAULT 0,
+                last_read_at TEXT,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            );
+            CREATE TABLE events (
+                session_id INTEGER NOT NULL,
+                generation INTEGER NOT NULL,
+                seq INTEGER NOT NULL,
+                ts TEXT,
+                payload BLOB NOT NULL,
+                codec TEXT NOT NULL,
+                payload_size INTEGER NOT NULL,
+                created_at TEXT NOT NULL,
+                PRIMARY KEY (session_id, generation, seq)
+            );
+            CREATE TABLE ingest_errors (
+                id INTEGER PRIMARY KEY,
+                source TEXT NOT NULL,
+                source_session_id TEXT,
+                session_id INTEGER,
+                file_path TEXT NOT NULL,
+                generation INTEGER,
+                byte_offset INTEGER,
+                line_number INTEGER,
+                error_kind TEXT NOT NULL,
+                message TEXT NOT NULL,
+                first_seen_at TEXT NOT NULL,
+                last_seen_at TEXT NOT NULL,
+                occurrence_count INTEGER NOT NULL DEFAULT 1,
+                resolved_at TEXT,
+                resolution_note TEXT
+            );",
+        )
+        .expect("create stripped tables");
+        // Claim the latest schema version so the migration runner skips and
+        // only the column-aware probe can refuse this archive.
+        conn.pragma_update(None, "user_version", 8_i64)
+            .expect("set user_version");
+    }
+    let tar = Command::new("tar")
+        .args(["-czf"])
+        .arg(&stripped_archive)
+        .args(["-C"])
+        .arg(&fixture)
+        .arg(".")
+        .status()
+        .expect("repack stripped fixture");
+    assert!(tar.success());
+
+    let output = run_settle(&dst_data, &stripped_archive, true);
+    assert!(
+        !output.status.success(),
+        "settle must refuse an archive missing post-v1 schema columns"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("unexpected schema") && stderr.contains("source_metadata"),
+        "stderr should explain the missing column, got: {stderr}"
+    );
+
+    let after = fs::read(db_path(&dst_data)).expect("read db after failed settle");
+    assert_eq!(
+        before, after,
+        "a failed settle must not modify the existing journal"
+    );
+    assert!(!dst_data.join(".pending-settle").exists());
+
+    let _ = fs::remove_dir_all(root);
+}
+
+#[cfg(unix)]
+#[test]
+fn settle_rejects_symlink_archive_before_extraction() {
+    // The threat: tar applies archive entries in stream order. A symlink
+    // member followed by a regular file underneath that symlink (e.g.
+    // `link -> /tmp/out` then `link/file`) lets the second write follow the
+    // link and land outside the staging subtree on platforms where tar does
+    // not refuse this by default. Pre-flight rejection means tar is never
+    // invoked in extract mode for the archive at all, so .pending-settle is
+    // never created and no on-disk symlink is ever materialised.
+    use std::os::unix::fs::symlink;
+
+    let root = temp_root("settle-symlink-pre-extract");
+    let fixture = root.join("evil");
+    let archive = root.join("evil.tar.gz");
+    let data_dir = root.join(".jottrace");
+    fs::create_dir_all(&fixture).expect("create fixture");
+    fs::write(fixture.join("db.sqlite"), b"").expect("write placeholder db");
+    symlink("/etc/passwd", fixture.join("link")).expect("create symlink");
+    let tar = Command::new("tar")
+        .args(["-czf"])
+        .arg(&archive)
+        .args(["-C"])
+        .arg(&fixture)
+        .arg(".")
+        .status()
+        .expect("run tar to build fixture");
+    assert!(tar.success());
+
+    let output = run_settle(&data_dir, &archive, false);
+    assert!(!output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("unsafe entry"));
+    assert!(stderr.contains("symbolic link"));
+
+    // With pre-flight inspection, staging is NEVER created on the rejection
+    // path. The previous architecture created an empty `.pending-settle` and
+    // relied on the StagingGuard drop to clean up; this is the strictly
+    // stronger guarantee that catches a class of attacks tar could otherwise
+    // commit between the create-staging and the validation step.
+    assert!(
+        !data_dir.join(".pending-settle").exists(),
+        "rejected archives must not leave staging artifacts"
+    );
+
+    let _ = fs::remove_dir_all(root);
+}
+
+#[cfg(unix)]
+#[test]
+fn settle_preserves_existing_journal_when_archive_db_is_non_jottrace_sqlite() {
+    // A SQLite file from another application can carry a `user_version` that
+    // falls inside Jottrace's 1..=LATEST_SCHEMA_VERSION range and still lack
+    // the tables Jottrace's queries need. Without a table-existence check,
+    // the validator would have nodded the archive through, `clear_journal_contents`
+    // would wipe the live journal, and the next reader would fail trying to
+    // touch a `sessions` table that does not exist — by which time the
+    // previous journal is already gone.
+    let root = temp_root("settle-archive-non-jottrace-db");
+    let src_data = root.join("src/.jottrace");
+    let dst_data = root.join("dst/.jottrace");
+    let good_archive = root.join("good.tar.gz");
+    let bogus_archive = root.join("non-jottrace.tar.gz");
+    install_primary_claude_fixture(&root);
+    run_ingest(&root, &src_data);
+    run_pack(&src_data, &good_archive);
+    run_settle(&dst_data, &good_archive, false);
+
+    let before = fs::read(db_path(&dst_data)).expect("read db before settle");
+
+    let fixture = root.join("non-jottrace");
+    fs::create_dir_all(&fixture).expect("create non-jottrace fixture");
+    let bogus_db_path = fixture.join("db.sqlite");
+    {
+        let conn = Connection::open(&bogus_db_path).expect("create bogus sqlite db");
+        conn.execute("CREATE TABLE unrelated (k TEXT)", [])
+            .expect("create unrelated table");
+        // user_version sits inside Jottrace's accepted range so only a real
+        // table-existence check can refuse this archive.
+        conn.pragma_update(None, "user_version", 5_i64)
+            .expect("set user_version");
+    }
+    let tar = Command::new("tar")
+        .args(["-czf"])
+        .arg(&bogus_archive)
+        .args(["-C"])
+        .arg(&fixture)
+        .arg(".")
+        .status()
+        .expect("run tar to build bogus fixture");
+    assert!(tar.success());
+
+    let output = run_settle(&dst_data, &bogus_archive, true);
+    assert!(
+        !output.status.success(),
+        "settle must refuse a non-Jottrace SQLite database masquerading as a journal"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("Jottrace database")
+            && (stderr.contains("no such table") || stderr.contains("unexpected schema")),
+        "stderr should explain why the database was rejected, got: {stderr}"
+    );
+
+    let after = fs::read(db_path(&dst_data)).expect("read db after failed settle");
+    assert_eq!(
+        before, after,
+        "a failed settle must not modify the existing journal"
+    );
+    assert!(!dst_data.join(".pending-settle").exists());
+
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn settle_rejects_archive_inside_journal_home() {
+    let root = temp_root("settle-self-restore");
+    let data_dir = root.join(".jottrace");
+    install_primary_claude_fixture(&root);
+    run_ingest(&root, &data_dir);
+
+    // Put the archive INSIDE the target journal — `--force` would otherwise
+    // delete the archive via `clear_journal_contents` before tar could read
+    // it, silently turning a plausible "restore from local backup" workflow
+    // into data loss. Pack outside the journal (the producer-side check
+    // refuses outputs landing under JOTTRACE_HOME) and then move the archive
+    // in to simulate a user who copied a backup into their journal.
+    let archive = data_dir.join("self-backup.tar.gz");
+    let staging = root.join("self-backup.staging.tar.gz");
+    run_pack(&data_dir, &staging);
+    fs::rename(&staging, &archive).expect("move archive into journal");
+
+    let output = run_settle(&data_dir, &archive, true);
+    assert!(
+        !output.status.success(),
+        "settling an archive that lives inside JOTTRACE_HOME must fail fast"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("inside the target journal"));
+    assert!(
+        archive.exists(),
+        "the rejection must happen before the archive is touched"
+    );
+
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn pack_refuses_output_inside_source_journal() {
+    // tar's `-C data_dir .` walk would otherwise include the partially-written
+    // archive in its own output and race SQLite sidecars on names like
+    // `db.sqlite-wal`. Pack must refuse the producer-side mistake of writing
+    // its archive into the journal it is reading.
+    let root = temp_root("pack-output-inside-journal");
+    let data_dir = root.join(".jottrace");
+    install_primary_claude_fixture(&root);
+    run_ingest(&root, &data_dir);
+
+    let archive = data_dir.join("self.tar.gz");
+    let output = Command::new(binary())
+        .args(["pack", "--output"])
+        .arg(&archive)
+        .env("JOTTRACE_HOME", &data_dir)
+        .output()
+        .expect("run jottrace pack");
+    assert!(
+        !output.status.success(),
+        "pack must refuse an --output path inside JOTTRACE_HOME"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("inside the source journal"),
+        "stderr should explain the rejection, got: {stderr}"
+    );
+    assert!(
+        !archive.exists(),
+        "pack must not leave a partial archive after refusing the output path"
+    );
+
+    let _ = fs::remove_dir_all(root);
+}
+
+#[cfg(unix)]
+#[test]
+fn settle_rejects_archive_without_required_unique_index() {
+    // An archive whose `db.sqlite` has the right columns and `user_version`
+    // but is missing the unique `(source, source_session_id)` index would
+    // pass earlier validation. The receiving machine's `INSERT OR IGNORE`
+    // pattern would then silently degrade to a regular insert and grow
+    // duplicate session rows on the next ingest. Validation must refuse the
+    // archive before `clear_journal_contents` wipes the live data.
+    let root = temp_root("settle-archive-without-unique-index");
+    let src_data = root.join("src/.jottrace");
+    let dst_data = root.join("dst/.jottrace");
+    let good_archive = root.join("good.tar.gz");
+    let bad_archive = root.join("no-unique-index.tar.gz");
+    install_primary_claude_fixture(&root);
+    run_ingest(&root, &src_data);
+    run_pack(&src_data, &good_archive);
+    run_settle(&dst_data, &good_archive, false);
+
+    let before = fs::read(db_path(&dst_data)).expect("read db before settle");
+
+    // Build a Jottrace-shaped DB at LATEST_SCHEMA_VERSION with every column
+    // the probes look for but WITHOUT the unique session index.
+    let fixture = root.join("no-unique");
+    fs::create_dir_all(&fixture).expect("create fixture");
+    let stripped_db = fixture.join("db.sqlite");
+    {
+        let conn = Connection::open(&stripped_db).expect("create stripped sqlite db");
+        conn.execute_batch(
+            "CREATE TABLE sessions (
+                id INTEGER PRIMARY KEY,
+                source TEXT NOT NULL,
+                source_session_id TEXT NOT NULL,
+                file_path TEXT,
+                cwd TEXT,
+                parent_session_id INTEGER,
+                started_at TEXT,
+                ended_at TEXT,
+                current_generation INTEGER NOT NULL DEFAULT 0,
+                file_mtime INTEGER,
+                file_size INTEGER,
+                content_fingerprint TEXT,
+                next_read_offset INTEGER NOT NULL DEFAULT 0,
+                event_count INTEGER NOT NULL DEFAULT 0,
+                last_read_at TEXT,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                source_metadata TEXT
+            );
+            CREATE TABLE events (
+                session_id INTEGER NOT NULL,
+                generation INTEGER NOT NULL,
+                seq INTEGER NOT NULL,
+                ts TEXT,
+                payload BLOB NOT NULL,
+                codec TEXT NOT NULL,
+                payload_size INTEGER NOT NULL,
+                created_at TEXT NOT NULL,
+                PRIMARY KEY (session_id, generation, seq)
+            ) WITHOUT ROWID;
+            CREATE TABLE ingest_errors (
+                id INTEGER PRIMARY KEY,
+                source TEXT NOT NULL,
+                source_session_id TEXT,
+                session_id INTEGER,
+                file_path TEXT NOT NULL,
+                generation INTEGER,
+                byte_offset INTEGER,
+                line_number INTEGER,
+                error_kind TEXT NOT NULL,
+                message TEXT NOT NULL,
+                first_seen_at TEXT NOT NULL,
+                last_seen_at TEXT NOT NULL,
+                occurrence_count INTEGER NOT NULL DEFAULT 1,
+                resolved_at TEXT,
+                resolution_note TEXT
+            );",
+        )
+        .expect("create stripped tables");
+        // Deliberately omit `CREATE UNIQUE INDEX idx_sessions_source_session_id`.
+        conn.pragma_update(None, "user_version", 8_i64)
+            .expect("set user_version");
+    }
+    let tar = Command::new("tar")
+        .args(["-czf"])
+        .arg(&bad_archive)
+        .args(["-C"])
+        .arg(&fixture)
+        .arg(".")
+        .status()
+        .expect("repack stripped fixture");
+    assert!(tar.success());
+
+    let output = run_settle(&dst_data, &bad_archive, true);
+    assert!(
+        !output.status.success(),
+        "settle must refuse an archive that omits the unique sessions index"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("idx_sessions_source_session_id"),
+        "stderr should name the missing index, got: {stderr}"
+    );
+
+    let after = fs::read(db_path(&dst_data)).expect("read db after failed settle");
+    assert_eq!(
+        before, after,
+        "a failed settle must not modify the existing journal"
+    );
+    assert!(!dst_data.join(".pending-settle").exists());
+
+    let _ = fs::remove_dir_all(root);
+}
+
+#[cfg(unix)]
+#[test]
+fn pack_removes_claimed_archive_when_lock_is_held() {
+    let root = temp_root("pack-cleanup-on-failure");
+    let data_dir = root.join(".jottrace");
+    let archive = root.join("should-be-removed.tar.gz");
+    install_primary_claude_fixture(&root);
+    run_ingest(&root, &data_dir);
+
+    // Hold the data lock externally so `pack` fails between claiming the
+    // output path and writing the tarball. Without the ArchiveClaim guard a
+    // zero-byte archive would survive and block the user's next retry.
+    let lock_file = jottrace::create_private_file(&data_dir.join(jottrace::LOCK_FILE_NAME))
+        .expect("create held lock");
+    let lock_result = unsafe { libc::flock(lock_file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) };
+    assert_eq!(lock_result, 0);
+
+    let output = Command::new(binary())
+        .args(["pack", "--output"])
+        .arg(&archive)
+        .env("JOTTRACE_HOME", &data_dir)
+        .output()
+        .expect("run jottrace pack");
+    assert!(!output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("another jottrace DB-mutating command is already running"));
+    assert!(
+        !archive.exists(),
+        "claimed archive must be removed when pack fails after claiming the path"
+    );
+
+    let _ = fs::remove_dir_all(root);
+}
+
+#[cfg(unix)]
+#[test]
+fn settle_force_removes_stale_files_before_extracting() {
+    let root = temp_root("settle-force-clean");
+    let src_data = root.join("src/.jottrace");
+    let dst_data = root.join("dst/.jottrace");
+    let archive = root.join("journal.tar.gz");
+    install_primary_claude_fixture(&root);
+    run_ingest(&root, &src_data);
+    run_pack(&src_data, &archive);
+
+    // Seed the destination, then drop a stale SQLite sidecar that is NOT in
+    // the archive. The bug `--force` is meant to fix is that the sidecar
+    // would otherwise survive and be paired with the restored `db.sqlite`.
+    let first = run_settle(&dst_data, &archive, false);
+    assert!(first.status.success());
+    fs::write(dst_data.join("db.sqlite-wal"), b"stale wal frames").expect("seed stale sidecar");
+    assert!(dst_data.join("db.sqlite-wal").exists());
+
+    let forced = run_settle(&dst_data, &archive, true);
+    assert!(
+        forced.status.success(),
+        "stdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&forced.stdout),
+        String::from_utf8_lossy(&forced.stderr)
+    );
+    assert!(
+        !dst_data.join("db.sqlite-wal").exists(),
+        "--force should wipe stale files that the archive does not contain"
+    );
+    assert!(
+        dst_data.join("db.sqlite").exists(),
+        "the restored db.sqlite should still be present"
+    );
+
+    let _ = fs::remove_dir_all(root);
+}
+
 fn temp_root(name: &str) -> PathBuf {
     // Cargo can run tests concurrently, so the temp path needs more entropy
     // than the test name alone.

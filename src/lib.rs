@@ -16,11 +16,13 @@ use std::os::unix::{
 pub mod compact;
 pub mod ingest;
 pub mod storage;
+pub mod transfer;
 pub mod update;
 pub mod web;
 pub use compact::{CompactMode, CompactOptions, CompactReport, run_compact};
 pub use ingest::{IngestReport, run_ingest};
 pub use storage::{IngestErrorSummary, StatusReport, run_status};
+pub use transfer::{PackOptions, PackReport, SettleOptions, SettleReport, run_pack, run_settle};
 pub use update::{UpdateReport, run_update};
 
 /// Default per-user data directory name for the current MVP.
@@ -97,6 +99,56 @@ pub enum JottraceError {
         path: PathBuf,
         source: rusqlite::Error,
     },
+    /// `pack` refuses to overwrite an existing output file so users do not lose
+    /// a previous archive by accident.
+    PackOutputExists(PathBuf),
+    /// `settle` refuses to overwrite an existing non-empty journal unless the
+    /// caller explicitly opts in with `--force`.
+    SettleNotEmpty(PathBuf),
+    /// `settle` cannot operate on a missing or non-file archive path.
+    ArchiveNotFound(PathBuf),
+    /// A spawned helper (e.g. `tar`) was not runnable on this system.
+    ToolIo {
+        program: &'static str,
+        source: io::Error,
+    },
+    /// A spawned helper ran but exited non-zero; stderr is surfaced for triage.
+    ToolFailed {
+        program: &'static str,
+        stderr: String,
+    },
+    /// `settle` refuses entries whose chmod or open would escape `JOTTRACE_HOME`
+    /// (symlinks, hardlinks, fifos, sockets). A crafted archive is the only
+    /// realistic source, so failing closed keeps the threat model honest.
+    UnsafeArchiveEntry {
+        path: PathBuf,
+        kind: &'static str,
+    },
+    /// `settle` cannot read an archive that lives inside the target journal
+    /// because `--force` would wipe the archive before tar could extract it.
+    ArchiveInsideJournal(PathBuf),
+    /// `settle` requires the archive to carry a `db.sqlite` entry. A valid
+    /// tarball without it would otherwise wipe a live journal and silently
+    /// replace it with the fresh empty database created by the post-promote
+    /// status check.
+    ArchiveMissingDatabase(PathBuf),
+    /// `settle` could open the staged `db.sqlite` but it does not look like a
+    /// Jottrace database (header magic failure, missing schema, etc.). The
+    /// archive path is surfaced because the staging path is internal.
+    ArchiveDatabaseInvalid {
+        archive: PathBuf,
+        reason: String,
+    },
+    /// `pack` refuses to produce an archive when the source journal has no
+    /// `db.sqlite`. Such an archive would be advertised as a successful pack
+    /// but would be rejected by `settle` as `ArchiveMissingDatabase`, leaving
+    /// the user with an unusable file and no clear failure on the producer.
+    PackNoDatabase(PathBuf),
+    /// `pack` refuses to write its output inside the source journal. tar
+    /// would otherwise see the archive in `-C data_dir .`, race the SQLite
+    /// sidecars for names like `db.sqlite-wal`, and produce an archive whose
+    /// content includes the (truncated/incomplete) archive itself.
+    PackOutputInsideJournal(PathBuf),
 }
 
 impl fmt::Display for JottraceError {
@@ -160,6 +212,60 @@ impl fmt::Display for JottraceError {
                 path.display()
             ),
             Self::Sqlite { path, source } => write!(f, "{}: {}", path.display(), source),
+            Self::PackOutputExists(path) => write!(
+                f,
+                "{} already exists; choose a different --output or remove the file",
+                path.display()
+            ),
+            Self::SettleNotEmpty(path) => write!(
+                f,
+                "{} already contains journal data; rerun with --force to overwrite",
+                path.display()
+            ),
+            Self::ArchiveNotFound(path) => {
+                write!(f, "{} is not a readable archive file", path.display())
+            }
+            Self::ToolIo { program, source } => write!(f, "failed to run {program}: {source}"),
+            Self::ToolFailed { program, stderr } => {
+                let trimmed = stderr.trim();
+                if trimmed.is_empty() {
+                    write!(f, "{program} exited with a non-zero status")
+                } else {
+                    write!(f, "{program} failed: {trimmed}")
+                }
+            }
+            Self::UnsafeArchiveEntry { path, kind } => write!(
+                f,
+                "archive contains unsafe entry ({kind}): {}",
+                path.display()
+            ),
+            Self::ArchiveInsideJournal(path) => write!(
+                f,
+                "{} is inside the target journal; move it elsewhere and retry",
+                path.display()
+            ),
+            Self::ArchiveMissingDatabase(path) => write!(
+                f,
+                "{} does not contain a {} entry; refusing to overwrite the live journal",
+                path.display(),
+                storage::DB_FILE_NAME
+            ),
+            Self::ArchiveDatabaseInvalid { archive, reason } => write!(
+                f,
+                "{} does not contain a usable Jottrace database: {reason}",
+                archive.display()
+            ),
+            Self::PackNoDatabase(path) => write!(
+                f,
+                "{} has no {}; nothing to pack — run `jottrace ingest` first",
+                path.display(),
+                storage::DB_FILE_NAME
+            ),
+            Self::PackOutputInsideJournal(path) => write!(
+                f,
+                "{} is inside the source journal; choose a --output path outside JOTTRACE_HOME",
+                path.display()
+            ),
         }
     }
 }

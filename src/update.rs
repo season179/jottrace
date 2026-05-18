@@ -19,8 +19,8 @@ const AUTO_UPDATE_ENV: &str = "JOTTRACE_AUTO_UPDATE";
 const AUTO_UPDATE_LOCK_PATH_ENV: &str = "JOTTRACE_AUTO_UPDATE_LOCK_PATH";
 const AUTO_UPDATE_COMMAND: &str = "__jottrace-auto-update";
 const AUTO_UPDATE_CONFIG_FILE: &str = "config.json";
-const AUTO_UPDATE_STAMP_FILE: &str = "auto-update-check";
-const AUTO_UPDATE_LOCK_FILE: &str = "auto-update-check.lock";
+pub(crate) const AUTO_UPDATE_STAMP_FILE: &str = "auto-update-check";
+pub(crate) const AUTO_UPDATE_LOCK_FILE: &str = "auto-update-check.lock";
 const AUTO_UPDATE_INTERVAL_SECS: u64 = 24 * 60 * 60;
 const AUTO_UPDATE_LOCK_STALE_SECS: u64 = 60 * 60;
 

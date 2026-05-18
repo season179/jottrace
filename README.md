@@ -63,6 +63,8 @@ jottrace doctor
 jottrace ingest
 jottrace status
 jottrace compact
+jottrace pack
+jottrace settle <archive>
 jottrace web
 ```
 
@@ -164,6 +166,21 @@ JOTTRACE_HOME=/path/to/private/journal jottrace ingest
 JOTTRACE_HOME=/path/to/private/journal jottrace status
 JOTTRACE_HOME=/path/to/private/journal jottrace web
 ```
+
+To move the journal between machines, use `pack` to bundle `~/.jottrace` into
+a single archive and `settle` to unpack it on the new machine:
+
+```sh
+jottrace pack                          # writes ./jottrace-pack-<utc>.tar.gz (mode 0600)
+# copy the archive to the new machine (scp / AirDrop / USB / ...)
+jottrace settle ./jottrace-pack-<utc>.tar.gz   # restores ~/.jottrace and re-applies 0700/0600
+```
+
+`pack` checkpoints the SQLite WAL into `db.sqlite` and holds the same lock as
+`ingest` and `compact` so a concurrent writer cannot tear the snapshot. It
+refuses to overwrite an existing output file. `settle` refuses to overwrite an
+existing non-empty journal unless invoked with `--force`, and runs pending
+schema migrations on the first DB open.
 
 ## Update
 

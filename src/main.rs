@@ -1,5 +1,6 @@
 use std::env;
 use std::io::{self, Write};
+use std::path::PathBuf;
 use std::process::ExitCode;
 
 fn main() -> ExitCode {
@@ -20,6 +21,8 @@ fn main() -> ExitCode {
         Some("doctor") => run_doctor_command(args),
         Some("events") => run_events_command(args),
         Some("ingest") => run_ingest_command(args),
+        Some("pack") => run_pack_command(args),
+        Some("settle") => run_settle_command(args),
         Some("status") => run_status_command(args),
         Some("update") | Some("upgrade") => run_update_command(args),
         Some("web") => run_web_command(args),
@@ -663,6 +666,136 @@ fn run_status_command(args: impl Iterator<Item = String>) -> ExitCode {
     }
 }
 
+enum PackCommand {
+    Run(PackCliOptions),
+    Help,
+}
+
+struct PackCliOptions {
+    output: Option<PathBuf>,
+}
+
+enum SettleCommand {
+    Run(SettleCliOptions),
+    Help,
+}
+
+struct SettleCliOptions {
+    archive: PathBuf,
+    force: bool,
+}
+
+fn parse_pack_command(
+    mut args: impl Iterator<Item = String>,
+) -> std::result::Result<PackCommand, String> {
+    let mut options = PackCliOptions { output: None };
+    while let Some(arg) = args.next() {
+        match arg.as_str() {
+            "--help" | "-h" => return Ok(PackCommand::Help),
+            "--output" | "-o" => {
+                let value = args
+                    .next()
+                    .ok_or_else(|| String::from("missing value for --output"))?;
+                options.output = Some(PathBuf::from(value));
+            }
+            _ => return Err(format!("unknown pack option: {arg}")),
+        }
+    }
+    Ok(PackCommand::Run(options))
+}
+
+fn parse_settle_command(
+    args: impl Iterator<Item = String>,
+) -> std::result::Result<SettleCommand, String> {
+    let mut archive: Option<PathBuf> = None;
+    let mut force = false;
+    for arg in args {
+        match arg.as_str() {
+            "--help" | "-h" => return Ok(SettleCommand::Help),
+            "--force" => force = true,
+            arg if arg.starts_with("--") => {
+                return Err(format!("unknown settle option: {arg}"));
+            }
+            _ => {
+                if archive.is_some() {
+                    return Err(format!("unexpected positional argument: {arg}"));
+                }
+                archive = Some(PathBuf::from(arg));
+            }
+        }
+    }
+    let archive = archive.ok_or_else(|| String::from("missing archive path"))?;
+    Ok(SettleCommand::Run(SettleCliOptions { archive, force }))
+}
+
+fn run_pack_command(args: impl Iterator<Item = String>) -> ExitCode {
+    let options = match parse_pack_command(args) {
+        Ok(PackCommand::Help) => {
+            print_pack_help();
+            return ExitCode::SUCCESS;
+        }
+        Ok(PackCommand::Run(options)) => options,
+        Err(message) => {
+            eprintln!("{message}");
+            eprintln!("run `jottrace pack --help` for usage");
+            return ExitCode::from(2);
+        }
+    };
+    jottrace::update::maybe_spawn_auto_update();
+
+    match jottrace::run_pack(jottrace::PackOptions {
+        output: options.output,
+    }) {
+        Ok(report) => {
+            println!("jottrace pack");
+            println!("archive: {}", report.archive.display());
+            println!("bytes: {}", report.archive_bytes);
+            println!("schema_version: {}", report.schema_version);
+            println!("sessions: {}", report.session_count);
+            println!("events: {}", report.event_count);
+            println!("next: copy to the destination, then run `jottrace settle <archive>`");
+            ExitCode::SUCCESS
+        }
+        Err(error) => {
+            eprintln!("jottrace pack failed: {error}");
+            ExitCode::FAILURE
+        }
+    }
+}
+
+fn run_settle_command(args: impl Iterator<Item = String>) -> ExitCode {
+    let options = match parse_settle_command(args) {
+        Ok(SettleCommand::Help) => {
+            print_settle_help();
+            return ExitCode::SUCCESS;
+        }
+        Ok(SettleCommand::Run(options)) => options,
+        Err(message) => {
+            eprintln!("{message}");
+            eprintln!("run `jottrace settle --help` for usage");
+            return ExitCode::from(2);
+        }
+    };
+
+    match jottrace::run_settle(jottrace::SettleOptions {
+        archive: options.archive,
+        force: options.force,
+    }) {
+        Ok(report) => {
+            println!("jottrace settle");
+            println!("data_dir: {}", report.data_dir.display());
+            println!("schema_version: {}", report.schema_version);
+            println!("sessions: {}", report.session_count);
+            println!("events: {}", report.event_count);
+            ExitCode::SUCCESS
+        }
+        Err(error) => {
+            eprintln!("jottrace settle failed: {error}");
+            ExitCode::FAILURE
+        }
+    }
+}
+
 fn print_help() {
     // Cargo exposes package metadata at compile time, so --version and help
     // cannot drift away from Cargo.toml.
@@ -676,12 +809,43 @@ fn print_help() {
         "  jottrace events --source <source> --session <source_session_id> (--limit <n>|--all)"
     );
     println!("  jottrace ingest [--details]");
+    println!("  jottrace pack [--output <path>]");
+    println!("  jottrace settle <archive> [--force]");
     println!("  jottrace status [--details]");
     println!("  jottrace update");
     println!("  jottrace upgrade");
     println!("  jottrace web [--port <port>] [--once]");
     println!("  jottrace --version");
     println!("  jottrace <command> --help");
+}
+
+fn print_pack_help() {
+    println!("jottrace pack");
+    println!("Bundle the journal directory into a single tar.gz for transport.");
+    println!();
+    println!("Usage:");
+    println!("  jottrace pack [--output <path>]");
+    println!();
+    println!("Options:");
+    println!(
+        "  --output <path>  Write the archive to <path> (default: jottrace-pack-<utc>.tar.gz)"
+    );
+    println!();
+    println!("The archive is created with mode 0600. Move it to the destination,");
+    println!("then run `jottrace settle <archive>` there.");
+}
+
+fn print_settle_help() {
+    println!("jottrace settle");
+    println!("Unpack a `jottrace pack` archive into the local journal directory.");
+    println!();
+    println!("Usage:");
+    println!("  jottrace settle <archive> [--force]");
+    println!();
+    println!("Options:");
+    println!("  --force  Overwrite an existing non-empty journal at JOTTRACE_HOME");
+    println!();
+    println!("Permissions are restored to 0700/0600 and schema migrations run on open.");
 }
 
 fn print_compact_help() {

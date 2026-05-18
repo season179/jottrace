@@ -1,5 +1,114 @@
 # Changelog
 
+## v26.5.12 - 2026-05-18
+
+### Summary
+
+- Adds `pack` and `settle` so users can move a journal between machines
+  without manually shelling around the SQLite WAL or restoring private file
+  permissions. Changes since `v26.5.11`.
+
+### Changes
+
+- `jottrace pack` writes `~/.jottrace` into a `jottrace-pack-<utc>.tar.gz`
+  archive after running `PRAGMA wal_checkpoint(TRUNCATE)`, holding the same
+  lock as `ingest`/`compact` so concurrent writers cannot tear the snapshot.
+  The output file is created with mode `0600` and never overwrites an existing
+  path.
+- `jottrace settle <archive>` extracts a pack archive into `JOTTRACE_HOME`,
+  re-applies `0700`/`0600` permissions, and opens the database so schema
+  migrations run before the receiving machine ingests again. Refuses to
+  overwrite an existing non-empty journal unless `--force` is provided.
+- The runtime lock file and auto-update sentinel are excluded from packed
+  archives so they cannot follow a journal to a new host.
+- `settle` rejects archives that contain symbolic links or other non-regular
+  files. Following a crafted symlink during the post-extract chmod walk would
+  otherwise re-permission files outside `JOTTRACE_HOME`.
+- `settle --force` clears existing journal files (except the held lock) before
+  extracting, so stale SQLite sidecars from the previous journal cannot
+  survive next to the restored `db.sqlite`.
+- `pack` claims its output path with an atomic `O_EXCL` open at mode `0600`,
+  removing the small window where the archive existed with the process umask
+  applied before the trailing chmod.
+- `settle` extracts every archive into a `.pending-settle` staging
+  subdirectory and only promotes the validated contents into the live journal
+  after `enforce_private_permissions` clears them. A crafted symlink, a
+  truncated tarball, a tar error halfway through, or any other extraction
+  failure now leaves the previous journal byte-identical instead of partially
+  overwritten.
+- `settle` re-checks the journal-non-empty guard after acquiring the data
+  lock, so a racing `ingest` cannot create a fresh journal between the empty
+  check and the lock acquisition and have it silently overwritten.
+- `pack` removes the claimed output file if it fails after creation (lock
+  contention, DB open error, tar failure), so a retry with the same `--output`
+  succeeds without manual cleanup of a zero-byte archive.
+- `settle` refuses archives whose canonical path lives under
+  `JOTTRACE_HOME`. `--force` would otherwise delete the archive in
+  `clear_journal_contents` before tar could read it, silently destroying a
+  user's local backup.
+- `settle` validates the staged `db.sqlite` (existence and `user_version` in
+  the supported range) before clearing the live journal. A valid tarball
+  without `db.sqlite`, or one carrying a zero-byte or non-Jottrace
+  `db.sqlite`, used to pass extraction cleanly and then be silently replaced
+  by the fresh empty database `storage::status_for_path` opens at the end of
+  settle — now it fails fast and the existing journal is left byte-identical.
+- `settle` inspects the archive's table of contents (via `tar -tvzf` and
+  `tar -tzf`) before invoking tar in extract mode. Symbolic links, hard
+  links, device nodes, absolute paths, and `..` segments are now rejected up
+  front so a crafted symlink-prefix archive cannot land bytes outside the
+  staging subtree before the post-extract walk has a chance to refuse it.
+  `.pending-settle` is never even created on the rejection path.
+- `settle` also confirms the staged `db.sqlite` exposes the foundational
+  Jottrace schema (column-aware probe queries against `sessions`, `events`,
+  and `ingest_errors`) before clearing the live journal. Without this check,
+  a SQLite file from an unrelated application that happens to have a
+  `user_version` in Jottrace's accepted range — or that exposes tables with
+  the right names but unrelated columns — used to pass validation and only
+  fail later, after `clear_journal_contents` had already wiped the user's
+  data.
+- `pack` refuses to produce an archive when the source journal has no
+  `db.sqlite`. The producer used to advertise success on directories that
+  had been auto-created without an ingest, leaving the user with an archive
+  `settle` would later reject as `ArchiveMissingDatabase`.
+- `pack` excludes any leftover `.pending-settle` staging directory from the
+  archive. A previous settle that crashed mid-flight could otherwise leave
+  one behind; packing it would yield an archive whose own settle creates
+  `.pending-settle/.pending-settle` and breaks the staged-rename step
+  after `clear_journal_contents` had already wiped the receiving journal.
+- `settle` rejects archives whose top-level path collides with a runtime
+  artefact of the live journal — `.pending-settle/`, `jottrace.lock`, or
+  either auto-update sentinel — before extraction. A top-level
+  `jottrace.lock` entry was particularly dangerous: promoting it would
+  either fail outright after `clear_journal_contents` had already wiped the
+  live data, or replace the inode the held data lock was flocking and break
+  mutual exclusion with concurrent `ingest`/`compact`. Such entries are now
+  refused up front under "reserved top-level entry".
+- `settle` now brings the staged database up to `LATEST_SCHEMA_VERSION`
+  via the standard migration runner before probing required tables, and the
+  probe set covers every column the current code reads or writes —
+  including v1 columns like `sessions.file_size`, `sessions.file_mtime`,
+  `sessions.content_fingerprint`, `sessions.last_read_at`, and
+  `sessions.updated_at` that a crafted archive could omit alongside a
+  Jottrace-shaped `user_version`. An archive claiming `user_version =
+  LATEST` while missing any column used by ingest/compact/web used to wave
+  through and only fail later, after the live journal had been overwritten.
+- `settle`'s non-empty guard now ignores runtime sentinels
+  (`auto-update-check` and `auto-update-check.lock`) the way it already
+  ignored the held `jottrace.lock`. On installer-managed binaries
+  `maybe_spawn_auto_update` can plant the stamp into a freshly created
+  `JOTTRACE_HOME` before any ingest runs, which used to make the first
+  settle on the new machine refuse without `--force` for no real reason.
+- `pack` refuses an `--output` path that resolves inside the source journal.
+  tar's `-C data_dir .` walk would otherwise see the partially-written
+  archive in its own input and race SQLite sidecars on names like
+  `db.sqlite-wal`, producing a self-referential, truncated archive.
+- `settle` verifies that the staged database carries the unique
+  `idx_sessions_source_session_id` index and the `events` PRIMARY KEY
+  before promoting it. A crafted or partially migrated archive with the
+  right columns but no uniqueness constraint used to wave through; the
+  receiving machine's `INSERT OR IGNORE` would then silently degrade to a
+  regular insert and grow duplicate session rows on subsequent ingests.
+
 ## v26.5.11 - 2026-05-15
 
 ### Summary
