@@ -299,7 +299,7 @@ SQL filters always run on the metadata columns (`session_id`, `generation`,
 `seq`, `ts`, plus reader-specific extras). The `payload` is opaque to SQL —
 we don't query into it. To read event content, the application fetches the
 matching rows and decodes each `payload` BLOB according to its `codec` before
-handing the structured event to the processor.
+rendering the original source event for the processor.
 
 If a future caller needs SQL-level filtering on a specific event field
 (e.g. only `tool_use` events), we extract that field as its own
