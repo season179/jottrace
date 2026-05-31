@@ -1,5 +1,36 @@
 # Changelog
 
+## v26.5.13 - 2026-05-31
+
+### Summary
+
+- Fixes two ingest bugs in how JSONL sessions resume across re-ingests, both
+  surfaced by Claude Code workflow runner journals
+  (`subagents/workflows/<wf-id>/journal.jsonl`). A rewritten file could log a
+  permanent `invalid_json` error and stop ingesting, and two such journals could
+  clobber the same session forever. Changes since `v26.5.12`.
+
+### Changes
+
+- `ingest` no longer resumes a JSONL session from its stored byte offset without
+  verifying that the already-consumed bytes are unchanged. A new
+  `prefix_fingerprint` column (migration `009`) records a hash of the consumed
+  prefix; when it no longer matches, the file was rewritten rather than appended
+  to, so the session is re-read from the start as a new generation instead of
+  parsing from a now mid-record offset. Previously a rewrite left
+  `next_read_offset` pointing inside a record, which logged an
+  `invalid_json` error that never resolved and blocked the rest of the file.
+- Sessions written before migration `009` have no stored prefix fingerprint and
+  fall back to a structural check: a resume offset is trusted only when it sits
+  immediately after a newline, the single position the importer ever records.
+- Files nested under a session's `subagents/` tree that are not named `agent-*`
+  (notably the workflow runner journals) now derive a path-qualified source
+  session id of the form `<session-uuid>/subagents/<...>/journal` and link to
+  their owning session. Previously every `journal.jsonl` collapsed to the bare
+  id `journal`, so two journals in different workflow directories shared one
+  session row and overwrote each other on every ingest, growing the session by
+  two generations per run.
+
 ## v26.5.12 - 2026-05-18
 
 ### Summary

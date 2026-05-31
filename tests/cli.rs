@@ -729,6 +729,63 @@ fn ingest_preserves_truncated_claude_cli_file_as_next_generation() {
 }
 
 #[test]
+fn ingest_rereads_grown_claude_cli_rewrite_when_prefix_changes() {
+    // Regression for the stuck workflow-journal case: a JSONL file that grows
+    // *and* has its earlier bytes rewritten must be re-read from the start, not
+    // resumed from the stored offset (which now lands mid-record and would log a
+    // permanent invalid_json error).
+    let root = temp_root("ingest-grow-rewrite");
+    let data_dir = root.join(".jottrace");
+    let session_file = install_claude_fixture(
+        &root,
+        "grow-rewrite",
+        "edge-cases/grow-rewrite-before.jsonl",
+    );
+
+    let first = run_ingest(&root, &data_dir);
+    assert!(first.contains("events: 3"));
+    assert!(first.contains("inserted_events: 3"));
+    let before_len = fs::metadata(&session_file).expect("before metadata").len() as i64;
+
+    replace_with_fixture(&session_file, "edge-cases/grow-rewrite-after.jsonl");
+    let after_len = fs::metadata(&session_file).expect("after metadata").len() as i64;
+    // The rewrite must grow the file so the old append path (pass_size >
+    // file_size) would have been chosen and resumed from a stale offset.
+    assert!(after_len > before_len);
+
+    let second = run_ingest(&root, &data_dir);
+    assert!(second.contains("events: 8"));
+    assert!(second.contains("inserted_events: 5"));
+
+    let conn = Connection::open(db_path(&data_dir)).expect("open preserved db");
+    let (current_generation, event_count, file_size, next_read_offset): (i64, i64, i64, i64) = conn
+        .query_row(
+            "SELECT current_generation, event_count, file_size, next_read_offset
+             FROM sessions
+             WHERE source = 'claude_cli'",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+        )
+        .expect("session rewrite state");
+    assert_eq!(current_generation, 1);
+    assert_eq!(event_count, 5);
+    assert_eq!(file_size, after_len);
+    assert_eq!(next_read_offset, after_len);
+    assert_eq!(generation_counts(&conn), vec![(0, 3), (1, 5)]);
+
+    let unresolved: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM ingest_errors WHERE resolved_at IS NULL",
+            [],
+            |row| row.get(0),
+        )
+        .expect("unresolved error count");
+    assert_eq!(unresolved, 0);
+
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
 fn ingest_preserves_same_size_claude_cli_rewrite_as_next_generation() {
     let root = temp_root("ingest-same-size-rewrite");
     let data_dir = root.join(".jottrace");

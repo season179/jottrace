@@ -115,6 +115,10 @@ struct StoredSession {
     source_metadata: Option<String>,
     next_read_offset: i64,
     event_count: i64,
+    /// Fingerprint of the bytes already consumed (`buffer[..next_read_offset]`).
+    /// Lets append resumes verify the prefix is unchanged before trusting the
+    /// stored offset; a mismatch means the file was rewritten, not appended.
+    prefix_fingerprint: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -147,6 +151,7 @@ struct SessionUpdate<'a> {
     pass_size: i64,
     file_mtime: Option<i64>,
     content_fingerprint: &'a str,
+    prefix_fingerprint: &'a str,
     source_metadata: Option<&'a str>,
     next_read_offset: i64,
     event_count: i64,
@@ -1038,11 +1043,17 @@ fn ingest_source_file(
         .map_err(|source| sqlite_error(&source_file.path, source))?;
     insert_session_if_missing(&tx, &source_file)?;
     let stored = load_session(&tx, &source_file)?.expect("session row should exist after insert");
+    let prefix_intact = append_prefix_intact(
+        stored.next_read_offset,
+        stored.prefix_fingerprint.as_deref(),
+        &buffer,
+    );
     let import_mode = import_mode(
         &source_file,
         &stored,
         pass_size,
         &content_fingerprint,
+        prefix_intact,
         retry_unresolved_invalid_json,
     );
 
@@ -1118,6 +1129,8 @@ fn ingest_source_file(
     metadata.fill_missing_from(source_metadata);
     let event_count = generation_event_count(&tx, &source_file, stored.id, generation)?;
     let parent_session_id = resolve_parent_session_id(&tx, &source_file)?;
+    let consumed = (imported.next_read_offset.max(0) as usize).min(buffer.len());
+    let prefix_fingerprint = fingerprint(&buffer[..consumed]);
     update_session_after_import(
         &tx,
         SessionUpdate {
@@ -1128,6 +1141,7 @@ fn ingest_source_file(
             pass_size,
             file_mtime,
             content_fingerprint: &content_fingerprint,
+            prefix_fingerprint: &prefix_fingerprint,
             source_metadata: session_source_metadata.as_deref(),
             next_read_offset: imported.next_read_offset,
             event_count,
@@ -1287,6 +1301,9 @@ fn ingest_sqlite_session_snapshot(
             pass_size,
             file_mtime,
             content_fingerprint: &content_fingerprint,
+            // SQLite snapshots are not byte-resumed, so the prefix fingerprint is
+            // never read back for them (it is only consulted for JSONL sources).
+            prefix_fingerprint: "",
             source_metadata: Some(snapshot.source_metadata.as_str()),
             next_read_offset: i64_from_usize(snapshot.events.len(), &source_file.path)?,
             event_count: generation_event_count(&tx, source_file, stored.id, generation)?,
@@ -2074,7 +2091,7 @@ fn load_session_by_source_session_id(
 ) -> Result<Option<StoredSession>> {
     conn.query_row(
         "SELECT id, source_session_id, file_path, parent_session_id, current_generation, file_size, file_mtime,
-                content_fingerprint, source_metadata, next_read_offset, event_count
+                content_fingerprint, source_metadata, next_read_offset, event_count, prefix_fingerprint
          FROM sessions
          WHERE source = ?1 AND source_session_id = ?2",
         params![source, source_session_id],
@@ -2091,6 +2108,7 @@ fn load_session_by_source_session_id(
                 source_metadata: row.get(8)?,
                 next_read_offset: row.get(9)?,
                 event_count: row.get(10)?,
+                prefix_fingerprint: row.get(11)?,
             })
         },
     )
@@ -2104,7 +2122,7 @@ fn load_session_by_source_file_path(
 ) -> Result<Option<StoredSession>> {
     conn.query_row(
         "SELECT id, source_session_id, file_path, parent_session_id, current_generation, file_size, file_mtime,
-                content_fingerprint, source_metadata, next_read_offset, event_count
+                content_fingerprint, source_metadata, next_read_offset, event_count, prefix_fingerprint
          FROM sessions
          WHERE source = ?1 AND file_path = ?2",
         params![
@@ -2124,6 +2142,7 @@ fn load_session_by_source_file_path(
                 source_metadata: row.get(8)?,
                 next_read_offset: row.get(9)?,
                 event_count: row.get(10)?,
+                prefix_fingerprint: row.get(11)?,
             })
         },
     )
@@ -2143,6 +2162,7 @@ fn import_mode(
     stored: &StoredSession,
     pass_size: i64,
     content_fingerprint: &str,
+    prefix_intact: bool,
     retry_unresolved_invalid_json: bool,
 ) -> ImportMode {
     match stored.file_size {
@@ -2153,6 +2173,13 @@ fn import_mode(
             ImportMode::Skip
         }
         None => ImportMode::Append,
+        // The consumed prefix changed, so the stored offset no longer points at a
+        // record boundary. JSONL sources are not guaranteed to be append-only
+        // (e.g. workflow journals get rewritten); re-read from the start instead
+        // of resuming mid-record, which would log a spurious invalid_json error.
+        Some(_) if source_file.source_format == SourceFormat::Jsonl && !prefix_intact => {
+            ImportMode::Rewrite
+        }
         Some(_)
             if retry_unresolved_invalid_json
                 && source_file.source_format == SourceFormat::Jsonl
@@ -2166,6 +2193,31 @@ fn import_mode(
             ImportMode::Append
         }
         Some(_) => ImportMode::Rewrite,
+    }
+}
+
+/// Whether the bytes already consumed (`buffer[..next_read_offset]`) still match
+/// what they were when the offset was recorded — i.e. the file was appended to,
+/// not rewritten. Falls back to a structural boundary check for sessions written
+/// before `prefix_fingerprint` was tracked.
+fn append_prefix_intact(
+    next_read_offset: i64,
+    prefix_fingerprint: Option<&str>,
+    buffer: &[u8],
+) -> bool {
+    let offset = next_read_offset.max(0) as usize;
+    if offset == 0 {
+        return true;
+    }
+    if offset > buffer.len() {
+        return false;
+    }
+    match prefix_fingerprint {
+        Some(expected) => fingerprint(&buffer[..offset]) == expected,
+        // Legacy rows have no stored prefix fingerprint: a resume offset must at
+        // least sit immediately after a newline, since that is the only position
+        // `import_committed_lines` ever records.
+        None => buffer[offset - 1] == b'\n',
     }
 }
 
@@ -2251,6 +2303,7 @@ fn update_session_after_import(tx: &Transaction<'_>, update: SessionUpdate<'_>) 
              file_mtime = :file_mtime,
              file_size = :file_size,
              content_fingerprint = :content_fingerprint,
+             prefix_fingerprint = :prefix_fingerprint,
              next_read_offset = :next_read_offset,
              event_count = :event_count,
              last_read_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now'),
@@ -2268,6 +2321,7 @@ fn update_session_after_import(tx: &Transaction<'_>, update: SessionUpdate<'_>) 
             ":file_mtime": update.file_mtime,
             ":file_size": update.pass_size,
             ":content_fingerprint": update.content_fingerprint,
+            ":prefix_fingerprint": update.prefix_fingerprint,
             ":next_read_offset": update.next_read_offset,
             ":event_count": update.event_count,
             ":session_id": update.session_id,
@@ -3015,14 +3069,55 @@ fn source_session_ids_from_path(path: &Path) -> Result<(String, Option<String>)>
         .map(str::to_string)
         .ok_or_else(|| invalid_path(path, "session file name is not valid UTF-8"))?;
 
-    let parent_source_session_id = parent_source_session_id_from_path(path, &file_stem);
-    let source_session_id = if let Some(parent_source_session_id) = &parent_source_session_id {
-        format!("{parent_source_session_id}/subagents/{file_stem}")
-    } else {
-        file_stem
-    };
+    if let Some(parent_source_session_id) = parent_source_session_id_from_path(path, &file_stem) {
+        let source_session_id = format!("{parent_source_session_id}/subagents/{file_stem}");
+        return Ok((source_session_id, Some(parent_source_session_id)));
+    }
 
-    Ok((source_session_id, parent_source_session_id))
+    // Files nested deeper under a session's `subagents/` tree (e.g. the workflow
+    // runner journals at `subagents/workflows/<wf-id>/journal.jsonl`) are not named
+    // `agent-*`, so they are not caught above. Qualify them with their path relative
+    // to the session dir; otherwise a bare stem like "journal" collides across every
+    // workflow directory and the colliding sessions clobber each other on every run.
+    if let Some((parent_source_session_id, source_session_id)) =
+        nested_subagents_source_session_id(path, &file_stem)
+    {
+        return Ok((source_session_id, Some(parent_source_session_id)));
+    }
+
+    Ok((file_stem, None))
+}
+
+/// Build a unique source session id for a file living below a session's
+/// `subagents/` directory but not directly inside it. Returns the owning session
+/// id and a fully-qualified id of the form
+/// `<session-uuid>/subagents/<...nested dirs...>/<file-stem>`.
+fn nested_subagents_source_session_id(path: &Path, file_stem: &str) -> Option<(String, String)> {
+    let components: Vec<&str> = path
+        .components()
+        .filter_map(|component| component.as_os_str().to_str())
+        .collect();
+    let subagents_index = components
+        .iter()
+        .position(|component| *component == "subagents")?;
+    // The owning session must be the UUID directory directly above `subagents`,
+    // and there must be at least one directory between `subagents` and the file
+    // (otherwise the `agent-*` branch already handled it).
+    let parent_source_session_id = *components.get(subagents_index.checked_sub(1)?)?;
+    if !is_uuid_stem(parent_source_session_id) {
+        return None;
+    }
+    let nested = &components[subagents_index + 1..];
+    if nested.len() < 2 {
+        return None;
+    }
+
+    // Qualified id: <uuid>/subagents/<nested dirs>/<stem>. The final nested
+    // component is the file name, which we drop in favour of the stem.
+    let mut parts = vec![parent_source_session_id, "subagents"];
+    parts.extend_from_slice(&nested[..nested.len() - 1]);
+    parts.push(file_stem);
+    Some((parent_source_session_id.to_string(), parts.join("/")))
 }
 
 fn pi_source_session_id_from_path(path: &Path) -> Result<String> {
@@ -3157,5 +3252,85 @@ fn invalid_session_meta(path: &Path, message: impl Into<String>) -> JottraceErro
     JottraceError::InvalidSessionMeta {
         path: path.to_path_buf(),
         message: message.into(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const UUID_A: &str = "95d258fd-2c38-4e97-97cb-8fff360d3de3";
+
+    fn ids(path: &str) -> (String, Option<String>) {
+        source_session_ids_from_path(Path::new(path)).expect("derive session ids")
+    }
+
+    #[test]
+    fn workflow_journals_in_different_dirs_get_distinct_ids() {
+        let (one, parent_one) = ids(&format!(
+            "/home/u/.claude/projects/-proj/{UUID_A}/subagents/workflows/wf_ea989e2b-1d9/journal.jsonl"
+        ));
+        let (two, parent_two) = ids(&format!(
+            "/home/u/.claude/projects/-proj/{UUID_A}/subagents/workflows/wf_ab3bff12-fa4/journal.jsonl"
+        ));
+
+        // Both belong to the same session but must not collide on a bare "journal".
+        assert_ne!(one, two);
+        assert_eq!(parent_one.as_deref(), Some(UUID_A));
+        assert_eq!(parent_two.as_deref(), Some(UUID_A));
+        assert_eq!(
+            one,
+            format!("{UUID_A}/subagents/workflows/wf_ea989e2b-1d9/journal")
+        );
+        assert_eq!(
+            two,
+            format!("{UUID_A}/subagents/workflows/wf_ab3bff12-fa4/journal")
+        );
+    }
+
+    #[test]
+    fn direct_subagent_files_keep_their_existing_id_shape() {
+        let (id, parent) = ids(&format!(
+            "/home/u/.claude/projects/-proj/{UUID_A}/subagents/agent-a000000000000021.jsonl"
+        ));
+        assert_eq!(parent.as_deref(), Some(UUID_A));
+        assert_eq!(id, format!("{UUID_A}/subagents/agent-a000000000000021"));
+    }
+
+    #[test]
+    fn top_level_session_files_keep_a_bare_stem_and_no_parent() {
+        let (id, parent) = ids(&format!("/home/u/.claude/projects/-proj/{UUID_A}.jsonl"));
+        assert_eq!(id, UUID_A);
+        assert_eq!(parent, None);
+    }
+
+    #[test]
+    fn prefix_is_trivially_intact_at_offset_zero() {
+        // Nothing consumed yet, so there is no prefix to invalidate.
+        assert!(append_prefix_intact(0, None, b""));
+        assert!(append_prefix_intact(0, Some("does-not-matter"), b"line\n"));
+    }
+
+    #[test]
+    fn prefix_is_stale_when_offset_exceeds_buffer() {
+        // The file shrank below the recorded offset: it was rewritten, not appended.
+        assert!(!append_prefix_intact(100, None, b"short\n"));
+    }
+
+    #[test]
+    fn prefix_fingerprint_match_decides_when_present() {
+        let buffer = b"first\nsecond\n";
+        let consumed = fingerprint(&buffer[..6]); // "first\n"
+        assert!(append_prefix_intact(6, Some(&consumed), buffer));
+        assert!(!append_prefix_intact(6, Some("0000000000000000"), buffer));
+    }
+
+    #[test]
+    fn legacy_rows_fall_back_to_a_newline_boundary_check() {
+        let buffer = b"first\nsecond\n";
+        // Offset 6 sits right after a newline (a real record boundary).
+        assert!(append_prefix_intact(6, None, buffer));
+        // Offset 3 lands mid-record, so the stored offset must be stale.
+        assert!(!append_prefix_intact(3, None, buffer));
     }
 }
