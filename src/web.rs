@@ -45,6 +45,22 @@ pub struct PageInfo {
     pub has_next: bool,
 }
 
+fn paginate<T>(mut items: Vec<T>, offset: usize, limit: usize) -> (Vec<T>, PageInfo) {
+    let has_next = items.len() > limit;
+    if has_next {
+        items.truncate(limit);
+    }
+    (
+        items,
+        PageInfo {
+            offset,
+            limit,
+            has_previous: offset > 0,
+            has_next,
+        },
+    )
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct JournalView {
     pub db_path: PathBuf,
@@ -490,7 +506,7 @@ fn load_sessions(
         .prepare(&sql)
         .map_err(|source| sqlite_error(path, source))?;
 
-    let mut sessions = statement
+    let sessions = statement
         .query_map(
             params![search.like.as_deref(), (limit + 1) as i64, offset as i64],
             loaded_session_from_row,
@@ -498,20 +514,7 @@ fn load_sessions(
         .map_err(|source| sqlite_error(path, source))?
         .collect::<std::result::Result<Vec<_>, _>>()
         .map_err(|source| sqlite_error(path, source))?;
-    let has_next = sessions.len() > limit;
-    if has_next {
-        sessions.truncate(limit);
-    }
-
-    Ok((
-        sessions,
-        PageInfo {
-            offset,
-            limit,
-            has_previous: offset > 0,
-            has_next,
-        },
-    ))
+    Ok(paginate(sessions, offset, limit))
 }
 
 fn load_event_payload_text(
@@ -611,7 +614,7 @@ fn load_events(
         )
         .map_err(|source| sqlite_error(path, source))?;
 
-    let mut events = statement
+    let events = statement
         .query_map(
             params![session_id, (limit + 1) as i64, offset as i64],
             journal_event_metadata_from_row,
@@ -619,20 +622,7 @@ fn load_events(
         .map_err(|source| sqlite_error(path, source))?
         .collect::<std::result::Result<Vec<_>, _>>()
         .map_err(|source| sqlite_error(path, source))?;
-    let has_next = events.len() > limit;
-    if has_next {
-        events.truncate(limit);
-    }
-
-    Ok((
-        events,
-        PageInfo {
-            offset,
-            limit,
-            has_previous: offset > 0,
-            has_next,
-        },
-    ))
+    Ok(paginate(events, offset, limit))
 }
 
 fn load_event_payload(
@@ -946,43 +936,31 @@ fn optional_definition(html: &mut String, label: &str, value: Option<&str>) {
 }
 
 fn render_session_pagination(html: &mut String, view: &JournalView, query: &JournalQuery) {
-    if !view.session_page.has_previous && !view.session_page.has_next {
-        return;
-    }
-
     let selected_session = explicit_selected_session_key(view, query);
-    html.push_str("<nav class=\"pager\" aria-label=\"Session pages\">");
-    if view.session_page.has_previous {
-        html.push_str("<a href=\"");
-        html_escape_into(
-            html,
-            &state_href(
+    let page = view.session_page;
+    render_pager(
+        html,
+        page,
+        "Session pages",
+        page.has_previous.then(|| {
+            state_href(
                 selected_session,
                 query,
-                view.session_page
-                    .offset
-                    .saturating_sub(view.session_page.limit),
+                page.offset.saturating_sub(page.limit),
                 0,
                 None,
-            ),
-        );
-        html.push_str("\">Previous sessions</a>");
-    }
-    if view.session_page.has_next {
-        html.push_str("<a href=\"");
-        html_escape_into(
-            html,
-            &state_href(
-                selected_session,
-                query,
-                view.session_page.offset + view.session_page.limit,
-                0,
-                None,
-            ),
-        );
-        html.push_str("\">Next sessions</a>");
-    }
-    html.push_str("</nav>");
+            )
+        }),
+        "Previous sessions",
+        page.has_next.then(|| state_href(
+            selected_session,
+            query,
+            page.offset + page.limit,
+            0,
+            None,
+        )),
+        "Next sessions",
+    );
 }
 
 fn explicit_selected_session_key<'a>(
@@ -1002,40 +980,65 @@ fn render_event_pagination(
     query: &JournalQuery,
     session: &JournalSession,
 ) {
-    if !page.has_previous && !page.has_next {
-        return;
-    }
-
-    html.push_str("<nav class=\"pager\" aria-label=\"Event pages\">");
-    if page.has_previous {
-        html.push_str("<a href=\"");
-        html_escape_into(
-            html,
-            &state_href(
-                Some(SelectedSessionKey::from(session)),
+    let session_key = Some(SelectedSessionKey::from(session));
+    render_pager(
+        html,
+        page,
+        "Event pages",
+        page.has_previous.then(|| {
+            state_href(
+                session_key,
                 query,
                 query.session_offset,
                 page.offset.saturating_sub(page.limit),
                 None,
-            ),
-        );
-        html.push_str("\">Previous events</a>");
-    }
-    if page.has_next {
-        html.push_str("<a href=\"");
-        html_escape_into(
-            html,
-            &state_href(
-                Some(SelectedSessionKey::from(session)),
+            )
+        }),
+        "Previous events",
+        page.has_next.then(|| {
+            state_href(
+                session_key,
                 query,
                 query.session_offset,
                 page.offset + page.limit,
                 None,
-            ),
-        );
-        html.push_str("\">Next events</a>");
+            )
+        }),
+        "Next events",
+    );
+}
+
+fn render_pager(
+    html: &mut String,
+    page: PageInfo,
+    aria_label: &str,
+    previous_href: Option<String>,
+    previous_label: &str,
+    next_href: Option<String>,
+    next_label: &str,
+) {
+    if !page.has_previous && !page.has_next {
+        return;
+    }
+
+    html.push_str("<nav class=\"pager\" aria-label=\"");
+    html_escape_into(html, aria_label);
+    html.push_str("\">");
+    if let Some(href) = previous_href {
+        push_pager_link(html, &href, previous_label);
+    }
+    if let Some(href) = next_href {
+        push_pager_link(html, &href, next_label);
     }
     html.push_str("</nav>");
+}
+
+fn push_pager_link(html: &mut String, href: &str, label: &str) {
+    html.push_str("<a href=\"");
+    html_escape_into(html, href);
+    html.push_str("\">");
+    html.push_str(label);
+    html.push_str("</a>");
 }
 
 fn session_href(session: &JournalSession, query: &JournalQuery) -> String {

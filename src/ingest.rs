@@ -433,8 +433,7 @@ fn discover_claude_session_files() -> Result<Vec<SourceFile>> {
         collect_flat_session_files(&root, &mut paths)?;
     }
 
-    paths.sort();
-    paths.dedup();
+    sort_dedup_paths(&mut paths);
 
     let mut source_files = paths
         .into_iter()
@@ -452,12 +451,7 @@ fn discover_claude_session_files() -> Result<Vec<SourceFile>> {
             })
         })
         .collect::<Result<Vec<_>>>()?;
-    source_files.sort_by(|left, right| {
-        left.parent_source_session_id
-            .is_some()
-            .cmp(&right.parent_source_session_id.is_some())
-            .then_with(|| left.path.cmp(&right.path))
-    });
+    sort_source_files_with_parents_last(&mut source_files);
     Ok(source_files)
 }
 
@@ -465,8 +459,7 @@ fn discover_claude_local_agent_session_files() -> Result<Vec<SourceFile>> {
     let root = home_dir()?.join(CLAUDE_LOCAL_AGENT_SESSIONS_DIR);
     let mut paths = Vec::new();
     collect_claude_local_agent_audit_files(&root, &mut paths)?;
-    paths.sort();
-    paths.dedup();
+    sort_dedup_paths(&mut paths);
 
     paths
         .into_iter()
@@ -494,8 +487,7 @@ fn discover_codex_session_files() -> Result<Vec<SourceFile>> {
         collect_jsonl_files(&root.join("archived_sessions"), false, &mut paths)?;
     }
 
-    paths.sort();
-    paths.dedup();
+    sort_dedup_paths(&mut paths);
 
     paths
         .into_iter()
@@ -540,8 +532,7 @@ fn discover_gemini_session_files() -> Result<Vec<SourceFile>> {
         }
     }
 
-    paths.sort();
-    paths.dedup();
+    sort_dedup_paths(&mut paths);
 
     paths
         .into_iter()
@@ -566,8 +557,7 @@ fn discover_pi_agent_session_files() -> Result<Vec<SourceFile>> {
 
     collect_jsonl_files(&home.join(PI_AGENT_SESSIONS_DIR), true, &mut paths)?;
 
-    paths.sort();
-    paths.dedup();
+    sort_dedup_paths(&mut paths);
 
     let mut source_files = paths
         .into_iter()
@@ -597,12 +587,7 @@ fn discover_pi_agent_session_files() -> Result<Vec<SourceFile>> {
             })
         })
         .collect::<Result<Vec<_>>>()?;
-    source_files.sort_by(|left, right| {
-        left.parent_source_session_id
-            .is_some()
-            .cmp(&right.parent_source_session_id.is_some())
-            .then_with(|| left.path.cmp(&right.path))
-    });
+    sort_source_files_with_parents_last(&mut source_files);
     Ok(source_files)
 }
 
@@ -614,8 +599,7 @@ fn discover_factory_session_files() -> Result<Vec<SourceFile>> {
         collect_jsonl_files(&home.join(install_dir).join("sessions"), true, &mut paths)?;
     }
 
-    paths.sort();
-    paths.dedup();
+    sort_dedup_paths(&mut paths);
 
     paths
         .into_iter()
@@ -672,12 +656,12 @@ fn discover_sqlite_session_files(
     match fs::metadata(&path) {
         Ok(metadata) if metadata.is_file() => {}
         Ok(_) => {
-            return Ok(vec![sqlite_error_source_file(
+            return Ok(sqlite_discovery_errors(
                 source,
                 error_session_id,
                 source_format,
                 path,
-            )]);
+            ));
         }
         Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(Vec::new()),
         Err(source) => return Err(JottraceError::Io { path, source }),
@@ -686,34 +670,34 @@ fn discover_sqlite_session_files(
     let conn = match open_connection(&path) {
         Ok(conn) => conn,
         Err(_) => {
-            return Ok(vec![sqlite_error_source_file(
+            return Ok(sqlite_discovery_errors(
                 source,
                 error_session_id,
                 source_format,
                 path,
-            )]);
+            ));
         }
     };
     let mut statement = match conn.prepare(session_query) {
         Ok(statement) => statement,
         Err(_) => {
-            return Ok(vec![sqlite_error_source_file(
+            return Ok(sqlite_discovery_errors(
                 source,
                 error_session_id,
                 source_format,
                 path,
-            )]);
+            ));
         }
     };
     let rows = match statement.query_map([], |row| Ok((row.get(0)?, row.get(1)?))) {
         Ok(rows) => rows,
         Err(_) => {
-            return Ok(vec![sqlite_error_source_file(
+            return Ok(sqlite_discovery_errors(
                 source,
                 error_session_id,
                 source_format,
                 path,
-            )]);
+            ));
         }
     };
 
@@ -722,21 +706,21 @@ fn discover_sqlite_session_files(
         let (source_session_id, parent_source_session_id): (String, Option<String>) = match row {
             Ok(row) => row,
             Err(_) => {
-                return Ok(vec![sqlite_error_source_file(
+                return Ok(sqlite_discovery_errors(
                     source,
                     error_session_id,
                     source_format,
                     path,
-                )]);
+                ));
             }
         };
         if source_session_id.trim().is_empty() {
-            return Ok(vec![sqlite_error_source_file(
+            return Ok(sqlite_discovery_errors(
                 source,
                 error_session_id,
                 source_format,
                 path,
-            )]);
+            ));
         }
         source_files.push(SourceFile {
             source,
@@ -749,6 +733,20 @@ fn discover_sqlite_session_files(
         });
     }
     Ok(source_files)
+}
+
+fn sqlite_discovery_errors(
+    source: &'static str,
+    error_session_id: &'static str,
+    source_format: SourceFormat,
+    path: PathBuf,
+) -> Vec<SourceFile> {
+    vec![sqlite_error_source_file(
+        source,
+        error_session_id,
+        source_format,
+        path,
+    )]
 }
 
 fn sqlite_error_source_file(
@@ -766,6 +764,20 @@ fn sqlite_error_source_file(
         source_format,
         path,
     }
+}
+
+fn sort_dedup_paths(paths: &mut Vec<PathBuf>) {
+    paths.sort();
+    paths.dedup();
+}
+
+fn sort_source_files_with_parents_last(source_files: &mut [SourceFile]) {
+    source_files.sort_by(|left, right| {
+        left.parent_source_session_id
+            .is_some()
+            .cmp(&right.parent_source_session_id.is_some())
+            .then_with(|| left.path.cmp(&right.path))
+    });
 }
 
 fn home_dir() -> Result<PathBuf> {
@@ -910,35 +922,27 @@ fn ingest_source_file(
     let pass_size_bytes = metadata.len();
     let pass_size = i64_from_u64(pass_size_bytes, &source_file.path)?;
     let file_mtime = file_mtime(&metadata);
-    if source_file.source_format == SourceFormat::OpenCodeSqlite {
-        return ingest_opencode_sqlite_session(
+    let sqlite_snapshot = match source_file.source_format {
+        SourceFormat::OpenCodeSqlite => Some(opencode_session_snapshot(source_file)?),
+        SourceFormat::HermesSqlite => Some(hermes_session_snapshot(source_file)?),
+        _ => None,
+    };
+    if let Some(snapshot) = sqlite_snapshot {
+        return ingest_sqlite_session_snapshot(
             conn,
             ingest_state,
             source_file,
             pass_size,
             file_mtime,
-        );
-    }
-    if source_file.source_format == SourceFormat::HermesSqlite {
-        return ingest_hermes_sqlite_session(
-            conn,
-            ingest_state,
-            source_file,
-            pass_size,
-            file_mtime,
+            snapshot,
         );
     }
 
     let resolved_source_file = if source_file.source == CODEX_SOURCE && pass_size_bytes == 0 {
         match load_session_by_source_file_path(conn, source_file)? {
-            Some(stored) if !is_empty_source_file_placeholder(&stored) => ResolvedSourceFile {
-                source_file: SourceFile {
-                    source_session_id: stored.source_session_id,
-                    source_session_id_kind: SourceSessionIdKind::Known,
-                    ..source_file.clone()
-                },
-                buffer: None,
-            },
+            Some(stored) if !is_empty_source_file_placeholder(&stored) => {
+                resolved_known_source_file(source_file, stored.source_session_id, None)
+            }
             stored => {
                 resolve_invalid_session_meta_error(
                     conn,
@@ -972,61 +976,39 @@ fn ingest_source_file(
         && !retry_unresolved_invalid_json
         && unchanged_by_mtime(stored, pass_size, file_mtime)
     {
-        let path_is_current =
-            stored.file_path.as_deref() == Some(source_file.path.to_string_lossy().as_ref());
         let parent_session_id = resolve_parent_session_id(conn, &source_file)?;
-        let source_metadata_is_current =
-            stored.source_metadata.as_deref() == session_source_metadata.as_deref();
-        if path_is_current
-            && stored.parent_session_id == parent_session_id
-            && source_metadata_is_current
-        {
-            resolve_invalid_session_meta_error(
-                conn,
-                ingest_state,
-                &source_file,
-                SOURCE_FILE_INGESTED_SUCCESSFULLY_NOTE,
-            )?;
-            resolve_invalid_json_error_if_fully_read(
+        if stored_jsonl_linked_session_matches(
+            stored,
+            &source_file,
+            parent_session_id,
+            session_source_metadata.as_deref(),
+        ) {
+            resolve_ingest_success_errors(
                 conn,
                 ingest_state,
                 &source_file,
                 stored.next_read_offset,
                 pass_size,
-                SOURCE_FILE_INGESTED_SUCCESSFULLY_NOTE,
             )?;
             return Ok(0);
         }
 
-        let tx = conn
-            .transaction()
-            .map_err(|source| sqlite_error(&source_file.path, source))?;
-        update_skipped_session(
-            &tx,
-            SkippedSessionUpdate {
+        let tx = begin_transaction(conn, &source_file.path)?;
+        commit_skipped_session_refresh(
+            tx,
+            ingest_state,
+            &SkippedSessionUpdate {
                 source_file: &source_file,
                 session_id: stored.id,
                 parent_session_id,
                 source_metadata: session_source_metadata.as_deref(),
                 checked_file: None,
             },
+            Some(JsonResolution {
+                next_read_offset: stored.next_read_offset,
+                read_boundary: pass_size,
+            }),
         )?;
-        resolve_invalid_session_meta_error(
-            &tx,
-            ingest_state,
-            &source_file,
-            SOURCE_FILE_INGESTED_SUCCESSFULLY_NOTE,
-        )?;
-        resolve_invalid_json_error_if_fully_read(
-            &tx,
-            ingest_state,
-            &source_file,
-            stored.next_read_offset,
-            pass_size,
-            SOURCE_FILE_INGESTED_SUCCESSFULLY_NOTE,
-        )?;
-        tx.commit()
-            .map_err(|source| sqlite_error(&source_file.path, source))?;
         return Ok(0);
     }
 
@@ -1038,9 +1020,7 @@ fn ingest_source_file(
     let content_fingerprint = fingerprint(&buffer);
     let source_metadata = source_metadata(&source_file)?;
 
-    let tx = conn
-        .transaction()
-        .map_err(|source| sqlite_error(&source_file.path, source))?;
+    let tx = begin_transaction(conn, &source_file.path)?;
     insert_session_if_missing(&tx, &source_file)?;
     let stored = load_session(&tx, &source_file)?.expect("session row should exist after insert");
     let prefix_intact = append_prefix_intact(
@@ -1048,6 +1028,7 @@ fn ingest_source_file(
         stored.prefix_fingerprint.as_deref(),
         &buffer,
     );
+    let read_boundary = invalid_json_resolution_boundary(&source_file, &buffer, pass_size)?;
     let import_mode = import_mode(
         &source_file,
         &stored,
@@ -1059,10 +1040,10 @@ fn ingest_source_file(
 
     if import_mode == ImportMode::Skip {
         let parent_session_id = resolve_parent_session_id(&tx, &source_file)?;
-        let read_boundary = invalid_json_resolution_boundary(&source_file, &buffer, pass_size)?;
-        update_skipped_session(
-            &tx,
-            SkippedSessionUpdate {
+        commit_skipped_session_refresh(
+            tx,
+            ingest_state,
+            &SkippedSessionUpdate {
                 source_file: &source_file,
                 session_id: stored.id,
                 parent_session_id,
@@ -1073,37 +1054,26 @@ fn ingest_source_file(
                     content_fingerprint: &content_fingerprint,
                 }),
             },
+            Some(JsonResolution {
+                next_read_offset: stored.next_read_offset,
+                read_boundary,
+            }),
         )?;
-        resolve_invalid_session_meta_error(
-            &tx,
-            ingest_state,
-            &source_file,
-            SOURCE_FILE_INGESTED_SUCCESSFULLY_NOTE,
-        )?;
-        resolve_invalid_json_error_if_fully_read(
-            &tx,
-            ingest_state,
-            &source_file,
-            stored.next_read_offset,
-            read_boundary,
-            SOURCE_FILE_INGESTED_SUCCESSFULLY_NOTE,
-        )?;
-        tx.commit()
-            .map_err(|source| sqlite_error(&source_file.path, source))?;
         return Ok(0);
     }
 
-    let generation = match import_mode {
-        ImportMode::Append | ImportMode::Skip => stored.current_generation,
-        ImportMode::Rewrite => stored.current_generation + 1,
+    let generation = if import_mode == ImportMode::Rewrite {
+        stored.current_generation + 1
+    } else {
+        stored.current_generation
     };
-    let read_boundary = invalid_json_resolution_boundary(&source_file, &buffer, pass_size)?;
     let imported = match source_file.source_format {
         SourceFormat::Jsonl => {
             let committed_len = read_boundary as usize;
-            let start_offset = match import_mode {
-                ImportMode::Append => stored.next_read_offset.max(0) as usize,
-                ImportMode::Rewrite | ImportMode::Skip => 0,
+            let start_offset = if import_mode == ImportMode::Append {
+                stored.next_read_offset.max(0) as usize
+            } else {
+                0
             }
             .min(committed_len);
 
@@ -1148,58 +1118,14 @@ fn ingest_source_file(
             metadata: &metadata,
         },
     )?;
-    resolve_invalid_session_meta_error(
-        &tx,
-        ingest_state,
-        &source_file,
-        SOURCE_FILE_INGESTED_SUCCESSFULLY_NOTE,
-    )?;
-    resolve_invalid_json_error_if_fully_read(
-        &tx,
+    resolve_success_and_commit(
+        tx,
         ingest_state,
         &source_file,
         imported.next_read_offset,
         read_boundary,
-        SOURCE_FILE_INGESTED_SUCCESSFULLY_NOTE,
     )?;
-
-    tx.commit()
-        .map_err(|source| sqlite_error(&source_file.path, source))?;
     Ok(imported.inserted_event_count)
-}
-
-fn ingest_opencode_sqlite_session(
-    conn: &mut Connection,
-    ingest_state: &mut IngestState,
-    source_file: &SourceFile,
-    pass_size: i64,
-    file_mtime: Option<i64>,
-) -> Result<u64> {
-    ingest_sqlite_session_snapshot(
-        conn,
-        ingest_state,
-        source_file,
-        pass_size,
-        file_mtime,
-        opencode_session_snapshot(source_file)?,
-    )
-}
-
-fn ingest_hermes_sqlite_session(
-    conn: &mut Connection,
-    ingest_state: &mut IngestState,
-    source_file: &SourceFile,
-    pass_size: i64,
-    file_mtime: Option<i64>,
-) -> Result<u64> {
-    ingest_sqlite_session_snapshot(
-        conn,
-        ingest_state,
-        source_file,
-        pass_size,
-        file_mtime,
-        hermes_session_snapshot(source_file)?,
-    )
 }
 
 fn ingest_sqlite_session_snapshot(
@@ -1216,33 +1142,23 @@ fn ingest_sqlite_session_snapshot(
     if let Some(stored) = &stored
         && stored.content_fingerprint.as_deref() == Some(content_fingerprint.as_str())
     {
-        let path_is_current =
-            stored.file_path.as_deref() == Some(source_file.path.to_string_lossy().as_ref());
-        let file_state_is_current =
-            stored.file_size == Some(pass_size) && stored.file_mtime == file_mtime;
-        let parent_is_current = stored.parent_session_id == parent_session_id;
-        let source_metadata_is_current =
-            stored.source_metadata.as_deref() == Some(snapshot.source_metadata.as_str());
-        if path_is_current
-            && file_state_is_current
-            && parent_is_current
-            && source_metadata_is_current
-        {
-            resolve_invalid_session_meta_error(
-                conn,
-                ingest_state,
-                source_file,
-                SOURCE_FILE_INGESTED_SUCCESSFULLY_NOTE,
-            )?;
+        if stored_sqlite_snapshot_matches(
+            stored,
+            source_file,
+            pass_size,
+            file_mtime,
+            parent_session_id,
+            &snapshot.source_metadata,
+        ) {
+            resolve_ingest_success_meta_error(conn, ingest_state, source_file)?;
             return Ok(0);
         }
 
-        let tx = conn
-            .transaction()
-            .map_err(|source| sqlite_error(&source_file.path, source))?;
-        update_skipped_session(
-            &tx,
-            SkippedSessionUpdate {
+        let tx = begin_transaction(conn, &source_file.path)?;
+        commit_skipped_session_refresh(
+            tx,
+            ingest_state,
+            &SkippedSessionUpdate {
                 source_file,
                 session_id: stored.id,
                 parent_session_id,
@@ -1253,15 +1169,8 @@ fn ingest_sqlite_session_snapshot(
                     content_fingerprint: &content_fingerprint,
                 }),
             },
+            None,
         )?;
-        resolve_invalid_session_meta_error(
-            &tx,
-            ingest_state,
-            source_file,
-            SOURCE_FILE_INGESTED_SUCCESSFULLY_NOTE,
-        )?;
-        tx.commit()
-            .map_err(|source| sqlite_error(&source_file.path, source))?;
         return Ok(0);
     }
 
@@ -1269,9 +1178,7 @@ fn ingest_sqlite_session_snapshot(
         .as_ref()
         .filter(|stored| !is_empty_source_file_placeholder(stored))
         .map_or(0, |stored| stored.current_generation + 1);
-    let tx = conn
-        .transaction()
-        .map_err(|source| sqlite_error(&source_file.path, source))?;
+    let tx = begin_transaction(conn, &source_file.path)?;
     insert_session_if_missing(&tx, source_file)?;
     let stored = load_session(&tx, source_file)?.expect("session row should exist after insert");
     let mut inserted_event_count = 0;
@@ -1310,16 +1217,16 @@ fn ingest_sqlite_session_snapshot(
             metadata: &snapshot.metadata,
         },
     )?;
-    resolve_invalid_session_meta_error(
-        &tx,
-        ingest_state,
-        source_file,
-        SOURCE_FILE_INGESTED_SUCCESSFULLY_NOTE,
-    )?;
-
-    tx.commit()
-        .map_err(|source| sqlite_error(&source_file.path, source))?;
+    resolve_session_meta_and_commit(tx, ingest_state, source_file)?;
     Ok(inserted_event_count)
+}
+
+fn known_source_file(source_file: &SourceFile, source_session_id: impl Into<String>) -> SourceFile {
+    SourceFile {
+        source_session_id: source_session_id.into(),
+        source_session_id_kind: SourceSessionIdKind::Known,
+        ..source_file.clone()
+    }
 }
 
 fn resolve_source_file(
@@ -1340,14 +1247,11 @@ fn resolve_source_file(
     if let Some(stored) = &stored_by_path
         && unchanged_by_mtime(stored, pass_size, file_mtime)
     {
-        return Ok(ResolvedSourceFile {
-            source_file: SourceFile {
-                source_session_id: stored.source_session_id.clone(),
-                source_session_id_kind: SourceSessionIdKind::Known,
-                ..source_file.clone()
-            },
-            buffer: None,
-        });
+        return Ok(resolved_known_source_file(
+            source_file,
+            stored.source_session_id.clone(),
+            None,
+        ));
     }
 
     let (source_session_id, buffer) = match source_file.source_session_id_kind {
@@ -1382,14 +1286,18 @@ fn resolve_source_file(
         &source_session_id,
     )?;
 
-    Ok(ResolvedSourceFile {
-        source_file: SourceFile {
-            source_session_id,
-            source_session_id_kind: SourceSessionIdKind::Known,
-            ..source_file.clone()
-        },
+    Ok(resolved_known_source_file(source_file, source_session_id, buffer))
+}
+
+fn resolved_known_source_file(
+    source_file: &SourceFile,
+    source_session_id: String,
+    buffer: Option<Vec<u8>>,
+) -> ResolvedSourceFile {
+    ResolvedSourceFile {
+        source_file: known_source_file(source_file, source_session_id),
         buffer,
-    })
+    }
 }
 
 #[derive(Debug)]
@@ -1976,9 +1884,7 @@ fn record_source_file_ingest_error(
     source_file: &SourceFile,
     error: &JottraceError,
 ) -> Result<()> {
-    let tx = conn
-        .transaction()
-        .map_err(|source| sqlite_error(&source_file.path, source))?;
+    let tx = begin_transaction(conn, &source_file.path)?;
     let stored_by_path = if matches!(
         source_file.source_format,
         SourceFormat::OpenCodeSqlite | SourceFormat::HermesSqlite
@@ -1988,14 +1894,7 @@ fn record_source_file_ingest_error(
         load_session_by_source_file_path(&tx, source_file)?
     };
     let (error_source_file, stored) = if let Some(stored) = stored_by_path {
-        (
-            SourceFile {
-                source_session_id: stored.source_session_id.clone(),
-                source_session_id_kind: SourceSessionIdKind::Known,
-                ..source_file.clone()
-            },
-            stored,
-        )
+        (known_source_file(source_file, stored.source_session_id.clone()), stored)
     } else {
         let error_source_file = source_file_for_ingest_error(source_file);
         insert_session_if_missing(&tx, &error_source_file)?;
@@ -2016,19 +1915,14 @@ fn record_source_file_ingest_error(
             message: &message,
         },
     )?;
-    tx.commit()
-        .map_err(|source| sqlite_error(&error_source_file.path, source))
+    commit_ingest_transaction(tx, &error_source_file.path)
 }
 
 fn source_file_for_ingest_error(source_file: &SourceFile) -> SourceFile {
     if source_file.source_session_id_kind == SourceSessionIdKind::GeminiChatJson
         && let Some(source_session_id) = recover_gemini_source_session_id(source_file)
     {
-        return SourceFile {
-            source_session_id,
-            source_session_id_kind: SourceSessionIdKind::Known,
-            ..source_file.clone()
-        };
+        return known_source_file(source_file, source_session_id);
     }
     source_file.clone()
 }
@@ -2150,6 +2044,40 @@ fn load_session_by_source_file_path(
     .map_err(|source| sqlite_error(&source_file.path, source))
 }
 
+fn stored_session_path_matches(stored: &StoredSession, source_file: &SourceFile) -> bool {
+    stored.file_path.as_deref() == Some(source_file.path.to_string_lossy().as_ref())
+}
+
+fn stored_session_metadata_matches(stored: &StoredSession, source_metadata: Option<&str>) -> bool {
+    stored.source_metadata.as_deref() == source_metadata
+}
+
+fn stored_jsonl_linked_session_matches(
+    stored: &StoredSession,
+    source_file: &SourceFile,
+    parent_session_id: Option<i64>,
+    session_source_metadata: Option<&str>,
+) -> bool {
+    stored_session_path_matches(stored, source_file)
+        && stored.parent_session_id == parent_session_id
+        && stored_session_metadata_matches(stored, session_source_metadata)
+}
+
+fn stored_sqlite_snapshot_matches(
+    stored: &StoredSession,
+    source_file: &SourceFile,
+    pass_size: i64,
+    file_mtime: Option<i64>,
+    parent_session_id: Option<i64>,
+    source_metadata: &str,
+) -> bool {
+    stored_session_path_matches(stored, source_file)
+        && stored.file_size == Some(pass_size)
+        && stored.file_mtime == file_mtime
+        && stored.parent_session_id == parent_session_id
+        && stored_session_metadata_matches(stored, Some(source_metadata))
+}
+
 fn unchanged_by_mtime(stored: &StoredSession, pass_size: i64, file_mtime: Option<i64>) -> bool {
     stored.file_size == Some(pass_size)
         && file_mtime.is_some()
@@ -2180,15 +2108,12 @@ fn import_mode(
         Some(_) if source_file.source_format == SourceFormat::Jsonl && !prefix_intact => {
             ImportMode::Rewrite
         }
-        Some(_)
-            if retry_unresolved_invalid_json
-                && source_file.source_format == SourceFormat::Jsonl
-                && pass_size >= stored.next_read_offset =>
-        {
-            ImportMode::Append
-        }
         Some(file_size)
-            if source_file.source_format == SourceFormat::Jsonl && pass_size > file_size =>
+            if source_file.source_format == SourceFormat::Jsonl
+                && (
+                    (retry_unresolved_invalid_json && pass_size >= stored.next_read_offset)
+                    || pass_size > file_size
+                ) =>
         {
             ImportMode::Append
         }
@@ -2232,7 +2157,74 @@ fn invalid_json_resolution_boundary(
     i64_from_usize(committed_len(buffer), &source_file.path)
 }
 
-fn update_skipped_session(tx: &Transaction<'_>, update: SkippedSessionUpdate<'_>) -> Result<()> {
+fn begin_transaction<'a>(conn: &'a mut Connection, path: &Path) -> Result<Transaction<'a>> {
+    conn.transaction()
+        .map_err(|source| sqlite_error(path, source))
+}
+
+fn commit_ingest_transaction(tx: Transaction<'_>, path: &Path) -> Result<()> {
+    tx.commit().map_err(|source| sqlite_error(path, source))
+}
+
+/// Bounds for resolving a stale `invalid_json` ingest error after a JSONL pass:
+/// the read offset reached and the byte boundary up to which content is committed.
+/// Absent for SQLite snapshots, which are atomic and cannot raise `invalid_json`.
+struct JsonResolution {
+    next_read_offset: i64,
+    read_boundary: i64,
+}
+
+fn commit_skipped_session_refresh(
+    tx: Transaction<'_>,
+    ingest_state: &mut IngestState,
+    update: &SkippedSessionUpdate<'_>,
+    json_resolution: Option<JsonResolution>,
+) -> Result<()> {
+    update_skipped_session(&tx, update)?;
+    if let Some(JsonResolution {
+        next_read_offset,
+        read_boundary,
+    }) = json_resolution
+    {
+        resolve_success_and_commit(
+            tx,
+            ingest_state,
+            update.source_file,
+            next_read_offset,
+            read_boundary,
+        )
+    } else {
+        resolve_session_meta_and_commit(tx, ingest_state, update.source_file)
+    }
+}
+
+fn resolve_success_and_commit(
+    tx: Transaction<'_>,
+    ingest_state: &mut IngestState,
+    source_file: &SourceFile,
+    next_read_offset: i64,
+    read_boundary: i64,
+) -> Result<()> {
+    resolve_ingest_success_errors(
+        &tx,
+        ingest_state,
+        source_file,
+        next_read_offset,
+        read_boundary,
+    )?;
+    commit_ingest_transaction(tx, &source_file.path)
+}
+
+fn resolve_session_meta_and_commit(
+    tx: Transaction<'_>,
+    ingest_state: &mut IngestState,
+    source_file: &SourceFile,
+) -> Result<()> {
+    resolve_ingest_success_meta_error(&tx, ingest_state, source_file)?;
+    commit_ingest_transaction(tx, &source_file.path)
+}
+
+fn update_skipped_session(tx: &Transaction<'_>, update: &SkippedSessionUpdate<'_>) -> Result<()> {
     let checked_file = update.checked_file.as_ref();
     let has_checked_file = checked_file.is_some();
     let file_mtime = checked_file.and_then(|state| state.file_mtime);
@@ -2491,6 +2483,37 @@ fn unresolved_source_file_error_paths(
         paths.insert(row.map_err(|source| sqlite_error(db_path, source))?);
     }
     Ok(paths)
+}
+
+fn resolve_ingest_success_errors(
+    conn: &Connection,
+    ingest_state: &mut IngestState,
+    source_file: &SourceFile,
+    next_read_offset: i64,
+    pass_size: i64,
+) -> Result<()> {
+    resolve_ingest_success_meta_error(conn, ingest_state, source_file)?;
+    resolve_invalid_json_error_if_fully_read(
+        conn,
+        ingest_state,
+        source_file,
+        next_read_offset,
+        pass_size,
+        SOURCE_FILE_INGESTED_SUCCESSFULLY_NOTE,
+    )
+}
+
+fn resolve_ingest_success_meta_error(
+    conn: &Connection,
+    ingest_state: &mut IngestState,
+    source_file: &SourceFile,
+) -> Result<()> {
+    resolve_invalid_session_meta_error(
+        conn,
+        ingest_state,
+        source_file,
+        SOURCE_FILE_INGESTED_SUCCESSFULLY_NOTE,
+    )
 }
 
 fn resolve_invalid_session_meta_error(

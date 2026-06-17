@@ -1,6 +1,7 @@
 use std::env;
+use std::fmt::Display;
 use std::io::{self, Write};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 fn main() -> ExitCode {
@@ -107,8 +108,7 @@ fn run_events_command(args: impl Iterator<Item = String>) -> ExitCode {
             return ExitCode::SUCCESS;
         }
         Err(message) => {
-            eprintln!("{message}");
-            eprintln!("run `jottrace events --help` for usage");
+            eprint_command_usage("events", &message);
             return ExitCode::from(2);
         }
     };
@@ -117,7 +117,7 @@ fn run_events_command(args: impl Iterator<Item = String>) -> ExitCode {
     let db_path = match jottrace::storage::db_path_from_env() {
         Ok(db_path) => db_path,
         Err(error) => {
-            eprintln!("jottrace events failed: {error}");
+            eprint_command_failure("events", error);
             return ExitCode::FAILURE;
         }
     };
@@ -153,7 +153,7 @@ fn run_events_command(args: impl Iterator<Item = String>) -> ExitCode {
         ) {
             return ExitCode::SUCCESS;
         }
-        eprintln!("jottrace events failed: {error}");
+        eprint_command_failure("events", error);
         return ExitCode::FAILURE;
     }
 
@@ -227,8 +227,7 @@ fn run_web_command(args: impl Iterator<Item = String>) -> ExitCode {
             return ExitCode::SUCCESS;
         }
         Err(message) => {
-            eprintln!("{message}");
-            eprintln!("run `jottrace web --help` for usage");
+            eprint_command_usage("web", &message);
             return ExitCode::from(2);
         }
     };
@@ -237,7 +236,7 @@ fn run_web_command(args: impl Iterator<Item = String>) -> ExitCode {
     let db_path = match jottrace::storage::db_path_from_env() {
         Ok(db_path) => db_path,
         Err(error) => {
-            eprintln!("jottrace web failed: {error}");
+            eprint_command_failure("web", error);
             return ExitCode::FAILURE;
         }
     };
@@ -245,15 +244,12 @@ fn run_web_command(args: impl Iterator<Item = String>) -> ExitCode {
     let server = match jottrace::web::WebServer::bind(db_path.clone(), options.port) {
         Ok(server) => server,
         Err(error) => {
-            eprintln!("jottrace web failed: {error}");
+            eprint_command_failure("web", error);
             return ExitCode::FAILURE;
         }
     };
 
-    println!("jottrace web");
-    println!("url: {}", server.local_url());
-    println!("db: {}", db_path.display());
-    let _ = io::stdout().flush();
+    print_web_startup(server.local_url(), &db_path);
 
     let result = if options.once {
         server.serve_once()
@@ -264,7 +260,7 @@ fn run_web_command(args: impl Iterator<Item = String>) -> ExitCode {
     match result {
         Ok(()) => ExitCode::SUCCESS,
         Err(error) => {
-            eprintln!("jottrace web failed: {error}");
+            eprint_command_failure("web", error);
             ExitCode::FAILURE
         }
     }
@@ -305,8 +301,7 @@ fn run_ingest_command(args: impl Iterator<Item = String>) -> ExitCode {
         }
         Ok(DetailCommand::Run(options)) => options,
         Err(message) => {
-            eprintln!("{message}");
-            eprintln!("run `jottrace ingest --help` for usage");
+            eprint_command_usage("ingest", &message);
             return ExitCode::from(2);
         }
     };
@@ -314,23 +309,11 @@ fn run_ingest_command(args: impl Iterator<Item = String>) -> ExitCode {
 
     match jottrace::run_ingest() {
         Ok(report) => {
-            println!("jottrace ingest");
-            if options.details {
-                println!("db: {}", report.db_path.display());
-            }
-            println!("files: {}", report.file_count);
-            println!("sessions: {}", report.session_count);
-            println!("events: {}", report.event_count);
-            println!("inserted_events: {}", report.inserted_event_count);
-            println!("skipped_files: {}", report.skipped_file_count);
-            println!(
-                "unresolved_ingest_errors: {}",
-                report.unresolved_ingest_error_count
-            );
+            print_ingest_report(&report, options.details);
             ExitCode::SUCCESS
         }
         Err(error) => {
-            eprintln!("jottrace ingest failed: {error}");
+            eprint_command_failure("ingest", error);
             ExitCode::FAILURE
         }
     }
@@ -372,21 +355,16 @@ fn run_update_command(args: impl Iterator<Item = String>) -> ExitCode {
         }
         Ok(SimpleCommand::Run) => match jottrace::run_update() {
             Ok(report) => {
-                println!("jottrace update");
-                println!("current_version: {}", report.current_version);
-                println!("target_version: {}", report.target_version);
-                println!("install_path: {}", report.install_path.display());
-                println!("result: {}", report.result.as_str());
+                print_update_report(&report);
                 ExitCode::SUCCESS
             }
             Err(error) => {
-                eprintln!("jottrace update failed: {error}");
+                eprint_command_failure("update", error);
                 ExitCode::FAILURE
             }
         },
         Err(message) => {
-            eprintln!("{message}");
-            eprintln!("run `jottrace update --help` for usage");
+            eprint_command_usage("update", &message);
             ExitCode::from(2)
         }
     }
@@ -408,8 +386,7 @@ fn run_compact_command(args: impl Iterator<Item = String>) -> ExitCode {
             return ExitCode::SUCCESS;
         }
         Err(message) => {
-            eprintln!("{message}");
-            eprintln!("run `jottrace compact --help` for usage");
+            eprint_command_usage("compact", &message);
             return ExitCode::from(2);
         }
     };
@@ -420,71 +397,194 @@ fn run_compact_command(args: impl Iterator<Item = String>) -> ExitCode {
         cli_options.details,
     ) {
         Ok(report) => {
-            println!("jottrace compact");
-            println!("mode: {}", compact_mode_name(report.mode));
-            if cli_options.details {
-                println!("db: {}", report.db_path.display());
-            }
-            if cli_options.details && report.mode != jottrace::CompactMode::Vacuum {
-                println!("batch_size: {}", report.batch_size);
-            }
-            println!("eligible_raw_events: {}", report.eligible_raw_events);
-            if cli_options.details || report.mode == jottrace::CompactMode::Apply {
-                println!("converted_events: {}", report.converted_events);
-            }
-            println!("estimated_bytes_saved: {}", report.estimated_bytes_saved);
-            if cli_options.details {
-                println!("raw_events_before: {}", report.raw_events_before);
-                println!("zstd_events_before: {}", report.zstd_events_before);
-                println!("raw_events_after: {}", report.raw_events_after);
-                println!("zstd_events_after: {}", report.zstd_events_after);
-                println!(
-                    "unsupported_codec_events: {}",
-                    report.unsupported_codec_events
-                );
-                println!("skipped_raw_events: {}", report.skipped_raw_events);
-                println!("skipped_small_events: {}", report.skipped_small_events);
-                println!(
-                    "skipped_not_smaller_events: {}",
-                    report.skipped_not_smaller_events
-                );
-                println!(
-                    "skipped_round_trip_failed_events: {}",
-                    report.skipped_round_trip_failed_events
-                );
-                println!("stored_bytes_before: {}", report.stored_bytes_before);
-                println!("stored_bytes_after: {}", report.stored_bytes_after);
-                println!(
-                    "sqlite_reclaimable_bytes_before: {}",
-                    report.sqlite_reclaimable_bytes_before
-                );
-            }
-            if cli_options.details || report.mode != jottrace::CompactMode::DryRun {
-                println!(
-                    "sqlite_reclaimable_bytes: {}",
-                    report.sqlite_reclaimable_bytes
-                );
-            }
-            println!(
-                "unresolved_ingest_errors: {}",
-                report.unresolved_ingest_errors
-            );
-            if report.mode == jottrace::CompactMode::DryRun {
-                println!(
-                    "next: rerun with `jottrace compact --apply` to rewrite eligible payloads"
-                );
-            }
-            if cli_options.details || report.mode == jottrace::CompactMode::Apply {
-                println!(
-                    "disk_reclaim: after applying, run `jottrace compact --vacuum` to reclaim free SQLite pages"
-                );
-            }
+            print_compact_report(&report, cli_options.details);
             ExitCode::SUCCESS
         }
         Err(error) => {
-            eprintln!("jottrace compact failed: {error}");
+            eprint_command_failure("compact", error);
             ExitCode::FAILURE
         }
+    }
+}
+
+fn eprint_command_usage(command: &str, message: &str) {
+    eprintln!("{message}");
+    eprintln!("run `jottrace {command} --help` for usage");
+}
+
+fn eprint_command_failure(command: &str, error: impl Display) {
+    eprintln!("jottrace {command} failed: {error}");
+}
+
+fn print_web_startup(local_url: impl AsRef<str>, db_path: &Path) {
+    println!("jottrace web");
+    println!("url: {}", local_url.as_ref());
+    println!("db: {}", db_path.display());
+    let _ = io::stdout().flush();
+}
+
+fn print_update_report(report: &jottrace::UpdateReport) {
+    println!("jottrace update");
+    println!("current_version: {}", report.current_version);
+    println!("target_version: {}", report.target_version);
+    println!("install_path: {}", report.install_path.display());
+    println!("result: {}", report.result.as_str());
+}
+
+fn print_ingest_report(report: &jottrace::IngestReport, details: bool) {
+    println!("jottrace ingest");
+    if details {
+        println!("db: {}", report.db_path.display());
+    }
+    println!("files: {}", report.file_count);
+    println!("sessions: {}", report.session_count);
+    println!("events: {}", report.event_count);
+    println!("inserted_events: {}", report.inserted_event_count);
+    println!("skipped_files: {}", report.skipped_file_count);
+    println!(
+        "unresolved_ingest_errors: {}",
+        report.unresolved_ingest_error_count
+    );
+}
+
+fn print_status_report(report: &jottrace::StatusReport, details: bool) {
+    println!("jottrace status");
+    if details {
+        println!("db: {}", report.db_path.display());
+        println!("schema_version: {}", report.schema_version);
+    }
+    println!("sessions: {}", report.session_count);
+    println!("events: {}", report.event_count);
+    println!(
+        "unresolved_ingest_errors: {}",
+        report.unresolved_ingest_error_count
+    );
+}
+
+fn print_doctor_report(report: &jottrace::DoctorReport, details: bool) {
+    println!("jottrace doctor");
+    if details {
+        println!("data_dir: {} (ok)", report.data_dir.display());
+    }
+    println!("permissions: private (ok)");
+    println!(
+        "unresolved_ingest_errors: {}",
+        report.unresolved_ingest_error_count
+    );
+    if !details && report.unresolved_ingest_error_count > 0 {
+        println!("next: run `jottrace doctor --details` to inspect recent ingest errors");
+    }
+    if details && !report.recent_ingest_errors.is_empty() {
+        println!(
+            "recent_ingest_errors: {}",
+            report.recent_ingest_errors.len()
+        );
+    }
+    if details {
+        for ingest_error in &report.recent_ingest_errors {
+            print_recent_ingest_error(ingest_error);
+        }
+    }
+}
+
+fn print_recent_ingest_error(ingest_error: &jottrace::IngestErrorSummary) {
+    println!("recent_ingest_error:");
+    println!("  source: {}", ingest_error.source);
+    if let Some(source_session_id) = &ingest_error.source_session_id {
+        println!("  source_session_id: {source_session_id}");
+    }
+    println!("  file: {}", ingest_error.file_path.display());
+    if let Some(line_number) = ingest_error.line_number {
+        println!("  line: {line_number}");
+    }
+    if let Some(byte_offset) = ingest_error.byte_offset {
+        println!("  byte_offset: {byte_offset}");
+    }
+    if let Some(generation) = ingest_error.generation {
+        println!("  generation: {generation}");
+    }
+    println!("  kind: {}", ingest_error.error_kind);
+    println!("  first_seen_at: {}", ingest_error.first_seen_at);
+    println!("  last_seen_at: {}", ingest_error.last_seen_at);
+    println!("  occurrences: {}", ingest_error.occurrence_count);
+    println!("  message: {}", ingest_error.message);
+}
+
+fn print_pack_report(report: &jottrace::PackReport) {
+    println!("jottrace pack");
+    println!("archive: {}", report.archive.display());
+    println!("bytes: {}", report.archive_bytes);
+    println!("schema_version: {}", report.schema_version);
+    println!("sessions: {}", report.session_count);
+    println!("events: {}", report.event_count);
+    println!("next: copy to the destination, then run `jottrace settle <archive>`");
+}
+
+fn print_settle_report(report: &jottrace::SettleReport) {
+    println!("jottrace settle");
+    println!("data_dir: {}", report.data_dir.display());
+    println!("schema_version: {}", report.schema_version);
+    println!("sessions: {}", report.session_count);
+    println!("events: {}", report.event_count);
+}
+
+fn print_compact_report(report: &jottrace::CompactReport, details: bool) {
+    println!("jottrace compact");
+    println!("mode: {}", compact_mode_name(report.mode));
+    if details {
+        println!("db: {}", report.db_path.display());
+    }
+    if details && report.mode != jottrace::CompactMode::Vacuum {
+        println!("batch_size: {}", report.batch_size);
+    }
+    println!("eligible_raw_events: {}", report.eligible_raw_events);
+    if details || report.mode == jottrace::CompactMode::Apply {
+        println!("converted_events: {}", report.converted_events);
+    }
+    println!("estimated_bytes_saved: {}", report.estimated_bytes_saved);
+    if details {
+        println!("raw_events_before: {}", report.raw_events_before);
+        println!("zstd_events_before: {}", report.zstd_events_before);
+        println!("raw_events_after: {}", report.raw_events_after);
+        println!("zstd_events_after: {}", report.zstd_events_after);
+        println!(
+            "unsupported_codec_events: {}",
+            report.unsupported_codec_events
+        );
+        println!("skipped_raw_events: {}", report.skipped_raw_events);
+        println!("skipped_small_events: {}", report.skipped_small_events);
+        println!(
+            "skipped_not_smaller_events: {}",
+            report.skipped_not_smaller_events
+        );
+        println!(
+            "skipped_round_trip_failed_events: {}",
+            report.skipped_round_trip_failed_events
+        );
+        println!("stored_bytes_before: {}", report.stored_bytes_before);
+        println!("stored_bytes_after: {}", report.stored_bytes_after);
+        println!(
+            "sqlite_reclaimable_bytes_before: {}",
+            report.sqlite_reclaimable_bytes_before
+        );
+    }
+    if details || report.mode != jottrace::CompactMode::DryRun {
+        println!(
+            "sqlite_reclaimable_bytes: {}",
+            report.sqlite_reclaimable_bytes
+        );
+    }
+    println!(
+        "unresolved_ingest_errors: {}",
+        report.unresolved_ingest_errors
+    );
+    if report.mode == jottrace::CompactMode::DryRun {
+        println!("next: rerun with `jottrace compact --apply` to rewrite eligible payloads");
+    }
+    if details || report.mode == jottrace::CompactMode::Apply {
+        println!(
+            "disk_reclaim: after applying, run `jottrace compact --vacuum` to reclaim free SQLite pages"
+        );
     }
 }
 
@@ -565,8 +665,7 @@ fn run_doctor_command(args: impl Iterator<Item = String>) -> ExitCode {
         }
         Ok(DetailCommand::Run(options)) => options,
         Err(message) => {
-            eprintln!("{message}");
-            eprintln!("run `jottrace doctor --help` for usage");
+            eprint_command_usage("doctor", &message);
             return ExitCode::from(2);
         }
     };
@@ -578,52 +677,11 @@ fn run_doctor_command(args: impl Iterator<Item = String>) -> ExitCode {
         include_recent_errors: options.details,
     }) {
         Ok(report) => {
-            println!("jottrace doctor");
-            if options.details {
-                println!("data_dir: {} (ok)", report.data_dir.display());
-            }
-            println!("permissions: private (ok)");
-            println!(
-                "unresolved_ingest_errors: {}",
-                report.unresolved_ingest_error_count
-            );
-            if !options.details && report.unresolved_ingest_error_count > 0 {
-                println!("next: run `jottrace doctor --details` to inspect recent ingest errors");
-            }
-            if options.details && !report.recent_ingest_errors.is_empty() {
-                println!(
-                    "recent_ingest_errors: {}",
-                    report.recent_ingest_errors.len()
-                );
-            }
-            if options.details {
-                for ingest_error in &report.recent_ingest_errors {
-                    println!("recent_ingest_error:");
-                    println!("  source: {}", ingest_error.source);
-                    if let Some(source_session_id) = &ingest_error.source_session_id {
-                        println!("  source_session_id: {source_session_id}");
-                    }
-                    println!("  file: {}", ingest_error.file_path.display());
-                    if let Some(line_number) = ingest_error.line_number {
-                        println!("  line: {line_number}");
-                    }
-                    if let Some(byte_offset) = ingest_error.byte_offset {
-                        println!("  byte_offset: {byte_offset}");
-                    }
-                    if let Some(generation) = ingest_error.generation {
-                        println!("  generation: {generation}");
-                    }
-                    println!("  kind: {}", ingest_error.error_kind);
-                    println!("  first_seen_at: {}", ingest_error.first_seen_at);
-                    println!("  last_seen_at: {}", ingest_error.last_seen_at);
-                    println!("  occurrences: {}", ingest_error.occurrence_count);
-                    println!("  message: {}", ingest_error.message);
-                }
-            }
+            print_doctor_report(&report, options.details);
             ExitCode::SUCCESS
         }
         Err(error) => {
-            eprintln!("jottrace doctor failed: {error}");
+            eprint_command_failure("doctor", error);
             ExitCode::FAILURE
         }
     }
@@ -637,8 +695,7 @@ fn run_status_command(args: impl Iterator<Item = String>) -> ExitCode {
         }
         Ok(DetailCommand::Run(options)) => options,
         Err(message) => {
-            eprintln!("{message}");
-            eprintln!("run `jottrace status --help` for usage");
+            eprint_command_usage("status", &message);
             return ExitCode::from(2);
         }
     };
@@ -646,21 +703,11 @@ fn run_status_command(args: impl Iterator<Item = String>) -> ExitCode {
 
     match jottrace::run_status() {
         Ok(report) => {
-            println!("jottrace status");
-            if options.details {
-                println!("db: {}", report.db_path.display());
-                println!("schema_version: {}", report.schema_version);
-            }
-            println!("sessions: {}", report.session_count);
-            println!("events: {}", report.event_count);
-            println!(
-                "unresolved_ingest_errors: {}",
-                report.unresolved_ingest_error_count
-            );
+            print_status_report(&report, options.details);
             ExitCode::SUCCESS
         }
         Err(error) => {
-            eprintln!("jottrace status failed: {error}");
+            eprint_command_failure("status", error);
             ExitCode::FAILURE
         }
     }
@@ -736,8 +783,7 @@ fn run_pack_command(args: impl Iterator<Item = String>) -> ExitCode {
         }
         Ok(PackCommand::Run(options)) => options,
         Err(message) => {
-            eprintln!("{message}");
-            eprintln!("run `jottrace pack --help` for usage");
+            eprint_command_usage("pack", &message);
             return ExitCode::from(2);
         }
     };
@@ -747,17 +793,11 @@ fn run_pack_command(args: impl Iterator<Item = String>) -> ExitCode {
         output: options.output,
     }) {
         Ok(report) => {
-            println!("jottrace pack");
-            println!("archive: {}", report.archive.display());
-            println!("bytes: {}", report.archive_bytes);
-            println!("schema_version: {}", report.schema_version);
-            println!("sessions: {}", report.session_count);
-            println!("events: {}", report.event_count);
-            println!("next: copy to the destination, then run `jottrace settle <archive>`");
+            print_pack_report(&report);
             ExitCode::SUCCESS
         }
         Err(error) => {
-            eprintln!("jottrace pack failed: {error}");
+            eprint_command_failure("pack", error);
             ExitCode::FAILURE
         }
     }
@@ -771,8 +811,7 @@ fn run_settle_command(args: impl Iterator<Item = String>) -> ExitCode {
         }
         Ok(SettleCommand::Run(options)) => options,
         Err(message) => {
-            eprintln!("{message}");
-            eprintln!("run `jottrace settle --help` for usage");
+            eprint_command_usage("settle", &message);
             return ExitCode::from(2);
         }
     };
@@ -782,15 +821,11 @@ fn run_settle_command(args: impl Iterator<Item = String>) -> ExitCode {
         force: options.force,
     }) {
         Ok(report) => {
-            println!("jottrace settle");
-            println!("data_dir: {}", report.data_dir.display());
-            println!("schema_version: {}", report.schema_version);
-            println!("sessions: {}", report.session_count);
-            println!("events: {}", report.event_count);
+            print_settle_report(&report);
             ExitCode::SUCCESS
         }
         Err(error) => {
-            eprintln!("jottrace settle failed: {error}");
+            eprint_command_failure("settle", error);
             ExitCode::FAILURE
         }
     }

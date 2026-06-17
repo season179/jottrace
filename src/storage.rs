@@ -380,38 +380,34 @@ fn reject_unsupported_event_codecs(
     session_id: i64,
     upper_bound: Option<(i64, i64)>,
 ) -> Result<()> {
-    let codec: Option<String> = match upper_bound {
-        Some((generation, seq)) => conn
-            .query_row(
-                "SELECT events.codec
-                 FROM events
-                 WHERE events.session_id = ?1
-                   AND events.codec NOT IN (?4, ?5)
-                   AND (
-                       events.generation < ?2
-                       OR (events.generation = ?2 AND events.seq <= ?3)
-                   )
-                 ORDER BY events.generation, events.seq
-                 LIMIT 1",
-                params![session_id, generation, seq, RAW_CODEC, ZSTD_CODEC],
-                |row| row.get(0),
-            )
-            .optional()
-            .map_err(|source| sqlite_error(path, source))?,
-        None => conn
-            .query_row(
-                "SELECT events.codec
-                 FROM events
-                 WHERE events.session_id = ?1
-                   AND events.codec NOT IN (?2, ?3)
-                 ORDER BY events.generation, events.seq
-                 LIMIT 1",
-                params![session_id, RAW_CODEC, ZSTD_CODEC],
-                |row| row.get(0),
-            )
-            .optional()
-            .map_err(|source| sqlite_error(path, source))?,
+    let (bound_generation, bound_seq) = match upper_bound {
+        Some((generation, seq)) => (Some(generation), Some(seq)),
+        None => (None, None),
     };
+    let codec: Option<String> = conn
+        .query_row(
+            "SELECT events.codec
+             FROM events
+             WHERE events.session_id = ?1
+               AND events.codec NOT IN (?2, ?3)
+               AND (
+                   ?4 IS NULL
+                   OR events.generation < ?4
+                   OR (events.generation = ?4 AND events.seq <= ?5)
+               )
+             ORDER BY events.generation, events.seq
+             LIMIT 1",
+            params![
+                session_id,
+                RAW_CODEC,
+                ZSTD_CODEC,
+                bound_generation,
+                bound_seq
+            ],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(|source| sqlite_error(path, source))?;
 
     match codec {
         Some(codec) => Err(unsupported_event_payload_codec(&codec)),
