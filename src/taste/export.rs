@@ -7,7 +7,7 @@ use crate::storage::query_collect;
 use crate::{JottraceError, io_error};
 use crate::{Result, data_dir_from_env, open_locked_database, private_open_options};
 
-use super::compiler::{EvidenceKind, PreferenceExample, PreferenceOutcome};
+use super::compiler::{PreferenceExample, PreferenceOutcome};
 
 const CLAUDE_SOURCE: &str = "claude_cli";
 
@@ -91,38 +91,14 @@ fn load_preference_examples(db_path: &Path, conn: &Connection) -> Result<Vec<Pre
     query_collect(
         db_path,
         conn,
-        "SELECT tool_use_id, source_session_id, generation, proposal_event_seq, file_path,
-                tool_name, proposal_content, context, outcome, confidence, evidence_kind,
-                extractor_version
+        "SELECT source, source_session_id, generation, proposal_event_seq, tool_use_id,
+                file_path, tool_name, proposal_content, context, outcome, confidence,
+                evidence_kind, extractor_version
          FROM preference_examples
          WHERE source = ?1
          ORDER BY source_session_id ASC, generation ASC, proposal_event_seq ASC",
         params![CLAUDE_SOURCE],
-        |row| {
-            let tool_use_id: String = row.get(0)?;
-            let source_session_id: String = row.get(1)?;
-            let generation: i64 = row.get(2)?;
-            let proposal_event_seq: i64 = row.get(3)?;
-            let outcome: String = row.get(8)?;
-            let evidence_kind: String = row.get(10)?;
-            Ok(PreferenceExample {
-                source: CLAUDE_SOURCE.to_string(),
-                source_session_id,
-                generation: usize::try_from(generation).expect("generation fits in usize"),
-                proposal_event_seq: usize::try_from(proposal_event_seq)
-                    .expect("proposal_event_seq fits in usize"),
-                tool_use_id,
-                file_path: row.get(4)?,
-                tool_name: row.get(5)?,
-                proposal_content: row.get(6)?,
-                context: row.get(7)?,
-                outcome: PreferenceOutcome::from_db_str(&outcome).expect("valid outcome"),
-                confidence: row.get(9)?,
-                evidence_kind: EvidenceKind::from_db_str(&evidence_kind)
-                    .expect("valid evidence_kind"),
-                extractor_version: row.get(11)?,
-            })
-        },
+        PreferenceExample::from_row,
     )
 }
 

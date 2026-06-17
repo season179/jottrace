@@ -99,6 +99,35 @@ pub struct PreferenceExample {
     pub extractor_version: String,
 }
 
+impl PreferenceExample {
+    /// Build an example from a `preference_examples` row whose columns are, in
+    /// order: source, source_session_id, generation, proposal_event_seq,
+    /// tool_use_id, file_path, tool_name, proposal_content, context, outcome,
+    /// confidence, evidence_kind, extractor_version.
+    pub(crate) fn from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Self> {
+        let generation: i64 = row.get(2)?;
+        let proposal_event_seq: i64 = row.get(3)?;
+        let outcome: String = row.get(9)?;
+        let evidence_kind: String = row.get(11)?;
+        Ok(Self {
+            source: row.get(0)?,
+            source_session_id: row.get(1)?,
+            generation: usize::try_from(generation).expect("generation fits in usize"),
+            proposal_event_seq: usize::try_from(proposal_event_seq)
+                .expect("proposal_event_seq fits in usize"),
+            tool_use_id: row.get(4)?,
+            file_path: row.get(5)?,
+            tool_name: row.get(6)?,
+            proposal_content: row.get(7)?,
+            context: row.get(8)?,
+            outcome: PreferenceOutcome::from_db_str(&outcome).expect("valid outcome"),
+            confidence: row.get(10)?,
+            evidence_kind: EvidenceKind::from_db_str(&evidence_kind).expect("valid evidence_kind"),
+            extractor_version: row.get(12)?,
+        })
+    }
+}
+
 /// Joins parsed proposals with materialized timelines and labels outcomes.
 #[derive(Debug, Default)]
 pub struct PreferenceCompiler;
