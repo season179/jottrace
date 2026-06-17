@@ -124,6 +124,13 @@ impl std::error::Error for UpdateError {
 
 pub type Result<T> = std::result::Result<T, UpdateError>;
 
+fn io_error(path: &Path, source: io::Error) -> UpdateError {
+    UpdateError::Io {
+        path: path.to_path_buf(),
+        source,
+    }
+}
+
 pub fn is_auto_update_command(command: &str) -> bool {
     command == AUTO_UPDATE_COMMAND
 }
@@ -187,10 +194,7 @@ fn install_path() -> Result<PathBuf> {
         return Ok(PathBuf::from(path));
     }
 
-    env::current_exe().map_err(|source| UpdateError::Io {
-        path: PathBuf::from("current executable"),
-        source,
-    })
+    env::current_exe().map_err(|source| io_error(Path::new("current executable"), source))
 }
 
 fn release_url(target: &str, version: &str) -> String {
@@ -260,10 +264,7 @@ fn binary_version(path: &Path) -> Result<String> {
     let output = Command::new(path)
         .arg("--version")
         .output()
-        .map_err(|source| UpdateError::Io {
-            path: path.to_path_buf(),
-            source,
-        })?;
+        .map_err(|source| io_error(path, source))?;
 
     if !output.status.success() {
         return Err(UpdateError::InvalidArtifact(format!(
@@ -524,26 +525,17 @@ fn replace_installed_binary(candidate: &Path, install_path: &Path) -> Result<()>
         unique_suffix()
     ));
 
-    fs::copy(candidate, &staged).map_err(|source| UpdateError::Io {
-        path: staged.clone(),
-        source,
-    })?;
+    fs::copy(candidate, &staged).map_err(|source| io_error(&staged, source))?;
 
     #[cfg(unix)]
     fs::set_permissions(&staged, fs::Permissions::from_mode(0o755)).map_err(|source| {
         let _ = fs::remove_file(&staged);
-        UpdateError::Io {
-            path: staged.clone(),
-            source,
-        }
+        io_error(&staged, source)
     })?;
 
     fs::rename(&staged, install_path).map_err(|source| {
         let _ = fs::remove_file(&staged);
-        UpdateError::Io {
-            path: install_path.to_path_buf(),
-            source,
-        }
+        io_error(install_path, source)
     })
 }
 
@@ -558,10 +550,7 @@ impl TempDir {
             std::process::id(),
             unique_suffix()
         ));
-        fs::create_dir(&path).map_err(|source| UpdateError::Io {
-            path: path.clone(),
-            source,
-        })?;
+        fs::create_dir(&path).map_err(|source| io_error(&path, source))?;
         Ok(Self { path })
     }
 }
