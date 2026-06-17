@@ -812,29 +812,33 @@ fn move_staged_into_place(staging: &Path, dest: &Path) -> Result<()> {
     Ok(())
 }
 
+/// Canonicalise `path`, mapping a missing path to `None` rather than an error.
+/// The `*_inside_journal` checks treat a not-yet-existing path as "nothing to be
+/// inside of", so they short-circuit to `Ok(false)` when this returns `None`.
+fn canonicalize_optional(path: &Path) -> Result<Option<PathBuf>> {
+    match fs::canonicalize(path) {
+        Ok(canonical) => Ok(Some(canonical)),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(None),
+        Err(source) => Err(io_error(path, source)),
+    }
+}
+
 /// Decide whether `pack`'s output path would land inside the source journal.
 /// Unlike `archive_is_inside`, the candidate file does not exist yet, so we
 /// canonicalise the parent directory (which must exist) and rejoin the file
 /// name to obtain a stable resolved path before comparing.
 fn pack_output_inside_journal(output: &Path, data_dir: &Path) -> Result<bool> {
-    let canonical_data = match fs::canonicalize(data_dir) {
-        Ok(path) => path,
-        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(false),
-        Err(source) => {
-            return Err(io_error(data_dir, source));
-        }
+    let Some(canonical_data) = canonicalize_optional(data_dir)? else {
+        return Ok(false);
     };
     let parent = output.parent().filter(|p| !p.as_os_str().is_empty());
     let canonical_parent = match parent {
-        Some(parent) => match fs::canonicalize(parent) {
-            Ok(path) => path,
+        Some(parent) => match canonicalize_optional(parent)? {
+            Some(canonical) => canonical,
             // If the parent does not exist there is nothing to be inside of
             // yet; the subsequent `claim_private_path` will turn that into a
             // proper I/O error with the right path.
-            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(false),
-            Err(source) => {
-                return Err(io_error(parent, source));
-            }
+            None => return Ok(false),
         },
         None => fs::canonicalize(".").map_err(|source| io_error(Path::new("."), source))?,
     };
@@ -853,12 +857,8 @@ fn pack_output_inside_journal(output: &Path, data_dir: &Path) -> Result<bool> {
 fn archive_is_inside(archive: &Path, data_dir: &Path) -> Result<bool> {
     let canonical_archive =
         fs::canonicalize(archive).map_err(|source| io_error(archive, source))?;
-    let canonical_data = match fs::canonicalize(data_dir) {
-        Ok(path) => path,
-        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(false),
-        Err(source) => {
-            return Err(io_error(data_dir, source));
-        }
+    let Some(canonical_data) = canonicalize_optional(data_dir)? else {
+        return Ok(false);
     };
     Ok(canonical_archive.starts_with(canonical_data))
 }
