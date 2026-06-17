@@ -115,6 +115,26 @@ fn timeline_materializer_builds_per_file_snapshot_sequence_from_fixture() {
             .as_deref()
             .is_some_and(|content| !content.contains("accepted_fn"))
     );
+
+    let write_rows: Vec<_> = rows
+        .iter()
+        .filter(|row| row.file_path == "src/taste_new.rs")
+        .collect();
+    assert_eq!(write_rows.len(), 1, "expected one taste_new snapshot");
+    assert_eq!(
+        write_rows[0].source_kind,
+        TimelineSourceKind::SidecarSnapshot
+    );
+    assert_eq!(
+        write_rows[0].trigger_event_ref.as_deref(),
+        Some("toolu_taste_write")
+    );
+    assert!(
+        write_rows[0]
+            .content
+            .as_deref()
+            .is_some_and(|content| content.contains("written by Write tool fixture"))
+    );
 }
 
 #[test]

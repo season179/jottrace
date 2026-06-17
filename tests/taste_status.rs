@@ -59,6 +59,10 @@ fn install_taste_claude_fixture(root: &Path) {
         &format!("claude-cli/file-history/{TASTE_SESSION_ID}/fixture-mcpb5e6f7a@v1"),
         &history_dir.join("fixture-mcpb5e6f7a@v1"),
     );
+    copy_fixture_file(
+        &format!("claude-cli/file-history/{TASTE_SESSION_ID}/fixture-writenew1@v1"),
+        &history_dir.join("fixture-writenew1@v1"),
+    );
     for version in ["v1", "v2"] {
         copy_fixture_file(
             &format!("claude-cli/file-history/{TASTE_SESSION_ID}/fixture-partial1@{version}"),
@@ -116,8 +120,8 @@ fn taste_status_reports_fixture_coverage_after_extract() {
             edited: 1,
         }
     );
-    assert_eq!(report.high_confidence_proposals, 5);
-    assert!((report.coverage_percent - (5.0 / 10.0 * 100.0)).abs() < 1e-9);
+    assert_eq!(report.high_confidence_proposals, 6);
+    assert!((report.coverage_percent - (6.0 / 10.0 * 100.0)).abs() < 1e-9);
 }
 
 #[test]
@@ -147,7 +151,7 @@ fn taste_status_cli_reports_fixture_counts() {
     assert!(stdout.contains("accepted: 6"));
     assert!(stdout.contains("rejected: 3"));
     assert!(stdout.contains("edited: 1"));
-    assert!(stdout.contains("high_confidence_coverage: 50.0%"));
+    assert!(stdout.contains("high_confidence_coverage: 60.0%"));
 }
 
 #[test]

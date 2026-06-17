@@ -136,8 +136,14 @@ fn compiler_labels_fixture_proposals_with_present_at_session_end_outcomes() {
     let write = example_by_tool(&examples, "toolu_taste_write");
     assert_eq!(write.file_path.as_deref(), Some("src/taste_new.rs"));
     assert_eq!(write.outcome, PreferenceOutcome::Accepted);
-    assert_eq!(write.evidence_kind, EvidenceKind::MissingFinalState);
-    assert!(write.confidence < 1.0);
+    assert_eq!(write.evidence_kind, EvidenceKind::DirectWrite);
+    assert_eq!(write.confidence, 1.0);
+    assert!(
+        write
+            .proposal_content
+            .as_deref()
+            .is_some_and(|content| content.contains("written by Write tool fixture"))
+    );
 
     let sub = example_by_tool(&examples, "toolu_taste_sub_edit");
     assert_eq!(sub.file_path.as_deref(), Some("src/taste_subagent.rs"));

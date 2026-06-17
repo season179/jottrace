@@ -17,6 +17,7 @@ fn taste_fixture_corpus_has_required_session_shapes() {
         "\"trackedFileBackups\":[{\"filePath\"",
         "\"content\":",
         "\"backupFileName\":\"fixture-a1b2c3d4@v1\"",
+        "\"backupFileName\":\"fixture-writenew1@v1\"",
         "\"name\":\"Edit\"",
         "\"name\":\"Write\"",
         "\"name\":\"Bash\"",
@@ -53,6 +54,19 @@ fn taste_fixture_corpus_has_snapshot_sidecar_blobs() {
             "sidecar @{version} should contain baseline marker"
         );
     }
+}
+
+#[test]
+fn taste_fixture_corpus_has_write_sidecar_blob() {
+    let sidecar = taste_fixture(&format!(
+        "claude-cli/file-history/{TASTE_SESSION_ID}/fixture-writenew1@v1"
+    ));
+    assert!(sidecar.exists(), "missing sidecar fixture-writenew1@v1");
+    let body = fs::read_to_string(sidecar).expect("read write sidecar");
+    assert!(
+        body.contains("written by Write tool fixture"),
+        "write sidecar should contain Write fixture marker"
+    );
 }
 
 #[test]

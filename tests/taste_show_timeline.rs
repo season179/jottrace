@@ -61,6 +61,10 @@ fn install_taste_claude_fixture(root: &Path) {
         &format!("claude-cli/file-history/{TASTE_SESSION_ID}/fixture-mcpb5e6f7a@v1"),
         &history_dir.join("fixture-mcpb5e6f7a@v1"),
     );
+    copy_fixture_file(
+        &format!("claude-cli/file-history/{TASTE_SESSION_ID}/fixture-writenew1@v1"),
+        &history_dir.join("fixture-writenew1@v1"),
+    );
     for version in ["v1", "v2"] {
         copy_fixture_file(
             &format!("claude-cli/file-history/{TASTE_SESSION_ID}/fixture-partial1@{version}"),

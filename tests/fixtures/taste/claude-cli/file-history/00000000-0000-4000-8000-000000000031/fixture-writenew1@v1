@@ -1,0 +1,2 @@
+// written by Write tool fixture
+pub const NEW: &str = "fixture";
