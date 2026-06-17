@@ -390,10 +390,125 @@ fn run_taste_command(mut args: impl Iterator<Item = String>) -> ExitCode {
         }
         Some("extract") => run_taste_extract_command(args),
         Some("status") => run_taste_status_command(args),
+        Some("show") => run_taste_show_command(args),
         Some(subcommand) => {
             eprintln!("unknown taste subcommand: {subcommand}");
             eprintln!("run `jottrace taste --help` for usage");
             ExitCode::from(2)
+        }
+    }
+}
+
+fn run_taste_show_command(mut args: impl Iterator<Item = String>) -> ExitCode {
+    match args.next().as_deref() {
+        None | Some("help") | Some("--help") | Some("-h") => {
+            print_taste_show_help();
+            ExitCode::SUCCESS
+        }
+        Some("timeline") => run_taste_show_timeline_command(args),
+        Some(subcommand) => {
+            eprintln!("unknown taste show subcommand: {subcommand}");
+            eprintln!("run `jottrace taste show --help` for usage");
+            ExitCode::from(2)
+        }
+    }
+}
+
+fn run_taste_show_timeline_command(args: impl Iterator<Item = String>) -> ExitCode {
+    let options = match parse_taste_show_timeline_command(args) {
+        Ok(TasteShowTimelineCommand::Help) => {
+            print_taste_show_timeline_help();
+            return ExitCode::SUCCESS;
+        }
+        Ok(TasteShowTimelineCommand::Run(options)) => options,
+        Err(message) => {
+            eprint_command_usage("taste show timeline", &message);
+            return ExitCode::from(2);
+        }
+    };
+    jottrace::update::maybe_spawn_auto_update();
+
+    match jottrace::run_taste_show_timeline(options) {
+        Ok(report) => {
+            print_taste_timeline_report(&report);
+            ExitCode::SUCCESS
+        }
+        Err(error) => {
+            eprint_command_failure("taste show timeline", error);
+            ExitCode::FAILURE
+        }
+    }
+}
+
+enum TasteShowTimelineCommand {
+    Run(jottrace::TasteShowTimelineOptions),
+    Help,
+}
+
+fn parse_taste_show_timeline_command(
+    mut args: impl Iterator<Item = String>,
+) -> std::result::Result<TasteShowTimelineCommand, String> {
+    let mut source_session_id = None;
+    let mut file_path = None;
+
+    while let Some(arg) = args.next() {
+        match arg.as_str() {
+            "--help" | "-h" => return Ok(TasteShowTimelineCommand::Help),
+            "--session" => {
+                let value = args
+                    .next()
+                    .ok_or_else(|| "--session requires a value".to_string())?;
+                if source_session_id.is_some() {
+                    return Err("taste show timeline accepts only one --session value".to_string());
+                }
+                source_session_id = Some(value);
+            }
+            "--file" => {
+                let value = args
+                    .next()
+                    .ok_or_else(|| "--file requires a value".to_string())?;
+                if file_path.is_some() {
+                    return Err("taste show timeline accepts only one --file value".to_string());
+                }
+                file_path = Some(value);
+            }
+            _ => return Err(format!("unknown taste show timeline option: {arg}")),
+        }
+    }
+
+    let source_session_id = source_session_id
+        .ok_or_else(|| "taste show timeline requires --session <source_session_id>".to_string())?;
+    let file_path =
+        file_path.ok_or_else(|| "taste show timeline requires --file <path>".to_string())?;
+
+    Ok(TasteShowTimelineCommand::Run(
+        jottrace::TasteShowTimelineOptions {
+            source_session_id,
+            file_path,
+        },
+    ))
+}
+
+fn print_taste_timeline_report(report: &jottrace::TasteTimelineShowReport) {
+    println!("jottrace taste show timeline");
+    println!("session: {}", report.source_session_id);
+    println!("file: {}", report.file_path);
+    println!("rows: {}", report.rows.len());
+    for row in &report.rows {
+        let trigger = row.trigger_event_ref.as_deref().unwrap_or("-");
+        println!(
+            "seq {} (event_seq {}) [{}] trigger={}",
+            row.seq,
+            row.event_seq,
+            row.source_kind.as_str(),
+            trigger
+        );
+        match &row.content {
+            Some(content) => println!("{content}"),
+            None => println!("<missing content>"),
+        }
+        if row.seq + 1 < report.rows.len() {
+            println!();
         }
     }
 }
@@ -986,6 +1101,7 @@ fn print_help() {
     println!("  jottrace status [--details]");
     println!("  jottrace taste extract [--session <source_session_id>] [--force]");
     println!("  jottrace taste status [--details]");
+    println!("  jottrace taste show timeline --session <id> --file <path>");
     println!("  jottrace update");
     println!("  jottrace upgrade");
     println!("  jottrace web [--port <port>] [--once]");
@@ -1092,9 +1208,33 @@ fn print_taste_help() {
     println!("Usage:");
     println!("  jottrace taste extract [--session <source_session_id>] [--force]");
     println!("  jottrace taste status [--details]");
+    println!("  jottrace taste show timeline --session <id> --file <path>");
     println!();
     println!("Run `jottrace taste extract --help` for extraction options.");
     println!("Run `jottrace taste status --help` for status options.");
+    println!("Run `jottrace taste show timeline --help` for timeline inspection options.");
+}
+
+fn print_taste_show_help() {
+    println!("jottrace taste show");
+    println!("Inspect materialized taste extraction artifacts.");
+    println!();
+    println!("Usage:");
+    println!("  jottrace taste show timeline --session <source_session_id> --file <path>");
+    println!();
+    println!("Run `jottrace taste show timeline --help` for timeline options.");
+}
+
+fn print_taste_show_timeline_help() {
+    println!("jottrace taste show timeline");
+    println!("Inspect the reconstructed per-file content timeline for one session.");
+    println!();
+    println!("Usage:");
+    println!("  jottrace taste show timeline --session <source_session_id> --file <path>");
+    println!();
+    println!("Options:");
+    println!("  --session <id>  Claude parent source_session_id");
+    println!("  --file <path>   File path as stored in file_timelines (relative to session cwd)");
 }
 
 fn print_taste_status_help() {
@@ -1115,6 +1255,7 @@ fn print_taste_extract_help() {
     println!("Usage:");
     println!("  jottrace taste extract [--session <source_session_id>] [--force]");
     println!("  jottrace taste status [--details]");
+    println!("  jottrace taste show timeline --session <id> --file <path>");
     println!();
     println!("Options:");
     println!("  --session <id>  Extract only the given Claude parent source_session_id");

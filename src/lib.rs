@@ -24,8 +24,9 @@ pub use compact::{CompactMode, CompactOptions, CompactReport, run_compact};
 pub use ingest::{IngestReport, run_ingest};
 pub use storage::{IngestErrorSummary, StatusReport, run_status};
 pub use taste::{
-    TasteExtractOptions, TasteExtractReport, TasteOutcomeCounts, TasteStatusReport,
-    run_taste_extract, run_taste_status, taste_status_for_data_dir,
+    TasteExtractOptions, TasteExtractReport, TasteOutcomeCounts, TasteShowTimelineOptions,
+    TasteStatusReport, TasteTimelineShowReport, run_taste_extract, run_taste_show_timeline,
+    run_taste_status, show_timeline_for_data_dir, taste_status_for_data_dir,
 };
 pub use transfer::{PackOptions, PackReport, SettleOptions, SettleReport, run_pack, run_settle};
 pub use update::{UpdateReport, run_update};
@@ -87,6 +88,11 @@ pub enum JottraceError {
     SessionNotFound {
         source: String,
         source_session_id: String,
+    },
+    /// `taste show timeline` found no materialized rows for the requested file.
+    TimelineNotFound {
+        source_session_id: String,
+        file_path: String,
     },
     InvalidEventLimit {
         limit: i64,
@@ -202,6 +208,13 @@ impl fmt::Display for JottraceError {
             } => write!(
                 f,
                 "session not found: source={source} source_session_id={source_session_id}"
+            ),
+            Self::TimelineNotFound {
+                source_session_id,
+                file_path,
+            } => write!(
+                f,
+                "timeline not found: session={source_session_id} file={file_path} (run `jottrace taste extract` first)"
             ),
             Self::InvalidEventLimit { limit } => {
                 write!(f, "event limit must be at least 1; got {limit}")

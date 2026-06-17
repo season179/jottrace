@@ -1,6 +1,7 @@
 pub mod compiler;
 pub mod extract;
 pub mod parse;
+pub mod show;
 pub mod sidecar;
 pub mod status;
 pub mod timeline;
@@ -13,6 +14,10 @@ pub use extract::{TasteExtractOptions, TasteExtractReport, run_taste_extract};
 pub use parse::{
     ClaudeSessionParser, ContentRef, ParseKind, ParsedEvent, SessionEventParser, SourceStream,
     merge_streams, parse_jsonl, renumber_seq,
+};
+pub use show::{
+    TasteShowTimelineOptions, TasteTimelineShowReport, run_taste_show_timeline,
+    show_timeline_for_data_dir,
 };
 pub use sidecar::{ResolvedContent, SnapshotSidecarResolver};
 pub use status::{

@@ -25,6 +25,15 @@ impl TimelineSourceKind {
             Self::MissingSidecar => "missing_sidecar",
         }
     }
+
+    pub fn from_db_str(value: &str) -> Option<Self> {
+        match value {
+            "inline_snapshot" => Some(Self::InlineSnapshot),
+            "sidecar_snapshot" => Some(Self::SidecarSnapshot),
+            "missing_sidecar" => Some(Self::MissingSidecar),
+            _ => None,
+        }
+    }
 }
 
 /// One reconstructed per-file content state in a session timeline.
