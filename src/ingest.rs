@@ -11,7 +11,7 @@ use std::time::UNIX_EPOCH;
 use crate::storage::{
     DB_FILE_NAME, encode_event_payload, open_database, sqlite_error, status_from_connection,
 };
-use crate::{JottraceError, Result};
+use crate::{JottraceError, Result, io_error};
 
 const CLAUDE_SOURCE: &str = "claude_cli";
 const CLAUDE_LOCAL_AGENT_SOURCE: &str = "claude_local_agent";
@@ -528,21 +528,17 @@ fn discover_gemini_session_files() -> Result<Vec<SourceFile>> {
         Ok(entries) => entries,
         Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(Vec::new()),
         Err(source) => {
-            return Err(JottraceError::Io { path: root, source });
+            return Err(io_error(&root, source));
         }
     };
 
     let mut paths = Vec::new();
     for entry in entries {
-        let entry = entry.map_err(|source| JottraceError::Io {
-            path: root.clone(),
-            source,
-        })?;
+        let entry = entry.map_err(|source| io_error(&root, source))?;
         let path = entry.path();
-        let file_type = entry.file_type().map_err(|source| JottraceError::Io {
-            path: path.clone(),
-            source,
-        })?;
+        let file_type = entry
+            .file_type()
+            .map_err(|source| io_error(&path, source))?;
         if file_type.is_dir() {
             collect_json_files(&path.join("chats"), false, &mut paths)?;
         }
@@ -662,7 +658,7 @@ fn discover_sqlite_session_files(
             ));
         }
         Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(Vec::new()),
-        Err(source) => return Err(JottraceError::Io { path, source }),
+        Err(source) => return Err(io_error(&path, source)),
     }
 
     // Any failure reading the store — open, prepare, query, a bad row, or an
@@ -773,23 +769,16 @@ fn collect_claude_local_agent_audit_files(root: &Path, paths: &mut Vec<PathBuf>)
         Ok(entries) => entries,
         Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
         Err(source) => {
-            return Err(JottraceError::Io {
-                path: root.to_path_buf(),
-                source,
-            });
+            return Err(io_error(root, source));
         }
     };
 
     for entry in entries {
-        let entry = entry.map_err(|source| JottraceError::Io {
-            path: root.to_path_buf(),
-            source,
-        })?;
+        let entry = entry.map_err(|source| io_error(root, source))?;
         let path = entry.path();
-        let file_type = entry.file_type().map_err(|source| JottraceError::Io {
-            path: path.clone(),
-            source,
-        })?;
+        let file_type = entry
+            .file_type()
+            .map_err(|source| io_error(&path, source))?;
         if !file_type.is_dir() {
             continue;
         }
@@ -817,10 +806,7 @@ fn push_claude_local_agent_audit_file(session_dir: &Path, paths: &mut Vec<PathBu
         Ok(_) => {}
         Err(error) if error.kind() == io::ErrorKind::NotFound => {}
         Err(source) => {
-            return Err(JottraceError::Io {
-                path: audit_path,
-                source,
-            });
+            return Err(io_error(&audit_path, source));
         }
     }
     Ok(())
@@ -844,23 +830,16 @@ fn collect_files_with_extension(
         Ok(entries) => entries,
         Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
         Err(source) => {
-            return Err(JottraceError::Io {
-                path: root.to_path_buf(),
-                source,
-            });
+            return Err(io_error(root, source));
         }
     };
 
     for entry in entries {
-        let entry = entry.map_err(|source| JottraceError::Io {
-            path: root.to_path_buf(),
-            source,
-        })?;
+        let entry = entry.map_err(|source| io_error(root, source))?;
         let path = entry.path();
-        let file_type = entry.file_type().map_err(|source| JottraceError::Io {
-            path: path.clone(),
-            source,
-        })?;
+        let file_type = entry
+            .file_type()
+            .map_err(|source| io_error(&path, source))?;
         if file_type.is_dir() {
             if recursive {
                 collect_files_with_extension(&path, extension, true, paths)?;
@@ -893,10 +872,8 @@ fn ingest_source_file(
     ingest_state: &mut IngestState,
     source_file: &SourceFile,
 ) -> Result<u64> {
-    let metadata = fs::metadata(&source_file.path).map_err(|source| JottraceError::Io {
-        path: source_file.path.clone(),
-        source,
-    })?;
+    let metadata =
+        fs::metadata(&source_file.path).map_err(|source| io_error(&source_file.path, source))?;
     if !metadata.is_file() {
         return Err(JottraceError::NotFile(source_file.path.clone()));
     }
@@ -2381,10 +2358,7 @@ fn source_metadata_for_source_file(
         Ok(metadata) => metadata,
         Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
         Err(source) => {
-            return Err(JottraceError::Io {
-                path: settings_path,
-                source,
-            });
+            return Err(io_error(&settings_path, source));
         }
     };
     if !metadata.is_file() {
@@ -2663,18 +2637,12 @@ fn generation_event_count(
 }
 
 fn read_bounded(path: &Path, pass_size: u64) -> Result<Vec<u8>> {
-    let file = File::open(path).map_err(|source| JottraceError::Io {
-        path: path.to_path_buf(),
-        source,
-    })?;
+    let file = File::open(path).map_err(|source| io_error(path, source))?;
     let mut reader = file.take(pass_size);
     let mut buffer = Vec::with_capacity(pass_size.min(1024 * 1024) as usize);
     reader
         .read_to_end(&mut buffer)
-        .map_err(|source| JottraceError::Io {
-            path: path.to_path_buf(),
-            source,
-        })?;
+        .map_err(|source| io_error(path, source))?;
     Ok(buffer)
 }
 
@@ -2782,10 +2750,7 @@ fn claude_local_agent_metadata(metadata_path: Option<&Path>) -> Result<ParsedMet
             return Ok(ParsedMetadata::default());
         }
         Err(source) => {
-            return Err(JottraceError::Io {
-                path: path.to_path_buf(),
-                source,
-            });
+            return Err(io_error(path, source));
         }
     };
     let metadata = serde_json::from_slice::<ClaudeLocalAgentMetadata<'_>>(&bytes)
@@ -2992,18 +2957,12 @@ fn first_committed_line(
     byte_limit: u64,
     missing_line_message: &str,
 ) -> Result<Option<Vec<u8>>> {
-    let file = File::open(path).map_err(|source| JottraceError::Io {
-        path: path.to_path_buf(),
-        source,
-    })?;
+    let file = File::open(path).map_err(|source| io_error(path, source))?;
     let mut reader = BufReader::new(file).take(byte_limit);
     let mut first_line = Vec::new();
     let read = reader
         .read_until(b'\n', &mut first_line)
-        .map_err(|source| JottraceError::Io {
-            path: path.to_path_buf(),
-            source,
-        })?;
+        .map_err(|source| io_error(path, source))?;
     if read == 0 || !first_line.ends_with(b"\n") {
         if read as u64 == byte_limit {
             return Ok(None);
@@ -3252,10 +3211,7 @@ fn i64_from_usize(value: usize, path: &Path) -> Result<i64> {
 }
 
 fn invalid_path(path: &Path, message: &str) -> JottraceError {
-    JottraceError::Io {
-        path: path.to_path_buf(),
-        source: io::Error::new(io::ErrorKind::InvalidData, message),
-    }
+    io_error(path, io::Error::new(io::ErrorKind::InvalidData, message))
 }
 
 fn invalid_session_meta(path: &Path, message: impl Into<String>) -> JottraceError {

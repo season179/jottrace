@@ -3,8 +3,8 @@ use serde::Serialize;
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 
-use crate::JottraceError;
 use crate::storage::{DB_FILE_NAME, open_database, sqlite_error};
+use crate::{JottraceError, io_error};
 use crate::{Result, acquire_data_lock, data_dir_from_env, private_open_options};
 
 use super::compiler::{EvidenceKind, PreferenceExample, PreferenceOutcome};
@@ -153,19 +153,13 @@ fn write_jsonl_export(examples: &[PreferenceExample], output_path: Option<&Path>
             if let Some(parent) = path.parent()
                 && !parent.as_os_str().is_empty()
             {
-                std::fs::create_dir_all(parent).map_err(|source| JottraceError::Io {
-                    path: parent.to_path_buf(),
-                    source,
-                })?;
+                std::fs::create_dir_all(parent).map_err(|source| io_error(parent, source))?;
             }
             let mut file = private_open_options()
                 .write(true)
                 .create_new(true)
                 .open(path)
-                .map_err(|source| JottraceError::Io {
-                    path: path.to_path_buf(),
-                    source,
-                })?;
+                .map_err(|source| io_error(path, source))?;
             file.write_all(&buffer)
                 .map_err(|source| JottraceError::Output { source })?;
         }

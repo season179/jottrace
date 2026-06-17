@@ -9,7 +9,7 @@ use crate::storage::{
     IngestErrorSummary, LATEST_SCHEMA_VERSION, RAW_CODEC, ZSTD_CODEC, decode_event_payload,
     decode_event_payload_prefix, sqlite_error, unresolved_ingest_errors_from_connection,
 };
-use crate::{JottraceError, Result};
+use crate::{JottraceError, Result, io_error};
 
 const SESSION_PAGE_SIZE: usize = 50;
 const EVENT_PAGE_SIZE: usize = 25;
@@ -117,11 +117,8 @@ pub struct WebServer {
 impl WebServer {
     pub fn bind(db_path: PathBuf, port: u16) -> Result<Self> {
         drop(open_web_database(&db_path)?);
-        let listener =
-            TcpListener::bind((Ipv4Addr::LOCALHOST, port)).map_err(|source| JottraceError::Io {
-                path: db_path.clone(),
-                source,
-            })?;
+        let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, port))
+            .map_err(|source| io_error(&db_path, source))?;
         Ok(Self { db_path, listener })
     }
 
@@ -154,10 +151,7 @@ impl WebServer {
         self.listener
             .accept()
             .map(|(stream, _)| stream)
-            .map_err(|source| JottraceError::Io {
-                path: self.db_path.clone(),
-                source,
-            })
+            .map_err(|source| io_error(&self.db_path, source))
     }
 
     fn handle_stream(&self, stream: &mut TcpStream) -> Result<()> {
@@ -232,10 +226,7 @@ impl WebServer {
     }
 
     fn io_error(&self, source: io::Error) -> JottraceError {
-        JottraceError::Io {
-            path: self.db_path.clone(),
-            source,
-        }
+        io_error(&self.db_path, source)
     }
 
     fn read_request(&self, stream: &mut TcpStream) -> Result<String> {
