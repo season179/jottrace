@@ -76,7 +76,8 @@ file_timelines  (session_id incl. merged subagents, file_path, seq,
 preference_examples  (export-ready labeled dataset rows)
 ```
 
-Two new tables (migration `010_taste_extraction.sql`):
+Two new data tables (migrations `010`–`011`; the `taste_extractions`
+idempotency metadata table is added by `013`):
 
 - **`file_timelines`** — one row per `(session_id, file_path, seq)`: the
   reconstructed content of that file at that point in the session, what
