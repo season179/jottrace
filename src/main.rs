@@ -87,56 +87,57 @@ enum SimpleCommand {
 }
 
 fn run_events_command(args: impl Iterator<Item = String>) -> ExitCode {
-    let options = match resolve_command("events", parse_events_command(args), print_events_help) {
-        Ok(options) => options,
-        Err(code) => return code,
-    };
-    jottrace::update::maybe_spawn_auto_update();
+    run_resolved_command(
+        "events",
+        parse_events_command(args),
+        print_events_help,
+        |options| {
+            let db_path = match jottrace::storage::db_path_from_env() {
+                Ok(db_path) => db_path,
+                Err(error) => {
+                    eprint_command_failure("events", error);
+                    return ExitCode::FAILURE;
+                }
+            };
+            let limit = match options.selection {
+                EventsSelection::All => None,
+                EventsSelection::Limit(limit) => Some(limit),
+            };
+            let stdout = io::stdout();
+            let mut stdout = io::BufWriter::new(stdout.lock());
+            let result = jottrace::storage::for_each_decoded_event_payload_for_session(
+                &db_path,
+                &options.source,
+                &options.source_session_id,
+                limit,
+                |payload| {
+                    stdout
+                        .write_all(payload)
+                        .and_then(|()| stdout.write_all(b"\n"))
+                        .map_err(|source| jottrace::JottraceError::Output { source })
+                },
+            );
 
-    let db_path = match jottrace::storage::db_path_from_env() {
-        Ok(db_path) => db_path,
-        Err(error) => {
-            eprint_command_failure("events", error);
-            return ExitCode::FAILURE;
-        }
-    };
-    let limit = match options.selection {
-        EventsSelection::All => None,
-        EventsSelection::Limit(limit) => Some(limit),
-    };
-    let stdout = io::stdout();
-    let mut stdout = io::BufWriter::new(stdout.lock());
-    let result = jottrace::storage::for_each_decoded_event_payload_for_session(
-        &db_path,
-        &options.source,
-        &options.source_session_id,
-        limit,
-        |payload| {
-            stdout
-                .write_all(payload)
-                .and_then(|()| stdout.write_all(b"\n"))
-                .map_err(|source| jottrace::JottraceError::Output { source })
+            let result = result.and_then(|()| {
+                stdout
+                    .flush()
+                    .map_err(|source| jottrace::JottraceError::Output { source })
+            });
+            if let Err(error) = result {
+                if matches!(
+                    &error,
+                    jottrace::JottraceError::Output { source }
+                        if source.kind() == io::ErrorKind::BrokenPipe
+                ) {
+                    return ExitCode::SUCCESS;
+                }
+                eprint_command_failure("events", error);
+                return ExitCode::FAILURE;
+            }
+
+            ExitCode::SUCCESS
         },
-    );
-
-    let result = result.and_then(|()| {
-        stdout
-            .flush()
-            .map_err(|source| jottrace::JottraceError::Output { source })
-    });
-    if let Err(error) = result {
-        if matches!(
-            &error,
-            jottrace::JottraceError::Output { source }
-                if source.kind() == io::ErrorKind::BrokenPipe
-        ) {
-            return ExitCode::SUCCESS;
-        }
-        eprint_command_failure("events", error);
-        return ExitCode::FAILURE;
-    }
-
-    ExitCode::SUCCESS
+    )
 }
 
 fn parse_events_command(
@@ -199,43 +200,39 @@ fn parse_events_command(
 }
 
 fn run_web_command(args: impl Iterator<Item = String>) -> ExitCode {
-    let options = match resolve_command("web", parse_web_command(args), print_web_help) {
-        Ok(options) => options,
-        Err(code) => return code,
-    };
-    jottrace::update::maybe_spawn_auto_update();
+    run_resolved_command("web", parse_web_command(args), print_web_help, |options| {
+        let db_path = match jottrace::storage::db_path_from_env() {
+            Ok(db_path) => db_path,
+            Err(error) => {
+                eprint_command_failure("web", error);
+                return ExitCode::FAILURE;
+            }
+        };
 
-    let db_path = match jottrace::storage::db_path_from_env() {
-        Ok(db_path) => db_path,
-        Err(error) => {
-            eprint_command_failure("web", error);
-            return ExitCode::FAILURE;
+        let server = match jottrace::web::WebServer::bind(db_path.clone(), options.port) {
+            Ok(server) => server,
+            Err(error) => {
+                eprint_command_failure("web", error);
+                return ExitCode::FAILURE;
+            }
+        };
+
+        print_web_startup(server.local_url(), &db_path);
+
+        let result = if options.once {
+            server.serve_once()
+        } else {
+            server.serve_forever()
+        };
+
+        match result {
+            Ok(()) => ExitCode::SUCCESS,
+            Err(error) => {
+                eprint_command_failure("web", error);
+                ExitCode::FAILURE
+            }
         }
-    };
-
-    let server = match jottrace::web::WebServer::bind(db_path.clone(), options.port) {
-        Ok(server) => server,
-        Err(error) => {
-            eprint_command_failure("web", error);
-            return ExitCode::FAILURE;
-        }
-    };
-
-    print_web_startup(server.local_url(), &db_path);
-
-    let result = if options.once {
-        server.serve_once()
-    } else {
-        server.serve_forever()
-    };
-
-    match result {
-        Ok(()) => ExitCode::SUCCESS,
-        Err(error) => {
-            eprint_command_failure("web", error);
-            ExitCode::FAILURE
-        }
-    }
+    })
 }
 
 fn parse_web_command(
@@ -266,19 +263,16 @@ fn parse_web_command(
 }
 
 fn run_ingest_command(args: impl Iterator<Item = String>) -> ExitCode {
-    let options = match resolve_command(
+    run_resolved_command(
         "ingest",
         parse_detail_command("ingest", args),
         print_ingest_help,
-    ) {
-        Ok(options) => options,
-        Err(code) => return code,
-    };
-    jottrace::update::maybe_spawn_auto_update();
-
-    finish_command("ingest", jottrace::run_ingest(), |report| {
-        print_ingest_report(report, options.details);
-    })
+        |options| {
+            finish_command("ingest", jottrace::run_ingest(), |report| {
+                print_ingest_report(report, options.details);
+            })
+        },
+    )
 }
 
 fn parse_simple_command(
@@ -365,38 +359,32 @@ fn run_taste_show_command(mut args: impl Iterator<Item = String>) -> ExitCode {
 }
 
 fn run_taste_show_example_command(args: impl Iterator<Item = String>) -> ExitCode {
-    let options = match resolve_command(
+    run_resolved_command(
         "taste show example",
         parse_taste_show_example_command(args),
         print_taste_show_example_help,
-    ) {
-        Ok(options) => options,
-        Err(code) => return code,
-    };
-    jottrace::update::maybe_spawn_auto_update();
-
-    finish_command(
-        "taste show example",
-        jottrace::run_taste_show_example(options),
-        print_taste_example_report,
+        |options| {
+            finish_command(
+                "taste show example",
+                jottrace::run_taste_show_example(options),
+                print_taste_example_report,
+            )
+        },
     )
 }
 
 fn run_taste_show_timeline_command(args: impl Iterator<Item = String>) -> ExitCode {
-    let options = match resolve_command(
+    run_resolved_command(
         "taste show timeline",
         parse_taste_show_timeline_command(args),
         print_taste_show_timeline_help,
-    ) {
-        Ok(options) => options,
-        Err(code) => return code,
-    };
-    jottrace::update::maybe_spawn_auto_update();
-
-    finish_command(
-        "taste show timeline",
-        jottrace::run_taste_show_timeline(options),
-        print_taste_timeline_report,
+        |options| {
+            finish_command(
+                "taste show timeline",
+                jottrace::run_taste_show_timeline(options),
+                print_taste_timeline_report,
+            )
+        },
     )
 }
 
@@ -549,19 +537,16 @@ fn print_taste_timeline_report(report: &jottrace::TasteTimelineShowReport) {
 }
 
 fn run_taste_status_command(args: impl Iterator<Item = String>) -> ExitCode {
-    let options = match resolve_command(
+    run_resolved_command(
         "taste status",
         parse_detail_command("taste status", args),
         print_taste_status_help,
-    ) {
-        Ok(options) => options,
-        Err(code) => return code,
-    };
-    jottrace::update::maybe_spawn_auto_update();
-
-    finish_command("taste status", jottrace::run_taste_status(), |report| {
-        print_taste_status_report(report, options.details);
-    })
+        |options| {
+            finish_command("taste status", jottrace::run_taste_status(), |report| {
+                print_taste_status_report(report, options.details);
+            })
+        },
+    )
 }
 
 fn print_taste_status_report(report: &jottrace::TasteStatusReport, details: bool) {
@@ -599,20 +584,17 @@ fn print_taste_status_report(report: &jottrace::TasteStatusReport, details: bool
 }
 
 fn run_taste_export_command(args: impl Iterator<Item = String>) -> ExitCode {
-    let options = match resolve_command(
+    run_resolved_command(
         "taste export",
         parse_taste_export_command(args),
         print_taste_export_help,
-    ) {
-        Ok(options) => options,
-        Err(code) => return code,
-    };
-    jottrace::update::maybe_spawn_auto_update();
-
-    finish_command(
-        "taste export",
-        jottrace::run_taste_export(options),
-        print_taste_export_report,
+        |options| {
+            finish_command(
+                "taste export",
+                jottrace::run_taste_export(options),
+                print_taste_export_report,
+            )
+        },
     )
 }
 
@@ -672,20 +654,17 @@ fn print_taste_export_report(report: &jottrace::TasteExportReport) {
 }
 
 fn run_taste_extract_command(args: impl Iterator<Item = String>) -> ExitCode {
-    let options = match resolve_command(
+    run_resolved_command(
         "taste extract",
         parse_taste_extract_command(args),
         print_taste_extract_help,
-    ) {
-        Ok(options) => options,
-        Err(code) => return code,
-    };
-    jottrace::update::maybe_spawn_auto_update();
-
-    finish_command(
-        "taste extract",
-        jottrace::run_taste_extract(options.extract_options),
-        print_taste_extract_report,
+        |options| {
+            finish_command(
+                "taste extract",
+                jottrace::run_taste_extract(options.extract_options),
+                print_taste_extract_report,
+            )
+        },
     )
 }
 
@@ -734,20 +713,20 @@ fn run_auto_update_background_command(mut args: impl Iterator<Item = String>) ->
 }
 
 fn run_compact_command(args: impl Iterator<Item = String>) -> ExitCode {
-    let cli_options =
-        match resolve_command("compact", parse_compact_command(args), print_compact_help) {
-            Ok(cli_options) => cli_options,
-            Err(code) => return code,
-        };
-    jottrace::update::maybe_spawn_auto_update();
-
-    finish_command(
+    run_resolved_command(
         "compact",
-        jottrace::compact::run_compact_with_diagnostics(
-            cli_options.compact_options,
-            cli_options.details,
-        ),
-        |report| print_compact_report(report, cli_options.details),
+        parse_compact_command(args),
+        print_compact_help,
+        |cli_options| {
+            finish_command(
+                "compact",
+                jottrace::compact::run_compact_with_diagnostics(
+                    cli_options.compact_options,
+                    cli_options.details,
+                ),
+                |report| print_compact_report(report, cli_options.details),
+            )
+        },
     )
 }
 
@@ -778,6 +757,26 @@ fn resolve_command<T>(
             eprint_command_usage(command, &message);
             Err(ExitCode::from(2))
         }
+    }
+}
+
+/// Resolve a parsed command, spawn the background auto-update check, then run
+/// `body` with the resolved options. Centralizes the resolve-then-spawn prologue
+/// shared by every option-carrying command runner: `Help` and parse errors
+/// short-circuit to their exit code (via [`resolve_command`]) without spawning
+/// the updater or invoking `body`.
+fn run_resolved_command<T>(
+    command: &str,
+    parsed: std::result::Result<ParsedCommand<T>, String>,
+    print_help: fn(),
+    body: impl FnOnce(T) -> ExitCode,
+) -> ExitCode {
+    match resolve_command(command, parsed, print_help) {
+        Ok(options) => {
+            jottrace::update::maybe_spawn_auto_update();
+            body(options)
+        }
+        Err(code) => code,
     }
 }
 
@@ -1043,41 +1042,36 @@ fn compact_mode_name(mode: jottrace::CompactMode) -> &'static str {
 }
 
 fn run_doctor_command(args: impl Iterator<Item = String>) -> ExitCode {
-    let options = match resolve_command(
+    run_resolved_command(
         "doctor",
         parse_detail_command("doctor", args),
         print_doctor_help,
-    ) {
-        Ok(options) => options,
-        Err(code) => return code,
-    };
-    jottrace::update::maybe_spawn_auto_update();
-
-    // Keep the CLI responsible for presentation while the library owns the
-    // filesystem checks. That makes future commands easier to test directly.
-    finish_command(
-        "doctor",
-        jottrace::run_doctor_with_options(jottrace::DoctorOptions {
-            include_recent_errors: options.details,
-        }),
-        |report| print_doctor_report(report, options.details),
+        |options| {
+            // Keep the CLI responsible for presentation while the library owns
+            // the filesystem checks. That makes future commands easier to test
+            // directly.
+            finish_command(
+                "doctor",
+                jottrace::run_doctor_with_options(jottrace::DoctorOptions {
+                    include_recent_errors: options.details,
+                }),
+                |report| print_doctor_report(report, options.details),
+            )
+        },
     )
 }
 
 fn run_status_command(args: impl Iterator<Item = String>) -> ExitCode {
-    let options = match resolve_command(
+    run_resolved_command(
         "status",
         parse_detail_command("status", args),
         print_status_help,
-    ) {
-        Ok(options) => options,
-        Err(code) => return code,
-    };
-    jottrace::update::maybe_spawn_auto_update();
-
-    finish_command("status", jottrace::run_status(), |report| {
-        print_status_report(report, options.details);
-    })
+        |options| {
+            finish_command("status", jottrace::run_status(), |report| {
+                print_status_report(report, options.details);
+            })
+        },
+    )
 }
 
 struct PackCliOptions {
@@ -1133,18 +1127,19 @@ fn parse_settle_command(
 }
 
 fn run_pack_command(args: impl Iterator<Item = String>) -> ExitCode {
-    let options = match resolve_command("pack", parse_pack_command(args), print_pack_help) {
-        Ok(options) => options,
-        Err(code) => return code,
-    };
-    jottrace::update::maybe_spawn_auto_update();
-
-    finish_command(
+    run_resolved_command(
         "pack",
-        jottrace::run_pack(jottrace::PackOptions {
-            output: options.output,
-        }),
-        print_pack_report,
+        parse_pack_command(args),
+        print_pack_help,
+        |options| {
+            finish_command(
+                "pack",
+                jottrace::run_pack(jottrace::PackOptions {
+                    output: options.output,
+                }),
+                print_pack_report,
+            )
+        },
     )
 }
 
