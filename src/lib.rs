@@ -718,6 +718,23 @@ pub(crate) fn io_error(path: &Path, source: io::Error) -> JottraceError {
     }
 }
 
+/// Build a `JottraceError::UnsupportedSchemaVersion` for a database at `path`
+/// whose `actual` schema version exceeds the `supported` version. Mirrors
+/// `io_error` so the schema-too-new guard stays uniform across the migration
+/// runner, the web reader, and the archive validator instead of repeating the
+/// struct literal at every call site.
+pub(crate) fn unsupported_schema_version(
+    path: &Path,
+    actual: i64,
+    supported: i64,
+) -> JottraceError {
+    JottraceError::UnsupportedSchemaVersion {
+        path: path.to_path_buf(),
+        actual,
+        supported,
+    }
+}
+
 fn lock_token() -> String {
     let started_at = SystemTime::now()
         .duration_since(UNIX_EPOCH)

@@ -10,7 +10,7 @@ use crate::storage::{
     decode_event_payload_prefix, open_readonly_database, query_collect, query_one, query_optional,
     row_value, sqlite_error, unresolved_ingest_errors_from_connection,
 };
-use crate::{JottraceError, Result, io_error};
+use crate::{JottraceError, Result, io_error, unsupported_schema_version};
 
 const SESSION_PAGE_SIZE: usize = 50;
 const EVENT_PAGE_SIZE: usize = 25;
@@ -408,11 +408,11 @@ fn open_web_database(path: &Path) -> Result<Connection> {
         .map_err(|source| sqlite_error(path, source))?;
     let schema_version: i64 = query_one(path, &conn, "PRAGMA user_version", [], |row| row.get(0))?;
     if schema_version > LATEST_SCHEMA_VERSION {
-        return Err(JottraceError::UnsupportedSchemaVersion {
-            path: path.to_path_buf(),
-            actual: schema_version,
-            supported: LATEST_SCHEMA_VERSION,
-        });
+        return Err(unsupported_schema_version(
+            path,
+            schema_version,
+            LATEST_SCHEMA_VERSION,
+        ));
     }
     Ok(conn)
 }

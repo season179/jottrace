@@ -22,7 +22,7 @@ use rusqlite::Connection;
 use crate::update::{AUTO_UPDATE_LOCK_FILE, AUTO_UPDATE_STAMP_FILE};
 use crate::{
     JottraceError, LOCK_FILE_NAME, PRIVATE_DIR_MODE, PRIVATE_FILE_MODE, Result, acquire_data_lock,
-    data_dir_from_env, ensure_private_dir, io_error, storage,
+    data_dir_from_env, ensure_private_dir, io_error, storage, unsupported_schema_version,
 };
 
 #[cfg(unix)]
@@ -576,11 +576,11 @@ fn validate_staged_jottrace_database(staging: &Path, archive: &Path) -> Result<(
         ));
     }
     if user_version > storage::LATEST_SCHEMA_VERSION {
-        return Err(JottraceError::UnsupportedSchemaVersion {
-            path: archive.to_path_buf(),
-            actual: user_version,
-            supported: storage::LATEST_SCHEMA_VERSION,
-        });
+        return Err(unsupported_schema_version(
+            archive,
+            user_version,
+            storage::LATEST_SCHEMA_VERSION,
+        ));
     }
 
     // Bring the staged file up to `LATEST_SCHEMA_VERSION` via the standard
@@ -595,11 +595,7 @@ fn validate_staged_jottrace_database(staging: &Path, archive: &Path) -> Result<(
         } => archive_database_invalid(archive, rusqlite_err.to_string()),
         JottraceError::UnsupportedSchemaVersion {
             actual, supported, ..
-        } => JottraceError::UnsupportedSchemaVersion {
-            path: archive.to_path_buf(),
-            actual,
-            supported,
-        },
+        } => unsupported_schema_version(archive, actual, supported),
         other => other,
     })?;
 

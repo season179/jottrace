@@ -3,7 +3,9 @@ use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use crate::{JottraceError, Result, data_dir_from_env, ensure_private_file};
+use crate::{
+    JottraceError, Result, data_dir_from_env, ensure_private_file, unsupported_schema_version,
+};
 
 pub const DB_FILE_NAME: &str = "db.sqlite";
 pub const LATEST_SCHEMA_VERSION: i64 = 13;
@@ -225,11 +227,11 @@ fn run_migrations(path: &Path, conn: &mut Connection) -> Result<()> {
     let current = user_version(path, conn)?;
 
     if current > LATEST_SCHEMA_VERSION {
-        return Err(JottraceError::UnsupportedSchemaVersion {
-            path: path.to_path_buf(),
-            actual: current,
-            supported: LATEST_SCHEMA_VERSION,
-        });
+        return Err(unsupported_schema_version(
+            path,
+            current,
+            LATEST_SCHEMA_VERSION,
+        ));
     }
 
     if current == LATEST_SCHEMA_VERSION {
