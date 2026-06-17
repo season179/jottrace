@@ -1088,3 +1088,94 @@ fn taste_extraction_reference_complete() {
         );
     }
 }
+
+#[test]
+fn taste_extraction_plan_closure_complete() {
+    let fixtures =
+        fs::read_to_string("tests/taste_fixtures.rs").expect("read taste_fixtures.rs");
+
+    // Every major plan section must have a dedicated CI regression lock.
+    for (section, test_name) in [
+        (
+            "Status: IMPLEMENTED + R3",
+            "taste_extraction_plan_documents_implemented_status_and_r3_exclusion",
+        ),
+        (
+            "What we are building",
+            "taste_extraction_scope_complete",
+        ),
+        (
+            "Locked decisions",
+            "taste_extraction_locked_decisions_complete",
+        ),
+        (
+            "Architecture",
+            "taste_extraction_architecture_complete",
+        ),
+        (
+            "CLI surface",
+            "taste_extraction_cli_surface_complete",
+        ),
+        (
+            "Open implementation risks",
+            "taste_extraction_risk_coverage_complete",
+        ),
+        (
+            "Implementation sequence",
+            "taste_extraction_implementation_sequence_complete",
+        ),
+        (
+            "Deferred: async Task transcripts",
+            "taste_extraction_deferred_r3_complete",
+        ),
+        (
+            "Corrections",
+            "taste_extraction_plan_corrections_complete",
+        ),
+        (
+            "Reference",
+            "taste_extraction_reference_complete",
+        ),
+        (
+            "Artifact existence (steps 1-7)",
+            "taste_extraction_plan_implementation_complete",
+        ),
+        (
+            "Documentation cross-links",
+            "taste_extraction_documentation_complete",
+        ),
+        (
+            "Formula bidirectional link",
+            "command_code_taste_formula_links_to_jottrace_implementation",
+        ),
+    ] {
+        assert!(
+            fixtures.contains(&format!("fn {test_name}")),
+            "plan section '{section}' should have regression test {test_name}"
+        );
+    }
+
+    let plan =
+        fs::read_to_string("notes/taste-extraction-plan.md").expect("read taste extraction plan");
+    for header in [
+        "## What we are building",
+        "## Locked decisions (from the human)",
+        "## Architecture",
+        "## CLI surface",
+        "## Open implementation risks (from the validation pass)",
+        "## Implementation sequence",
+        "## Deferred: async Task transcripts (R3)",
+        "## Corrections (changes the validation pass forced)",
+        "## Reference",
+    ] {
+        assert!(
+            plan.contains(header),
+            "plan should contain section header: {header}"
+        );
+    }
+
+    assert!(
+        plan.contains("Status: **IMPLEMENTED**"),
+        "plan should be marked IMPLEMENTED"
+    );
+}
