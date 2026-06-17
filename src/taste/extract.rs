@@ -3,7 +3,8 @@ use std::path::{Path, PathBuf};
 
 use crate::JottraceError;
 use crate::storage::{
-    DB_FILE_NAME, for_each_decoded_event_payload_for_session, open_database, sqlite_error,
+    DB_FILE_NAME, for_each_decoded_event_payload_for_session, open_database, query_collect,
+    sqlite_error,
 };
 use crate::{Result, acquire_data_lock, data_dir_from_env};
 
@@ -151,28 +152,24 @@ fn list_parent_claude_sessions(
     conn: &Connection,
     source_session_id: Option<&str>,
 ) -> Result<Vec<SessionTarget>> {
-    let mut statement = conn
-        .prepare(
-            "SELECT id, source_session_id, cwd
-             FROM sessions
-             WHERE source = ?1
-               AND parent_session_id IS NULL
-               AND (?2 IS NULL OR source_session_id = ?2)
-             ORDER BY id",
-        )
-        .map_err(|source| sqlite_error(db_path, source))?;
-
-    let rows = statement
-        .query_map(params![CLAUDE_SOURCE, source_session_id], |row| {
+    let rows = query_collect(
+        db_path,
+        conn,
+        "SELECT id, source_session_id, cwd
+         FROM sessions
+         WHERE source = ?1
+           AND parent_session_id IS NULL
+           AND (?2 IS NULL OR source_session_id = ?2)
+         ORDER BY id",
+        params![CLAUDE_SOURCE, source_session_id],
+        |row| {
             Ok(SessionTarget {
                 db_id: row.get(0)?,
                 source_session_id: row.get(1)?,
                 cwd: row.get(2)?,
             })
-        })
-        .map_err(|source| sqlite_error(db_path, source))?
-        .collect::<std::result::Result<Vec<_>, _>>()
-        .map_err(|source| sqlite_error(db_path, source))?;
+        },
+    )?;
 
     if let Some(requested) = source_session_id
         && rows.is_empty()
@@ -191,25 +188,21 @@ fn list_child_sessions(
     conn: &Connection,
     parent_db_id: i64,
 ) -> Result<Vec<ChildSession>> {
-    let mut statement = conn
-        .prepare(
-            "SELECT source_session_id
-             FROM sessions
-             WHERE source = ?1
-               AND parent_session_id = ?2
-             ORDER BY id",
-        )
-        .map_err(|source| sqlite_error(db_path, source))?;
-
-    statement
-        .query_map(params![CLAUDE_SOURCE, parent_db_id], |row| {
+    query_collect(
+        db_path,
+        conn,
+        "SELECT source_session_id
+         FROM sessions
+         WHERE source = ?1
+           AND parent_session_id = ?2
+         ORDER BY id",
+        params![CLAUDE_SOURCE, parent_db_id],
+        |row| {
             Ok(ChildSession {
                 source_session_id: row.get(0)?,
             })
-        })
-        .map_err(|source| sqlite_error(db_path, source))?
-        .collect::<std::result::Result<Vec<_>, _>>()
-        .map_err(|source| sqlite_error(db_path, source))
+        },
+    )
 }
 
 /// Whether a parent session's stored extraction matches the current extractor and event stream.

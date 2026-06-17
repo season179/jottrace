@@ -7,7 +7,8 @@ use std::time::Duration;
 
 use crate::storage::{
     IngestErrorSummary, LATEST_SCHEMA_VERSION, RAW_CODEC, ZSTD_CODEC, decode_event_payload,
-    decode_event_payload_prefix, sqlite_error, unresolved_ingest_errors_from_connection,
+    decode_event_payload_prefix, query_collect, sqlite_error,
+    unresolved_ingest_errors_from_connection,
 };
 use crate::{JottraceError, Result, io_error};
 
@@ -493,18 +494,13 @@ fn load_sessions(
           LIMIT ?2 OFFSET ?3",
     );
 
-    let mut statement = conn
-        .prepare(&sql)
-        .map_err(|source| sqlite_error(path, source))?;
-
-    let sessions = statement
-        .query_map(
-            params![search.like.as_deref(), (limit + 1) as i64, offset as i64],
-            loaded_session_from_row,
-        )
-        .map_err(|source| sqlite_error(path, source))?
-        .collect::<std::result::Result<Vec<_>, _>>()
-        .map_err(|source| sqlite_error(path, source))?;
+    let sessions = query_collect(
+        path,
+        conn,
+        &sql,
+        params![search.like.as_deref(), (limit + 1) as i64, offset as i64],
+        loaded_session_from_row,
+    )?;
     Ok(paginate(sessions, offset, limit))
 }
 
@@ -595,24 +591,17 @@ fn load_events(
     offset: usize,
 ) -> Result<(Vec<JournalEvent>, PageInfo)> {
     let limit = EVENT_PAGE_SIZE;
-    let mut statement = conn
-        .prepare(
-            "SELECT generation, seq, ts, codec, payload_size
-             FROM events
-             WHERE session_id = ?1
-             ORDER BY generation, seq
-             LIMIT ?2 OFFSET ?3",
-        )
-        .map_err(|source| sqlite_error(path, source))?;
-
-    let events = statement
-        .query_map(
-            params![session_id, (limit + 1) as i64, offset as i64],
-            journal_event_metadata_from_row,
-        )
-        .map_err(|source| sqlite_error(path, source))?
-        .collect::<std::result::Result<Vec<_>, _>>()
-        .map_err(|source| sqlite_error(path, source))?;
+    let events = query_collect(
+        path,
+        conn,
+        "SELECT generation, seq, ts, codec, payload_size
+         FROM events
+         WHERE session_id = ?1
+         ORDER BY generation, seq
+         LIMIT ?2 OFFSET ?3",
+        params![session_id, (limit + 1) as i64, offset as i64],
+        journal_event_metadata_from_row,
+    )?;
     Ok(paginate(events, offset, limit))
 }
 

@@ -259,23 +259,19 @@ pub(crate) fn unresolved_ingest_errors_from_connection(
     conn: &Connection,
     limit: usize,
 ) -> Result<Vec<IngestErrorSummary>> {
-    let mut statement = conn
-        .prepare(
-            "SELECT source, source_session_id, file_path, generation, byte_offset,
-                    line_number, error_kind, message, first_seen_at, last_seen_at,
-                    occurrence_count
-             FROM ingest_errors
-             WHERE resolved_at IS NULL
-             ORDER BY last_seen_at DESC, id DESC
-             LIMIT ?1",
-        )
-        .map_err(|source| sqlite_error(path, source))?;
-
-    statement
-        .query_map(params![limit as i64], ingest_error_summary_from_row)
-        .map_err(|source| sqlite_error(path, source))?
-        .collect::<std::result::Result<Vec<_>, _>>()
-        .map_err(|source| sqlite_error(path, source))
+    query_collect(
+        path,
+        conn,
+        "SELECT source, source_session_id, file_path, generation, byte_offset,
+                line_number, error_kind, message, first_seen_at, last_seen_at,
+                occurrence_count
+         FROM ingest_errors
+         WHERE resolved_at IS NULL
+         ORDER BY last_seen_at DESC, id DESC
+         LIMIT ?1",
+        params![limit as i64],
+        ingest_error_summary_from_row,
+    )
 }
 
 pub fn for_each_decoded_event_payload_for_session(
@@ -493,6 +489,29 @@ pub(crate) fn sqlite_error(path: &Path, source: rusqlite::Error) -> JottraceErro
         path: path.to_path_buf(),
         source,
     }
+}
+
+/// Prepare `sql`, run it with `params`, and collect every mapped row into a `Vec`,
+/// routing each fallible step's failure through [`sqlite_error`] for `path`.
+pub(crate) fn query_collect<T, P, F>(
+    path: &Path,
+    conn: &Connection,
+    sql: &str,
+    params: P,
+    mapper: F,
+) -> Result<Vec<T>>
+where
+    P: rusqlite::Params,
+    F: FnMut(&Row<'_>) -> rusqlite::Result<T>,
+{
+    let mut statement = conn
+        .prepare(sql)
+        .map_err(|source| sqlite_error(path, source))?;
+    statement
+        .query_map(params, mapper)
+        .map_err(|source| sqlite_error(path, source))?
+        .collect::<std::result::Result<Vec<_>, _>>()
+        .map_err(|source| sqlite_error(path, source))
 }
 
 #[cfg(test)]

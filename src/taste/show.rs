@@ -2,7 +2,7 @@ use rusqlite::{Connection, params};
 use std::path::{Path, PathBuf};
 
 use crate::JottraceError;
-use crate::storage::{DB_FILE_NAME, open_database, sqlite_error};
+use crate::storage::{DB_FILE_NAME, open_database, query_collect, sqlite_error};
 use crate::{Result, acquire_data_lock, data_dir_from_env};
 
 use super::compiler::{EvidenceKind, PreferenceExample, PreferenceOutcome};
@@ -154,41 +154,27 @@ fn query_preference_example(
     source_session_id: Option<&str>,
 ) -> Result<PreferenceExample> {
     let rows = match source_session_id {
-        Some(source_session_id) => {
-            let mut statement = conn
-                .prepare(
-                    "SELECT source_session_id, generation, proposal_event_seq, file_path, tool_name,
-                            proposal_content, context, outcome, confidence, evidence_kind, extractor_version
-                     FROM preference_examples
-                     WHERE source = ?1 AND source_session_id = ?2 AND tool_use_id = ?3",
-                )
-                .map_err(|source| sqlite_error(db_path, source))?;
-            statement
-                .query_map(params![source, source_session_id, tool_use_id], |row| {
-                    map_preference_row(source, tool_use_id, row)
-                })
-                .map_err(|source| sqlite_error(db_path, source))?
-                .collect::<std::result::Result<Vec<_>, _>>()
-                .map_err(|source| sqlite_error(db_path, source))?
-        }
-        None => {
-            let mut statement = conn
-                .prepare(
-                    "SELECT source_session_id, generation, proposal_event_seq, file_path, tool_name,
-                            proposal_content, context, outcome, confidence, evidence_kind, extractor_version
-                     FROM preference_examples
-                     WHERE source = ?1 AND tool_use_id = ?2
-                     ORDER BY source_session_id ASC",
-                )
-                .map_err(|source| sqlite_error(db_path, source))?;
-            statement
-                .query_map(params![source, tool_use_id], |row| {
-                    map_preference_row(source, tool_use_id, row)
-                })
-                .map_err(|source| sqlite_error(db_path, source))?
-                .collect::<std::result::Result<Vec<_>, _>>()
-                .map_err(|source| sqlite_error(db_path, source))?
-        }
+        Some(source_session_id) => query_collect(
+            db_path,
+            conn,
+            "SELECT source_session_id, generation, proposal_event_seq, file_path, tool_name,
+                    proposal_content, context, outcome, confidence, evidence_kind, extractor_version
+             FROM preference_examples
+             WHERE source = ?1 AND source_session_id = ?2 AND tool_use_id = ?3",
+            params![source, source_session_id, tool_use_id],
+            |row| map_preference_row(source, tool_use_id, row),
+        )?,
+        None => query_collect(
+            db_path,
+            conn,
+            "SELECT source_session_id, generation, proposal_event_seq, file_path, tool_name,
+                    proposal_content, context, outcome, confidence, evidence_kind, extractor_version
+             FROM preference_examples
+             WHERE source = ?1 AND tool_use_id = ?2
+             ORDER BY source_session_id ASC",
+            params![source, tool_use_id],
+            |row| map_preference_row(source, tool_use_id, row),
+        )?,
     };
 
     match rows.len() {
@@ -238,17 +224,15 @@ fn query_timeline_rows(
     source_session_id: &str,
     file_path: &str,
 ) -> Result<Vec<FileTimelineRow>> {
-    let mut statement = conn
-        .prepare(
-            "SELECT seq, event_seq, content, trigger_event_ref, source_kind
-             FROM file_timelines
-             WHERE source = ?1 AND source_session_id = ?2 AND file_path = ?3
-             ORDER BY seq ASC",
-        )
-        .map_err(|source| sqlite_error(db_path, source))?;
-
-    let rows = statement
-        .query_map(params![source, source_session_id, file_path], |row| {
+    query_collect(
+        db_path,
+        conn,
+        "SELECT seq, event_seq, content, trigger_event_ref, source_kind
+         FROM file_timelines
+         WHERE source = ?1 AND source_session_id = ?2 AND file_path = ?3
+         ORDER BY seq ASC",
+        params![source, source_session_id, file_path],
+        |row| {
             let seq: i64 = row.get(0)?;
             let event_seq: i64 = row.get(1)?;
             let source_kind: String = row.get(4)?;
@@ -263,10 +247,6 @@ fn query_timeline_rows(
                 source_kind: TimelineSourceKind::from_db_str(&source_kind)
                     .expect("valid source_kind"),
             })
-        })
-        .map_err(|source| sqlite_error(db_path, source))?
-        .collect::<std::result::Result<Vec<_>, _>>()
-        .map_err(|source| sqlite_error(db_path, source))?;
-
-    Ok(rows)
+        },
+    )
 }
