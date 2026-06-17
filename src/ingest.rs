@@ -472,6 +472,19 @@ fn jsonl_source_files_from_paths(
         .collect()
 }
 
+/// Build [`SourceFile`]s for a JSONL source whose entries may carry a parent
+/// session (Claude, Pi Agent), ordering the result so files with parents sort
+/// last. `build` derives each path's per-source identity; the shared collect and
+/// parents-last sort live here.
+fn jsonl_source_files_with_parents(
+    paths: Vec<PathBuf>,
+    build: impl FnMut(PathBuf) -> Result<SourceFile>,
+) -> Result<Vec<SourceFile>> {
+    let mut source_files = paths.into_iter().map(build).collect::<Result<Vec<_>>>()?;
+    sort_source_files_with_parents_last(&mut source_files);
+    Ok(source_files)
+}
+
 fn discover_claude_session_files() -> Result<Vec<SourceFile>> {
     let home = home_dir()?;
     let mut paths = Vec::new();
@@ -484,24 +497,18 @@ fn discover_claude_session_files() -> Result<Vec<SourceFile>> {
 
     sort_dedup_paths(&mut paths);
 
-    let mut source_files = paths
-        .into_iter()
-        .map(|path| {
-            let (source_session_id, parent_source_session_id) =
-                source_session_ids_from_path(&path)?;
-            Ok(SourceFile {
-                source: CLAUDE_SOURCE,
-                source_session_id,
-                source_session_id_kind: SourceSessionIdKind::Known,
-                parent_source_session_id,
-                metadata_path: None,
-                source_format: SourceFormat::Jsonl,
-                path,
-            })
+    jsonl_source_files_with_parents(paths, |path| {
+        let (source_session_id, parent_source_session_id) = source_session_ids_from_path(&path)?;
+        Ok(SourceFile {
+            source: CLAUDE_SOURCE,
+            source_session_id,
+            source_session_id_kind: SourceSessionIdKind::Known,
+            parent_source_session_id,
+            metadata_path: None,
+            source_format: SourceFormat::Jsonl,
+            path,
         })
-        .collect::<Result<Vec<_>>>()?;
-    sort_source_files_with_parents_last(&mut source_files);
-    Ok(source_files)
+    })
 }
 
 fn discover_claude_local_agent_session_files() -> Result<Vec<SourceFile>> {
@@ -575,36 +582,31 @@ fn discover_pi_agent_session_files() -> Result<Vec<SourceFile>> {
 
     sort_dedup_paths(&mut paths);
 
-    let mut source_files = paths
-        .into_iter()
-        .map(|path| {
-            let (source_session_id, source_session_id_kind, parent_source_session_id) =
-                if let Some(nested) = pi_agent_nested_run_info(&path) {
-                    (
-                        nested.placeholder_source_session_id,
-                        SourceSessionIdKind::PiAgentSessionHeader,
-                        Some(nested.parent_source_session_id),
-                    )
-                } else {
-                    (
-                        pi_source_session_id_from_path(&path)?,
-                        SourceSessionIdKind::Known,
-                        None,
-                    )
-                };
-            Ok(SourceFile {
-                source: PI_AGENT_SOURCE,
-                source_session_id,
-                source_session_id_kind,
-                parent_source_session_id,
-                metadata_path: None,
-                source_format: SourceFormat::Jsonl,
-                path,
-            })
+    jsonl_source_files_with_parents(paths, |path| {
+        let (source_session_id, source_session_id_kind, parent_source_session_id) =
+            if let Some(nested) = pi_agent_nested_run_info(&path) {
+                (
+                    nested.placeholder_source_session_id,
+                    SourceSessionIdKind::PiAgentSessionHeader,
+                    Some(nested.parent_source_session_id),
+                )
+            } else {
+                (
+                    pi_source_session_id_from_path(&path)?,
+                    SourceSessionIdKind::Known,
+                    None,
+                )
+            };
+        Ok(SourceFile {
+            source: PI_AGENT_SOURCE,
+            source_session_id,
+            source_session_id_kind,
+            parent_source_session_id,
+            metadata_path: None,
+            source_format: SourceFormat::Jsonl,
+            path,
         })
-        .collect::<Result<Vec<_>>>()?;
-    sort_source_files_with_parents_last(&mut source_files);
-    Ok(source_files)
+    })
 }
 
 fn discover_factory_session_files() -> Result<Vec<SourceFile>> {
