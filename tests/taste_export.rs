@@ -75,6 +75,12 @@ fn install_taste_claude_fixture(root: &Path) {
         &format!("claude-cli/file-history/{TASTE_SESSION_ID}/fixture-subagent1@v1"),
         &history_dir.join("fixture-subagent1@v1"),
     );
+    for version in ["v1", "v2"] {
+        copy_fixture_file(
+            &format!("claude-cli/file-history/{TASTE_SESSION_ID}/fixture-manual1@{version}"),
+            &history_dir.join(format!("fixture-manual1@{version}")),
+        );
+    }
 }
 
 fn run_ingest_with_home(home: &Path, data_dir: &Path) {
@@ -130,10 +136,10 @@ fn taste_export_writes_fixture_rows_to_file() {
     )
     .expect("export preferences");
 
-    assert_eq!(report.rows_exported, 10);
+    assert_eq!(report.rows_exported, 11);
     let content = fs::read_to_string(&out_path).expect("read export file");
     let rows = parse_jsonl(&content);
-    assert_eq!(rows.len(), 10);
+    assert_eq!(rows.len(), 11);
 
     let rejected = rows
         .iter()
@@ -186,10 +192,10 @@ fn taste_export_cli_writes_jsonl_to_stdout() {
 
     let stdout = String::from_utf8_lossy(&output.stdout);
     let rows = parse_jsonl(&stdout);
-    assert_eq!(rows.len(), 10);
+    assert_eq!(rows.len(), 11);
 
     let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(stderr.contains("rows_exported: 10"));
+    assert!(stderr.contains("rows_exported: 11"));
 
     let bash = rows
         .iter()

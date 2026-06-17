@@ -30,6 +30,8 @@ fn taste_fixture_corpus_has_required_session_shapes() {
         "toolu_taste_notebook_edit",
         "toolu_taste_edit_partial",
         "partial_drop",
+        "human_edited_marker",
+        "toolu_taste_edit_manual",
         "notebook_marker",
     ] {
         assert!(
@@ -80,6 +82,19 @@ fn taste_fixture_corpus_has_subagent_sidecar_blob() {
     assert!(
         body.contains("subagent_marker"),
         "subagent sidecar should contain subagent edit marker"
+    );
+}
+
+#[test]
+fn taste_fixture_corpus_has_manual_edit_sidecar_blob() {
+    let sidecar = taste_fixture(&format!(
+        "claude-cli/file-history/{TASTE_SESSION_ID}/fixture-manual1@v1"
+    ));
+    assert!(sidecar.exists(), "missing sidecar fixture-manual1@v1");
+    let body = fs::read_to_string(sidecar).expect("read manual sidecar");
+    assert!(
+        body.contains("human_edited_marker"),
+        "manual sidecar should contain human IDE edit marker"
     );
 }
 

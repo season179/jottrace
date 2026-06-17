@@ -69,8 +69,8 @@ fn sidecar_resolver_resolves_parsed_session_snapshots() {
 
     assert_eq!(
         resolved.len(),
-        11,
-        "expected inline + 9 sidecar/inline snapshots"
+        13,
+        "expected inline + 11 sidecar/inline snapshots"
     );
 
     let inline = resolved
@@ -90,14 +90,15 @@ fn sidecar_resolver_resolves_parsed_session_snapshots() {
             _ => None,
         })
         .collect();
-    assert_eq!(sidecars.len(), 8);
+    assert_eq!(sidecars.len(), 10);
     for (seq, name) in sidecars {
         assert!(
             name.starts_with("fixture-a1b2c3d4@v")
                 || name == "fixture-mcpb5e6f7a@v1"
                 || name == "fixture-writenew1@v1"
                 || name == "fixture-subagent1@v1"
-                || name.starts_with("fixture-partial1@v"),
+                || name.starts_with("fixture-partial1@v")
+                || name.starts_with("fixture-manual1@v"),
             "seq {seq} should reference fixture sidecar, got {name}"
         );
     }

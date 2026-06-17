@@ -73,6 +73,12 @@ fn install_taste_claude_fixture(root: &Path) {
         &format!("claude-cli/file-history/{TASTE_SESSION_ID}/fixture-subagent1@v1"),
         &history_dir.join("fixture-subagent1@v1"),
     );
+    for version in ["v1", "v2"] {
+        copy_fixture_file(
+            &format!("claude-cli/file-history/{TASTE_SESSION_ID}/fixture-manual1@{version}"),
+            &history_dir.join(format!("fixture-manual1@{version}")),
+        );
+    }
 }
 
 fn run_ingest_with_home(home: &Path, data_dir: &Path) {
@@ -124,7 +130,7 @@ fn taste_extract_materializes_fixture_session_end_to_end() {
         },
     );
     assert!(summary.contains("sessions_processed=1"));
-    assert!(summary.contains("preference_examples=10"));
+    assert!(summary.contains("preference_examples=11"));
 
     let conn = open_database(&data_dir.join(DB_FILE_NAME)).expect("open db");
     let timeline_count: i64 = conn
@@ -134,7 +140,7 @@ fn taste_extract_materializes_fixture_session_end_to_end() {
             |row| row.get(0),
         )
         .expect("count timelines");
-    assert_eq!(timeline_count, 11);
+    assert_eq!(timeline_count, 13);
 
     let example_count: i64 = conn
         .query_row(
@@ -143,7 +149,7 @@ fn taste_extract_materializes_fixture_session_end_to_end() {
             |row| row.get(0),
         )
         .expect("count examples");
-    assert_eq!(example_count, 10);
+    assert_eq!(example_count, 11);
 
     let reverted_outcome: String = conn
         .query_row(
@@ -294,5 +300,5 @@ fn taste_extract_cli_reports_counts_for_fixture_session() {
     );
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(stdout.contains("sessions_processed: 1"));
-    assert!(stdout.contains("preference_examples: 10"));
+    assert!(stdout.contains("preference_examples: 11"));
 }

@@ -101,6 +101,7 @@ fn compiler_labels_fixture_proposals_with_present_at_session_end_outcomes() {
         "toolu_taste_mcp_edit",
         "toolu_taste_edit_partial",
         "toolu_taste_edit_partial_fix",
+        "toolu_taste_edit_manual",
     ] {
         assert!(
             by_tool.contains_key(required),
@@ -211,6 +212,24 @@ fn compiler_labels_fixture_proposals_with_present_at_session_end_outcomes() {
     assert_eq!(partial_fix.outcome, PreferenceOutcome::Accepted);
     assert_eq!(partial_fix.evidence_kind, EvidenceKind::DirectEdit);
     assert_eq!(partial_fix.confidence, 1.0);
+
+    let manual = example_by_tool(&examples, "toolu_taste_edit_manual");
+    assert_eq!(manual.file_path.as_deref(), Some("src/taste_manual.rs"));
+    assert_eq!(manual.outcome, PreferenceOutcome::Accepted);
+    assert_eq!(manual.evidence_kind, EvidenceKind::DirectEdit);
+    assert_eq!(manual.confidence, 1.0);
+    assert!(
+        manual
+            .context
+            .as_deref()
+            .is_some_and(|content| content.contains("human_edited_marker"))
+    );
+    assert!(
+        manual
+            .proposal_content
+            .as_deref()
+            .is_some_and(|content| content.contains("agent_fn"))
+    );
 }
 
 #[test]

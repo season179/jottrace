@@ -10,7 +10,7 @@ use super::parse::{ContentRef, ParseKind, ParsedEvent};
 use super::timeline::{FileTimelineRow, normalize_file_path};
 
 /// Version tag stored on compiled preference rows for idempotent re-extraction.
-pub const EXTRACTOR_VERSION: &str = "0.1.8";
+pub const EXTRACTOR_VERSION: &str = "0.1.9";
 
 /// Minimum confidence for a proposal to count toward high-confidence coverage.
 pub const HIGH_CONFIDENCE_THRESHOLD: f64 = 1.0;

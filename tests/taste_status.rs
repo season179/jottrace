@@ -76,6 +76,12 @@ fn install_taste_claude_fixture(root: &Path) {
         &format!("claude-cli/file-history/{TASTE_SESSION_ID}/fixture-subagent1@v1"),
         &history_dir.join("fixture-subagent1@v1"),
     );
+    for version in ["v1", "v2"] {
+        copy_fixture_file(
+            &format!("claude-cli/file-history/{TASTE_SESSION_ID}/fixture-manual1@{version}"),
+            &history_dir.join(format!("fixture-manual1@{version}")),
+        );
+    }
 }
 
 fn run_ingest_with_home(home: &Path, data_dir: &Path) {
@@ -117,21 +123,21 @@ fn taste_status_reports_fixture_coverage_after_extract() {
     assert_eq!(report.claude_parent_sessions, 1);
     assert_eq!(report.sessions_processed, 1);
     assert_eq!(report.sessions_pending, 0);
-    assert_eq!(report.proposals, 10);
+    assert_eq!(report.proposals, 11);
     assert_eq!(
         report.outcomes,
         TasteOutcomeCounts {
-            accepted: 7,
+            accepted: 8,
             rejected: 2,
             edited: 1,
         }
     );
-    assert_eq!(report.high_confidence_proposals, 7);
-    assert!((report.coverage_percent - (7.0 / 10.0 * 100.0)).abs() < 1e-9);
+    assert_eq!(report.high_confidence_proposals, 8);
+    assert!((report.coverage_percent - (8.0 / 11.0 * 100.0)).abs() < 1e-9);
     assert_eq!(
         report.evidence,
         TasteEvidenceCounts {
-            direct_edit: 6,
+            direct_edit: 7,
             direct_write: 1,
             bash_correlation: 1,
             mcp_correlation: 1,
@@ -164,11 +170,11 @@ fn taste_status_cli_reports_fixture_counts() {
     );
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(stdout.contains("sessions_processed: 1"));
-    assert!(stdout.contains("proposals: 10"));
-    assert!(stdout.contains("accepted: 7"));
+    assert!(stdout.contains("proposals: 11"));
+    assert!(stdout.contains("accepted: 8"));
     assert!(stdout.contains("rejected: 2"));
     assert!(stdout.contains("edited: 1"));
-    assert!(stdout.contains("high_confidence_coverage: 70.0%"));
+    assert!(stdout.contains("high_confidence_coverage: 72.7%"));
 }
 
 #[test]

@@ -159,6 +159,33 @@ fn timeline_materializer_builds_per_file_snapshot_sequence_from_fixture() {
             .as_deref()
             .is_some_and(|content| content.contains("subagent_marker"))
     );
+
+    let manual_rows: Vec<_> = rows
+        .iter()
+        .filter(|row| row.file_path == "src/taste_manual.rs")
+        .collect();
+    assert_eq!(manual_rows.len(), 2, "expected two taste_manual snapshots");
+    assert_eq!(
+        manual_rows[0].source_kind,
+        TimelineSourceKind::SidecarSnapshot
+    );
+    assert_eq!(manual_rows[0].trigger_event_ref, None);
+    assert!(
+        manual_rows[0]
+            .content
+            .as_deref()
+            .is_some_and(|content| content.contains("human_edited_marker"))
+    );
+    assert_eq!(
+        manual_rows[1].trigger_event_ref.as_deref(),
+        Some("toolu_taste_edit_manual")
+    );
+    assert!(
+        manual_rows[1]
+            .content
+            .as_deref()
+            .is_some_and(|content| content.contains("agent_fn"))
+    );
 }
 
 #[test]

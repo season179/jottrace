@@ -80,7 +80,7 @@ fn replace_session_preference_examples_persists_compiled_rows() {
     assert_eq!(LATEST_SCHEMA_VERSION, 13);
 
     let examples = compile_fixture_examples();
-    assert_eq!(examples.len(), 10);
+    assert_eq!(examples.len(), 11);
 
     let inserted = replace_session_preference_examples(
         &db_path,
