@@ -6,7 +6,7 @@ use std::time::Duration;
 use crate::{JottraceError, Result, data_dir_from_env, ensure_private_file};
 
 pub const DB_FILE_NAME: &str = "db.sqlite";
-pub const LATEST_SCHEMA_VERSION: i64 = 11;
+pub const LATEST_SCHEMA_VERSION: i64 = 12;
 pub(crate) const RAW_CODEC: &str = "raw";
 pub(crate) const ZSTD_CODEC: &str = "zstd";
 /// Minimum source payload size considered for zstd. Keeping this named makes
@@ -57,6 +57,10 @@ const MIGRATIONS: &[Migration] = &[
     Migration {
         version: 11,
         sql: include_str!("migrations/011_preference_examples.sql"),
+    },
+    Migration {
+        version: 12,
+        sql: include_str!("migrations/012_preference_examples_mcp_evidence.sql"),
     },
 ];
 const UNRESOLVED_INGEST_ERROR_COUNT_SQL: &str =
@@ -908,6 +912,56 @@ mod tests {
         );
         assert_sql_object(&conn, "table", "preference_examples");
         assert_sql_object(&conn, "index", "idx_preference_examples_session");
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn migrates_v11_database_to_allow_mcp_correlation_evidence_kind() {
+        let root = temp_root("storage-upgrade-v11-mcp-evidence");
+        let db_path = root.join(DB_FILE_NAME);
+        ensure_private_file(&db_path).expect("create db file");
+
+        {
+            let conn = Connection::open(&db_path).expect("open v11 db");
+            apply_migrations_through(&conn, 11);
+            conn.execute(
+                "INSERT INTO preference_examples (
+                    source, source_session_id, generation, proposal_event_seq,
+                    tool_use_id, file_path, tool_name, proposal_content, context,
+                    outcome, confidence, evidence_kind, extractor_version
+                 ) VALUES (
+                    'claude_cli', 'sess', 0, 1, 'tool-mcp', 'src/a.rs',
+                    'mcp_fixture_edit', 'content', NULL, 'accepted', 0.6,
+                    'bash_correlation', '0.1.0'
+                 )",
+                [],
+            )
+            .expect("seed preference row");
+            conn.pragma_update(None, "user_version", 11)
+                .expect("set user_version");
+        }
+
+        let conn = open_database(&db_path).expect("migrate db");
+
+        assert_eq!(
+            user_version(&db_path, &conn).expect("user_version"),
+            LATEST_SCHEMA_VERSION
+        );
+
+        conn.execute(
+            "INSERT INTO preference_examples (
+                source, source_session_id, generation, proposal_event_seq,
+                tool_use_id, file_path, tool_name, proposal_content, context,
+                outcome, confidence, evidence_kind, extractor_version
+             ) VALUES (
+                'claude_cli', 'sess', 1, 2, 'tool-mcp-2', 'src/b.rs',
+                'mcp_fixture_edit', 'content', NULL, 'accepted', 0.6,
+                'mcp_correlation', '0.1.1'
+             )",
+            [],
+        )
+        .expect("insert mcp_correlation row");
 
         let _ = fs::remove_dir_all(root);
     }

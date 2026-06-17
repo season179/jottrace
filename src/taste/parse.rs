@@ -238,10 +238,7 @@ fn parse_assistant_events(
             .and_then(Value::as_str)
             .map(str::to_string);
         let input = block.get("input");
-        let file_path = input
-            .and_then(|input| input.get("file_path"))
-            .and_then(Value::as_str)
-            .map(str::to_string);
+        let file_path = tool_file_path(input);
         let proposal_content = tool_proposal_content(tool_name.as_deref(), input);
         events.push(ParsedEvent {
             seq,
@@ -256,6 +253,15 @@ fn parse_assistant_events(
     }
 
     Ok(events)
+}
+
+fn tool_file_path(input: Option<&Value>) -> Option<String> {
+    let input = input?;
+    input
+        .get("file_path")
+        .or_else(|| input.get("path"))
+        .and_then(Value::as_str)
+        .map(str::to_string)
 }
 
 fn tool_proposal_content(tool_name: Option<&str>, input: Option<&Value>) -> Option<ContentRef> {
@@ -274,8 +280,19 @@ fn tool_proposal_content(tool_name: Option<&str>, input: Option<&Value>) -> Opti
             .get("command")
             .and_then(Value::as_str)
             .map(|content| ContentRef::Inline(content.to_string())),
+        Some(name) if name.starts_with("mcp_") => mcp_proposal_content(input),
         _ => None,
     }
+}
+
+fn mcp_proposal_content(input: &Value) -> Option<ContentRef> {
+    if let Some(content) = input.get("new_string").and_then(Value::as_str) {
+        return Some(ContentRef::Inline(content.to_string()));
+    }
+    input
+        .get("content")
+        .and_then(Value::as_str)
+        .map(|content| ContentRef::Inline(content.to_string()))
 }
 
 fn parse_user_events(
@@ -408,6 +425,21 @@ mod tests {
                 backup_file_name: "blob@v1".to_string(),
                 version: Some(1),
             })
+        );
+    }
+
+    #[test]
+    fn mcp_tool_use_extracts_path_and_proposal_content() {
+        let line = br#"{"type":"assistant","message":{"role":"assistant","content":[{"type":"tool_use","id":"tool-mcp-edit","name":"mcp_fixture_codedb_edit","input":{"path":"src/mcp_target.rs","op":"str_replace","old_string":"before\n","new_string":"before\npub fn mcp_marker() {}\n"}}]}}"#;
+        let events = parse_claude_line(0, &SourceStream::Parent, line).expect("mcp edit");
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].kind, ParseKind::ToolProposal);
+        assert_eq!(events[0].file_path.as_deref(), Some("src/mcp_target.rs"));
+        assert_eq!(
+            events[0].content_or_ref,
+            Some(ContentRef::Inline(
+                "before\npub fn mcp_marker() {}\n".to_string()
+            ))
         );
     }
 

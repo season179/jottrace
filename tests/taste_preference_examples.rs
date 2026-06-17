@@ -77,7 +77,7 @@ fn replace_session_preference_examples_persists_compiled_rows() {
     let root = common::temp_root("taste-preference-examples-db");
     let db_path = root.join(jottrace::storage::DB_FILE_NAME);
     let conn = open_database(&db_path).expect("open database");
-    assert_eq!(LATEST_SCHEMA_VERSION, 11);
+    assert_eq!(LATEST_SCHEMA_VERSION, 12);
 
     let examples = compile_fixture_examples();
     assert_eq!(examples.len(), 6);

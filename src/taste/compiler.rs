@@ -10,7 +10,7 @@ use super::parse::{ContentRef, ParseKind, ParsedEvent};
 use super::timeline::{FileTimelineRow, normalize_file_path};
 
 /// Version tag stored on compiled preference rows for idempotent re-extraction.
-pub const EXTRACTOR_VERSION: &str = "0.1.0";
+pub const EXTRACTOR_VERSION: &str = "0.1.1";
 
 /// Minimum confidence for a proposal to count toward high-confidence coverage.
 pub const HIGH_CONFIDENCE_THRESHOLD: f64 = 1.0;
@@ -48,6 +48,7 @@ pub enum EvidenceKind {
     DirectEdit,
     DirectWrite,
     BashCorrelation,
+    McpCorrelation,
     PermissionDenial,
     MissingFinalState,
 }
@@ -58,6 +59,7 @@ impl EvidenceKind {
             Self::DirectEdit => "direct_edit",
             Self::DirectWrite => "direct_write",
             Self::BashCorrelation => "bash_correlation",
+            Self::McpCorrelation => "mcp_correlation",
             Self::PermissionDenial => "permission_denial",
             Self::MissingFinalState => "missing_final_state",
         }
@@ -68,6 +70,7 @@ impl EvidenceKind {
             "direct_edit" => Some(Self::DirectEdit),
             "direct_write" => Some(Self::DirectWrite),
             "bash_correlation" => Some(Self::BashCorrelation),
+            "mcp_correlation" => Some(Self::McpCorrelation),
             "permission_denial" => Some(Self::PermissionDenial),
             "missing_final_state" => Some(Self::MissingFinalState),
             _ => None,
@@ -234,6 +237,7 @@ pub fn replace_session_preference_examples(
 
 fn is_file_modifying_tool(tool_name: &str) -> bool {
     matches!(tool_name, "Edit" | "Write" | "NotebookEdit" | "Bash")
+        || tool_name.starts_with("mcp_")
 }
 
 fn content_ref_text(content_ref: &ContentRef) -> Option<String> {
@@ -364,6 +368,7 @@ fn evidence_kind_for_tool(tool_name: &str) -> EvidenceKind {
         "Edit" | "NotebookEdit" => EvidenceKind::DirectEdit,
         "Write" => EvidenceKind::DirectWrite,
         "Bash" => EvidenceKind::BashCorrelation,
+        name if name.starts_with("mcp_") => EvidenceKind::McpCorrelation,
         _ => EvidenceKind::MissingFinalState,
     }
 }
@@ -372,6 +377,7 @@ fn base_confidence_for_tool(tool_name: &str) -> f64 {
     match tool_name {
         "Edit" | "Write" | "NotebookEdit" => 1.0,
         "Bash" => 0.6,
+        name if name.starts_with("mcp_") => 0.6,
         _ => 0.3,
     }
 }
@@ -393,7 +399,7 @@ fn post_apply_content(
         return index.rows[*row_index].content.clone();
     }
 
-    if tool_name != "Bash" {
+    if tool_name != "Bash" && !tool_name.starts_with("mcp_") {
         return None;
     }
 
@@ -548,5 +554,38 @@ mod tests {
 
         let examples = PreferenceCompiler::compile("claude_cli", "sess", None, &events, &rows);
         assert_eq!(examples[0].outcome, PreferenceOutcome::Rejected);
+    }
+
+    #[test]
+    fn compiler_labels_mcp_edit_with_temporal_correlation() {
+        let events = vec![
+            proposal(
+                3,
+                "toolu_mcp",
+                "mcp_fixture_codedb_edit",
+                Some("src/a.rs"),
+                Some("added\n"),
+            ),
+            ParsedEvent {
+                seq: 4,
+                timestamp: None,
+                kind: ParseKind::ToolResult,
+                file_path: None,
+                content_or_ref: None,
+                tool_ref: Some("toolu_mcp".to_string()),
+                tool_name: None,
+                source_stream: SourceStream::Parent,
+            },
+        ];
+        let rows = vec![
+            timeline_row("src/a.rs", 0, 0, "base\n", None),
+            timeline_row("src/a.rs", 1, 5, "base\nadded\n", None),
+        ];
+
+        let examples = PreferenceCompiler::compile("claude_cli", "sess", None, &events, &rows);
+        assert_eq!(examples.len(), 1);
+        assert_eq!(examples[0].outcome, PreferenceOutcome::Accepted);
+        assert_eq!(examples[0].evidence_kind, EvidenceKind::McpCorrelation);
+        assert_eq!(examples[0].confidence, 0.6);
     }
 }
