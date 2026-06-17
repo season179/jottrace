@@ -112,10 +112,10 @@ fn taste_export_writes_fixture_rows_to_file() {
     )
     .expect("export preferences");
 
-    assert_eq!(report.rows_exported, 6);
+    assert_eq!(report.rows_exported, 7);
     let content = fs::read_to_string(&out_path).expect("read export file");
     let rows = parse_jsonl(&content);
-    assert_eq!(rows.len(), 6);
+    assert_eq!(rows.len(), 7);
 
     let rejected = rows
         .iter()
@@ -163,10 +163,10 @@ fn taste_export_cli_writes_jsonl_to_stdout() {
 
     let stdout = String::from_utf8_lossy(&output.stdout);
     let rows = parse_jsonl(&stdout);
-    assert_eq!(rows.len(), 6);
+    assert_eq!(rows.len(), 7);
 
     let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(stderr.contains("rows_exported: 6"));
+    assert!(stderr.contains("rows_exported: 7"));
 
     let bash = rows
         .iter()

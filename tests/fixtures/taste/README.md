@@ -10,7 +10,7 @@ See `notes/taste-extraction-plan.md` for the extraction contract.
 
 - `claude-cli/projects/-Users-fixture-Workspace-jottrace/00000000-0000-4000-8000-000000000031.jsonl`
   — parent session with inline and `backupFileName` snapshots, `Edit`, `Write`,
-  `Bash` file edits, a permission denial, a revert, and timeline bumps.
+  `Bash` file edits, `NotebookEdit`, a permission denial, a revert, and timeline bumps.
 - `claude-cli/file-history/00000000-0000-4000-8000-000000000031/`
   — snapshot sidecar blobs referenced by `backupFileName` in the session.
 - `claude-cli/projects/-Users-fixture-Workspace-jottrace/00000000-0000-4000-8000-000000000031/subagents/`

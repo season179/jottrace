@@ -27,8 +27,8 @@ fn claude_parser_emits_snapshots_proposals_and_denials_from_fixture() {
         .filter(|event| event.kind == ParseKind::FileSnapshot)
         .collect();
     assert!(
-        snapshots.len() >= 4,
-        "expected inline + 3 sidecar snapshots, got {}",
+        snapshots.len() >= 5,
+        "expected inline + 4 sidecar/inline snapshots, got {}",
         snapshots.len()
     );
     assert!(
@@ -52,7 +52,7 @@ fn claude_parser_emits_snapshots_proposals_and_denials_from_fixture() {
         .iter()
         .filter_map(|event| event.tool_name.as_deref())
         .collect();
-    for required in ["Edit", "Write", "Bash"] {
+    for required in ["Edit", "Write", "Bash", "NotebookEdit"] {
         assert!(
             tool_names.contains(&required),
             "missing tool proposal for {required}"

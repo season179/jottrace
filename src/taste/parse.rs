@@ -260,6 +260,7 @@ fn tool_file_path(input: Option<&Value>) -> Option<String> {
     input
         .get("file_path")
         .or_else(|| input.get("path"))
+        .or_else(|| input.get("notebook_path"))
         .and_then(Value::as_str)
         .map(str::to_string)
 }
@@ -425,6 +426,19 @@ mod tests {
                 backup_file_name: "blob@v1".to_string(),
                 version: Some(1),
             })
+        );
+    }
+
+    #[test]
+    fn notebook_edit_extracts_notebook_path_and_new_source() {
+        let line = br#"{"type":"assistant","message":{"role":"assistant","content":[{"type":"tool_use","id":"tool-notebook","name":"NotebookEdit","input":{"notebook_path":"/tmp/notebook.ipynb","cell_id":"cell-1","new_source":"print('marker')\n","cell_type":"code","edit_mode":"replace"}}]}}"#;
+        let events = parse_claude_line(0, &SourceStream::Parent, line).expect("notebook edit");
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].kind, ParseKind::ToolProposal);
+        assert_eq!(events[0].file_path.as_deref(), Some("/tmp/notebook.ipynb"));
+        assert_eq!(
+            events[0].content_or_ref,
+            Some(ContentRef::Inline("print('marker')\n".to_string()))
         );
     }
 

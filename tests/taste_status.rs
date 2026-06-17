@@ -97,17 +97,17 @@ fn taste_status_reports_fixture_coverage_after_extract() {
     assert_eq!(report.claude_parent_sessions, 1);
     assert_eq!(report.sessions_processed, 1);
     assert_eq!(report.sessions_pending, 0);
-    assert_eq!(report.proposals, 6);
+    assert_eq!(report.proposals, 7);
     assert_eq!(
         report.outcomes,
         TasteOutcomeCounts {
-            accepted: 3,
+            accepted: 4,
             rejected: 3,
             edited: 0,
         }
     );
-    assert_eq!(report.high_confidence_proposals, 3);
-    assert!((report.coverage_percent - 50.0).abs() < f64::EPSILON);
+    assert_eq!(report.high_confidence_proposals, 4);
+    assert!((report.coverage_percent - (4.0 / 7.0 * 100.0)).abs() < 1e-9);
 }
 
 #[test]
@@ -133,10 +133,10 @@ fn taste_status_cli_reports_fixture_counts() {
     );
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(stdout.contains("sessions_processed: 1"));
-    assert!(stdout.contains("proposals: 6"));
-    assert!(stdout.contains("accepted: 3"));
+    assert!(stdout.contains("proposals: 7"));
+    assert!(stdout.contains("accepted: 4"));
     assert!(stdout.contains("rejected: 3"));
-    assert!(stdout.contains("high_confidence_coverage: 50.0%"));
+    assert!(stdout.contains("high_confidence_coverage: 57.1%"));
 }
 
 #[test]

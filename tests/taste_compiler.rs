@@ -97,6 +97,7 @@ fn compiler_labels_fixture_proposals_with_present_at_session_end_outcomes() {
         "toolu_taste_bash",
         "toolu_taste_edit_revert",
         "toolu_taste_sub_edit",
+        "toolu_taste_notebook_edit",
     ] {
         assert!(
             by_tool.contains_key(required),
@@ -139,6 +140,21 @@ fn compiler_labels_fixture_proposals_with_present_at_session_end_outcomes() {
     assert_eq!(sub.file_path.as_deref(), Some("src/taste_subagent.rs"));
     assert_eq!(sub.outcome, PreferenceOutcome::Rejected);
     assert_eq!(sub.evidence_kind, EvidenceKind::MissingFinalState);
+
+    let notebook = example_by_tool(&examples, "toolu_taste_notebook_edit");
+    assert_eq!(
+        notebook.file_path.as_deref(),
+        Some("notebooks/taste_fixture.ipynb")
+    );
+    assert_eq!(notebook.outcome, PreferenceOutcome::Accepted);
+    assert_eq!(notebook.evidence_kind, EvidenceKind::DirectEdit);
+    assert_eq!(notebook.confidence, 1.0);
+    assert!(
+        notebook
+            .proposal_content
+            .as_deref()
+            .is_some_and(|content| content.contains("notebook_marker"))
+    );
 }
 
 #[test]

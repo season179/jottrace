@@ -20,8 +20,11 @@ fn taste_fixture_corpus_has_required_session_shapes() {
         "\"name\":\"Edit\"",
         "\"name\":\"Write\"",
         "\"name\":\"Bash\"",
+        "\"name\":\"NotebookEdit\"",
         "new_string was NOT written",
         "toolu_taste_edit_revert",
+        "toolu_taste_notebook_edit",
+        "notebook_marker",
     ] {
         assert!(
             content.contains(required),

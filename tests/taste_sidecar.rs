@@ -67,7 +67,7 @@ fn sidecar_resolver_resolves_parsed_session_snapshots() {
         .resolve_snapshot_events(TASTE_SESSION_ID, &events)
         .expect("resolve snapshots");
 
-    assert_eq!(resolved.len(), 4, "expected inline + 3 sidecar snapshots");
+    assert_eq!(resolved.len(), 5, "expected inline + 3 sidecar + notebook snapshots");
 
     let inline = resolved
         .iter()
