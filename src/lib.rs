@@ -67,6 +67,13 @@ pub enum JottraceError {
         path: PathBuf,
         message: String,
     },
+    /// A stored session transcript line could not be parsed as valid JSON. The
+    /// path is the database it was read from and `source` is the parse error.
+    InvalidSessionJson {
+        path: PathBuf,
+        source_session_id: String,
+        source: serde_json::Error,
+    },
     /// Existing loose permissions are surfaced instead of silently chmodded so
     /// the user can notice and decide whether the location is trustworthy.
     InsecureMode {
@@ -186,6 +193,15 @@ impl fmt::Display for JottraceError {
             Self::InvalidSessionMeta { path, message } => {
                 write!(f, "{}: {}", path.display(), message)
             }
+            Self::InvalidSessionJson {
+                path,
+                source_session_id,
+                source,
+            } => write!(
+                f,
+                "{}: invalid JSON in claude_cli session {source_session_id}: {source}",
+                path.display(),
+            ),
             Self::InsecureMode {
                 path,
                 expected,
@@ -318,6 +334,7 @@ impl std::error::Error for JottraceError {
             Self::EventPayloadCodec { source, .. } => Some(source),
             Self::Output { source } => Some(source),
             Self::Sqlite { source, .. } => Some(source),
+            Self::InvalidSessionJson { source, .. } => Some(source),
             _ => None,
         }
     }

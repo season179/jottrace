@@ -388,11 +388,10 @@ fn invalid_session_json(
     source_session_id: &str,
     source: serde_json::Error,
 ) -> JottraceError {
-    JottraceError::Sqlite {
+    JottraceError::InvalidSessionJson {
         path: db_path.to_path_buf(),
-        source: rusqlite::Error::InvalidParameterName(format!(
-            "invalid JSON in claude_cli session {source_session_id}: {source}"
-        )),
+        source_session_id: source_session_id.to_string(),
+        source,
     }
 }
 
@@ -415,6 +414,28 @@ mod tests {
         assert_eq!(
             subagent_agent_id("agent-a000000000000021"),
             "agent-a000000000000021"
+        );
+    }
+
+    #[test]
+    fn invalid_session_json_maps_to_dedicated_json_variant() {
+        let db_path = Path::new("/tmp/db.sqlite");
+        let parse_error = serde_json::from_str::<serde_json::Value>("{ not json")
+            .expect_err("malformed JSON must fail to parse");
+        let error = invalid_session_json(db_path, "sess-abc", parse_error);
+
+        assert!(
+            matches!(error, JottraceError::InvalidSessionJson { .. }),
+            "malformed session JSON must map to InvalidSessionJson, not a Sqlite error"
+        );
+        let rendered = error.to_string();
+        assert!(
+            rendered.contains("invalid JSON in claude_cli session sess-abc"),
+            "rendered error should describe a JSON parse failure: {rendered}"
+        );
+        assert!(
+            !rendered.to_lowercase().contains("invalid parameter name"),
+            "rendered error must not surface a spurious SQLite diagnostic: {rendered}"
         );
     }
 }

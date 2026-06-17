@@ -275,15 +275,12 @@ fn index_timelines(rows: &[FileTimelineRow]) -> HashMap<String, FileTimelineInde
         .into_iter()
         .map(|(file_path, mut rows)| {
             rows.sort_by_key(|row| row.seq);
-            let by_trigger = rows
-                .iter()
-                .enumerate()
-                .filter_map(|(index, row)| {
-                    row.trigger_event_ref
-                        .as_ref()
-                        .map(|trigger| (trigger.clone(), index))
-                })
-                .collect();
+            let mut by_trigger: HashMap<String, usize> = HashMap::new();
+            for (index, row) in rows.iter().enumerate() {
+                if let Some(trigger) = row.trigger_event_ref.as_ref() {
+                    by_trigger.entry(trigger.clone()).or_insert(index);
+                }
+            }
             (file_path, FileTimelineIndex { rows, by_trigger })
         })
         .collect()
@@ -682,6 +679,45 @@ mod tests {
 
         let examples = PreferenceCompiler::compile("claude_cli", "sess", None, &events, &rows);
         assert_eq!(examples[0].outcome, PreferenceOutcome::Rejected);
+    }
+
+    #[test]
+    fn post_apply_content_picks_earliest_snapshot_sharing_a_trigger() {
+        let rows = vec![
+            timeline_row("src/a.rs", 0, 0, "base\n", None),
+            timeline_row("src/a.rs", 1, 2, "base\nimmediate\n", Some("toolu_edit")),
+            timeline_row("src/a.rs", 2, 4, "base\ndrifted\n", Some("toolu_edit")),
+        ];
+        let mut timelines = index_timelines(&rows);
+        let index = timelines.remove("src/a.rs").expect("timeline indexed");
+
+        let post =
+            post_apply_content("Edit", "toolu_edit", 1, &index, &[]).expect("post-apply resolves");
+        assert_eq!(post, "base\nimmediate\n");
+    }
+
+    #[test]
+    fn compiler_detects_revert_when_two_snapshots_share_a_trigger() {
+        let events = vec![proposal(
+            1,
+            "toolu_edit",
+            "Edit",
+            Some("src/a.rs"),
+            Some("added\n"),
+        )];
+        let rows = vec![
+            timeline_row("src/a.rs", 0, 0, "base\n", None),
+            timeline_row("src/a.rs", 1, 2, "base\nadded\n", Some("toolu_edit")),
+            timeline_row("src/a.rs", 2, 4, "base\n", Some("toolu_edit")),
+        ];
+
+        let examples = PreferenceCompiler::compile("claude_cli", "sess", None, &events, &rows);
+        assert_eq!(examples.len(), 1);
+        assert_eq!(
+            examples[0].outcome,
+            PreferenceOutcome::Rejected,
+            "earliest post-apply snapshot must win over a later drifted snapshot sharing the same trigger"
+        );
     }
 
     #[test]
