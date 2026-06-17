@@ -488,7 +488,7 @@ pub(crate) fn count(
     params: impl rusqlite::Params,
 ) -> Result<u64> {
     let value: i64 = query_one(path, conn, sql, params, |row| row.get(0))?;
-    Ok(value as u64)
+    Ok(u64::try_from(value).expect("count fits in u64"))
 }
 
 fn user_version(path: &Path, conn: &Connection) -> Result<i64> {

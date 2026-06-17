@@ -1087,9 +1087,7 @@ fn parse_pack_command(
         match arg.as_str() {
             "--help" | "-h" => return Ok(ParsedCommand::Help),
             "--output" | "-o" => {
-                let value = args
-                    .next()
-                    .ok_or_else(|| String::from("missing value for --output"))?;
+                let value = next_flag_value(&mut args, "--output")?;
                 options.output = Some(PathBuf::from(value));
             }
             _ => return Err(format!("unknown pack option: {arg}")),
