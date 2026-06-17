@@ -295,6 +295,13 @@ fn taste_extraction_plan_implementation_complete() {
         "migration 011 should define preference_examples"
     );
 
+    let migration_012 = fs::read_to_string("src/migrations/012_preference_examples_mcp_evidence.sql")
+        .expect("read migration 012");
+    assert!(
+        migration_012.contains("mcp_correlation"),
+        "migration 012 should allow mcp_correlation evidence_kind"
+    );
+
     let migration_013 =
         fs::read_to_string("src/migrations/013_taste_extractions.sql").expect("read migration 013");
     assert!(
@@ -393,10 +400,71 @@ fn taste_extraction_documentation_complete() {
         "file_timelines",
         "preference_examples",
         "taste_extractions",
+        "tasks/*.output",
     ] {
         assert!(
             changelog.contains(required),
             "CHANGELOG.md should document taste extraction release via {required}"
+        );
+    }
+}
+
+#[test]
+fn taste_extraction_risk_coverage_complete() {
+    let plan =
+        fs::read_to_string("notes/taste-extraction-plan.md").expect("read taste extraction plan");
+
+    for required in [
+        "**R1 — Snapshot sidecars.**",
+        "**R2 — Bash attribution is best-effort.**",
+        "**R3 — Async Task transcripts are not ingested (excluded).**",
+        "**R4 — Manual human edits and untracked paths.**",
+        "notes/command-code-taste-formula.md",
+    ] {
+        assert!(
+            plan.contains(required),
+            "taste extraction plan should document risk coverage via {required}"
+        );
+    }
+
+    let session = taste_fixture(&format!(
+        "claude-cli/projects/-Users-fixture-Workspace-jottrace/{TASTE_SESSION_ID}.jsonl"
+    ));
+    let content = fs::read_to_string(&session).expect("read taste session fixture");
+
+    for required in [
+        "toolu_taste_edit_missing_final",
+        "fixture-missingfinal1@v2",
+        "toolu_taste_bash",
+        "toolu_taste_mcp_edit",
+        "toolu_taste_edit_manual",
+        "toolu_taste_edit_untracked",
+    ] {
+        assert!(
+            content.contains(required),
+            "taste fixture should cover plan risks via {required}"
+        );
+    }
+
+    let readme = fs::read_to_string(taste_fixture("README.md")).expect("read taste README");
+    for required in ["(R1)", "(R4)"] {
+        assert!(
+            readme.contains(required),
+            "taste README should document risk coverage via {required}"
+        );
+    }
+
+    let sidecar = fs::read_to_string("src/taste/sidecar.rs").expect("read sidecar module");
+    assert!(
+        sidecar.contains("MissingSidecar"),
+        "sidecar resolver should handle R1 missing sidecars"
+    );
+
+    let compiler = fs::read_to_string("src/taste/compiler.rs").expect("read compiler module");
+    for required in ["BashCorrelation", "McpCorrelation", "MissingFinalState"] {
+        assert!(
+            compiler.contains(required),
+            "preference compiler should implement risk evidence via {required}"
         );
     }
 }
