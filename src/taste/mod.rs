@@ -5,6 +5,7 @@ pub mod timeline;
 
 pub use compiler::{
     EvidenceKind, PreferenceCompiler, PreferenceExample, PreferenceOutcome, EXTRACTOR_VERSION,
+    replace_session_preference_examples,
 };
 pub use parse::{
     ClaudeSessionParser, ContentRef, ParseKind, ParsedEvent, SessionEventParser, SourceStream,

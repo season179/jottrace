@@ -1,4 +1,10 @@
 use std::collections::{HashMap, HashSet};
+use std::path::Path;
+
+use rusqlite::{Connection, params};
+
+use crate::JottraceError;
+use crate::storage::sqlite_error;
 
 use super::parse::{ContentRef, ParseKind, ParsedEvent};
 use super::timeline::{FileTimelineRow, normalize_file_path};
@@ -149,6 +155,61 @@ impl PreferenceCompiler {
 
         examples
     }
+}
+
+/// Replace all preference rows for one session with freshly compiled output.
+pub fn replace_session_preference_examples(
+    db_path: &Path,
+    conn: &Connection,
+    source: &str,
+    source_session_id: &str,
+    examples: &[PreferenceExample],
+) -> Result<usize, JottraceError> {
+    conn.execute(
+        "DELETE FROM preference_examples WHERE source = ?1 AND source_session_id = ?2",
+        params![source, source_session_id],
+    )
+    .map_err(|source| sqlite_error(db_path, source))?;
+
+    let mut inserted = 0usize;
+    for example in examples {
+        conn.execute(
+            "INSERT INTO preference_examples (
+                source,
+                source_session_id,
+                generation,
+                proposal_event_seq,
+                tool_use_id,
+                file_path,
+                tool_name,
+                proposal_content,
+                context,
+                outcome,
+                confidence,
+                evidence_kind,
+                extractor_version
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
+            params![
+                example.source,
+                example.source_session_id,
+                i64::try_from(example.generation).expect("generation fits in i64"),
+                i64::try_from(example.proposal_event_seq).expect("proposal_event_seq fits in i64"),
+                example.tool_use_id,
+                example.file_path,
+                example.tool_name,
+                example.proposal_content,
+                example.context,
+                example.outcome.as_str(),
+                example.confidence,
+                example.evidence_kind.as_str(),
+                example.extractor_version,
+            ],
+        )
+        .map_err(|source| sqlite_error(db_path, source))?;
+        inserted += 1;
+    }
+
+    Ok(inserted)
 }
 
 fn is_file_modifying_tool(tool_name: &str) -> bool {
