@@ -660,18 +660,16 @@ fn discover_sqlite_session_files(
     open_connection: fn(&Path) -> Result<Connection>,
 ) -> Result<Vec<SourceFile>> {
     let path = home_dir()?.join(db_relative_path);
-    match fs::metadata(&path) {
-        Ok(metadata) if metadata.is_file() => {}
-        Ok(_) => {
-            return Ok(sqlite_discovery_errors(
-                source,
-                error_session_id,
-                source_format,
-                path,
-            ));
-        }
-        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(Vec::new()),
-        Err(source) => return Err(io_error(&path, source)),
+    let Some(metadata) = metadata_optional(&path)? else {
+        return Ok(Vec::new());
+    };
+    if !metadata.is_file() {
+        return Ok(sqlite_discovery_errors(
+            source,
+            error_session_id,
+            source_format,
+            path,
+        ));
     }
 
     // Any failure reading the store — open, prepare, query, a bad row, or an
@@ -830,13 +828,10 @@ fn is_claude_local_agent_session_dir(path: &Path) -> bool {
 
 fn push_claude_local_agent_audit_file(session_dir: &Path, paths: &mut Vec<PathBuf>) -> Result<()> {
     let audit_path = session_dir.join(CLAUDE_LOCAL_AGENT_AUDIT_FILE_NAME);
-    match fs::metadata(&audit_path) {
-        Ok(metadata) if metadata.is_file() => paths.push(audit_path),
-        Ok(_) => {}
-        Err(error) if error.kind() == io::ErrorKind::NotFound => {}
-        Err(source) => {
-            return Err(io_error(&audit_path, source));
-        }
+    if let Some(metadata) = metadata_optional(&audit_path)?
+        && metadata.is_file()
+    {
+        paths.push(audit_path);
     }
     Ok(())
 }
@@ -2341,12 +2336,8 @@ fn source_metadata_for_source_file(
     }
 
     let settings_path = source_file.path.with_extension("settings.json");
-    let metadata = match fs::metadata(&settings_path) {
-        Ok(metadata) => metadata,
-        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
-        Err(source) => {
-            return Err(io_error(&settings_path, source));
-        }
+    let Some(metadata) = metadata_optional(&settings_path)? else {
+        return Ok(None);
     };
     if !metadata.is_file() {
         return Err(JottraceError::NotFile(settings_path));
@@ -3199,6 +3190,17 @@ fn i64_from_usize(value: usize, path: &Path) -> Result<i64> {
 
 fn invalid_path(path: &Path, message: &str) -> JottraceError {
     io_error(path, io::Error::new(io::ErrorKind::InvalidData, message))
+}
+
+/// Read filesystem metadata for `path`, mapping a missing path to `Ok(None)`
+/// and any other read failure to a [`JottraceError::Io`]. Callers inspect the
+/// returned [`Metadata`] (e.g. `is_file`) to handle the present-path case.
+fn metadata_optional(path: &Path) -> Result<Option<Metadata>> {
+    match fs::metadata(path) {
+        Ok(metadata) => Ok(Some(metadata)),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(None),
+        Err(source) => Err(io_error(path, source)),
+    }
 }
 
 fn invalid_session_meta(path: &Path, message: impl Into<String>) -> JottraceError {
