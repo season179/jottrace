@@ -308,16 +308,9 @@ fn run_ingest_command(args: impl Iterator<Item = String>) -> ExitCode {
     };
     jottrace::update::maybe_spawn_auto_update();
 
-    match jottrace::run_ingest() {
-        Ok(report) => {
-            print_ingest_report(&report, options.details);
-            ExitCode::SUCCESS
-        }
-        Err(error) => {
-            eprint_command_failure("ingest", error);
-            ExitCode::FAILURE
-        }
-    }
+    finish_command("ingest", jottrace::run_ingest(), |report| {
+        print_ingest_report(report, options.details);
+    })
 }
 
 fn parse_simple_command(
@@ -354,16 +347,9 @@ fn run_update_command(args: impl Iterator<Item = String>) -> ExitCode {
             print_update_help();
             ExitCode::SUCCESS
         }
-        Ok(SimpleCommand::Run) => match jottrace::run_update() {
-            Ok(report) => {
-                print_update_report(&report);
-                ExitCode::SUCCESS
-            }
-            Err(error) => {
-                eprint_command_failure("update", error);
-                ExitCode::FAILURE
-            }
-        },
+        Ok(SimpleCommand::Run) => {
+            finish_command("update", jottrace::run_update(), print_update_report)
+        }
         Err(message) => {
             eprint_command_usage("update", &message);
             ExitCode::from(2)
@@ -430,16 +416,11 @@ fn run_taste_show_example_command(args: impl Iterator<Item = String>) -> ExitCod
     };
     jottrace::update::maybe_spawn_auto_update();
 
-    match jottrace::run_taste_show_example(options) {
-        Ok(report) => {
-            print_taste_example_report(&report);
-            ExitCode::SUCCESS
-        }
-        Err(error) => {
-            eprint_command_failure("taste show example", error);
-            ExitCode::FAILURE
-        }
-    }
+    finish_command(
+        "taste show example",
+        jottrace::run_taste_show_example(options),
+        print_taste_example_report,
+    )
 }
 
 fn run_taste_show_timeline_command(args: impl Iterator<Item = String>) -> ExitCode {
@@ -456,16 +437,11 @@ fn run_taste_show_timeline_command(args: impl Iterator<Item = String>) -> ExitCo
     };
     jottrace::update::maybe_spawn_auto_update();
 
-    match jottrace::run_taste_show_timeline(options) {
-        Ok(report) => {
-            print_taste_timeline_report(&report);
-            ExitCode::SUCCESS
-        }
-        Err(error) => {
-            eprint_command_failure("taste show timeline", error);
-            ExitCode::FAILURE
-        }
-    }
+    finish_command(
+        "taste show timeline",
+        jottrace::run_taste_show_timeline(options),
+        print_taste_timeline_report,
+    )
 }
 
 enum TasteShowExampleCommand {
@@ -644,16 +620,9 @@ fn run_taste_status_command(args: impl Iterator<Item = String>) -> ExitCode {
     };
     jottrace::update::maybe_spawn_auto_update();
 
-    match jottrace::run_taste_status() {
-        Ok(report) => {
-            print_taste_status_report(&report, options.details);
-            ExitCode::SUCCESS
-        }
-        Err(error) => {
-            eprint_command_failure("taste status", error);
-            ExitCode::FAILURE
-        }
-    }
+    finish_command("taste status", jottrace::run_taste_status(), |report| {
+        print_taste_status_report(report, options.details);
+    })
 }
 
 fn print_taste_status_report(report: &jottrace::TasteStatusReport, details: bool) {
@@ -709,16 +678,11 @@ fn run_taste_export_command(args: impl Iterator<Item = String>) -> ExitCode {
     };
     jottrace::update::maybe_spawn_auto_update();
 
-    match jottrace::run_taste_export(options) {
-        Ok(report) => {
-            print_taste_export_report(&report);
-            ExitCode::SUCCESS
-        }
-        Err(error) => {
-            eprint_command_failure("taste export", error);
-            ExitCode::FAILURE
-        }
-    }
+    finish_command(
+        "taste export",
+        jottrace::run_taste_export(options),
+        print_taste_export_report,
+    )
 }
 
 fn parse_taste_export_command(
@@ -790,16 +754,11 @@ fn run_taste_extract_command(args: impl Iterator<Item = String>) -> ExitCode {
     };
     jottrace::update::maybe_spawn_auto_update();
 
-    match jottrace::run_taste_extract(options.extract_options) {
-        Ok(report) => {
-            print_taste_extract_report(&report);
-            ExitCode::SUCCESS
-        }
-        Err(error) => {
-            eprint_command_failure("taste extract", error);
-            ExitCode::FAILURE
-        }
-    }
+    finish_command(
+        "taste extract",
+        jottrace::run_taste_extract(options.extract_options),
+        print_taste_extract_report,
+    )
 }
 
 fn parse_taste_extract_command(
@@ -860,19 +819,14 @@ fn run_compact_command(args: impl Iterator<Item = String>) -> ExitCode {
     };
     jottrace::update::maybe_spawn_auto_update();
 
-    match jottrace::compact::run_compact_with_diagnostics(
-        cli_options.compact_options,
-        cli_options.details,
-    ) {
-        Ok(report) => {
-            print_compact_report(&report, cli_options.details);
-            ExitCode::SUCCESS
-        }
-        Err(error) => {
-            eprint_command_failure("compact", error);
-            ExitCode::FAILURE
-        }
-    }
+    finish_command(
+        "compact",
+        jottrace::compact::run_compact_with_diagnostics(
+            cli_options.compact_options,
+            cli_options.details,
+        ),
+        |report| print_compact_report(report, cli_options.details),
+    )
 }
 
 fn eprint_command_usage(command: &str, message: &str) {
@@ -882,6 +836,26 @@ fn eprint_command_usage(command: &str, message: &str) {
 
 fn eprint_command_failure(command: &str, error: impl Display) {
     eprintln!("jottrace {command} failed: {error}");
+}
+
+/// Print a command's report on success, or report the failure, mapping each to
+/// the matching exit code. Centralizes the Ok->print->SUCCESS /
+/// Err->report-failure->FAILURE shape shared by every report-producing command.
+fn finish_command<R, E: Display>(
+    command: &str,
+    result: std::result::Result<R, E>,
+    print: impl FnOnce(&R),
+) -> ExitCode {
+    match result {
+        Ok(report) => {
+            print(&report);
+            ExitCode::SUCCESS
+        }
+        Err(error) => {
+            eprint_command_failure(command, error);
+            ExitCode::FAILURE
+        }
+    }
 }
 
 fn print_web_startup(local_url: impl AsRef<str>, db_path: &Path) {
@@ -1141,18 +1115,13 @@ fn run_doctor_command(args: impl Iterator<Item = String>) -> ExitCode {
 
     // Keep the CLI responsible for presentation while the library owns the
     // filesystem checks. That makes future commands easier to test directly.
-    match jottrace::run_doctor_with_options(jottrace::DoctorOptions {
-        include_recent_errors: options.details,
-    }) {
-        Ok(report) => {
-            print_doctor_report(&report, options.details);
-            ExitCode::SUCCESS
-        }
-        Err(error) => {
-            eprint_command_failure("doctor", error);
-            ExitCode::FAILURE
-        }
-    }
+    finish_command(
+        "doctor",
+        jottrace::run_doctor_with_options(jottrace::DoctorOptions {
+            include_recent_errors: options.details,
+        }),
+        |report| print_doctor_report(report, options.details),
+    )
 }
 
 fn run_status_command(args: impl Iterator<Item = String>) -> ExitCode {
@@ -1169,16 +1138,9 @@ fn run_status_command(args: impl Iterator<Item = String>) -> ExitCode {
     };
     jottrace::update::maybe_spawn_auto_update();
 
-    match jottrace::run_status() {
-        Ok(report) => {
-            print_status_report(&report, options.details);
-            ExitCode::SUCCESS
-        }
-        Err(error) => {
-            eprint_command_failure("status", error);
-            ExitCode::FAILURE
-        }
-    }
+    finish_command("status", jottrace::run_status(), |report| {
+        print_status_report(report, options.details);
+    })
 }
 
 enum PackCommand {
@@ -1257,18 +1219,13 @@ fn run_pack_command(args: impl Iterator<Item = String>) -> ExitCode {
     };
     jottrace::update::maybe_spawn_auto_update();
 
-    match jottrace::run_pack(jottrace::PackOptions {
-        output: options.output,
-    }) {
-        Ok(report) => {
-            print_pack_report(&report);
-            ExitCode::SUCCESS
-        }
-        Err(error) => {
-            eprint_command_failure("pack", error);
-            ExitCode::FAILURE
-        }
-    }
+    finish_command(
+        "pack",
+        jottrace::run_pack(jottrace::PackOptions {
+            output: options.output,
+        }),
+        print_pack_report,
+    )
 }
 
 fn run_settle_command(args: impl Iterator<Item = String>) -> ExitCode {
@@ -1284,19 +1241,14 @@ fn run_settle_command(args: impl Iterator<Item = String>) -> ExitCode {
         }
     };
 
-    match jottrace::run_settle(jottrace::SettleOptions {
-        archive: options.archive,
-        force: options.force,
-    }) {
-        Ok(report) => {
-            print_settle_report(&report);
-            ExitCode::SUCCESS
-        }
-        Err(error) => {
-            eprint_command_failure("settle", error);
-            ExitCode::FAILURE
-        }
-    }
+    finish_command(
+        "settle",
+        jottrace::run_settle(jottrace::SettleOptions {
+            archive: options.archive,
+            force: options.force,
+        }),
+        print_settle_report,
+    )
 }
 
 fn print_help() {
