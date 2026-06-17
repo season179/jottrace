@@ -54,9 +54,12 @@ enum EventsSelection {
     Limit(i64),
 }
 
+/// Outcome of parsing a command's arguments: run with `T` options, or print
+/// help. Parse errors are returned separately as `Err(String)` by the parse
+/// functions and surfaced by [`resolve_command`].
 #[derive(Debug, Clone, PartialEq, Eq)]
-enum EventsCommand {
-    Run(EventsOptions),
+enum ParsedCommand<T> {
+    Run(T),
     Help,
 }
 
@@ -67,32 +70,14 @@ struct WebOptions {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum WebCommand {
-    Run(WebOptions),
-    Help,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct CompactCliOptions {
     compact_options: jottrace::CompactOptions,
     details: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum CompactCommand {
-    Run(CompactCliOptions),
-    Help,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct DetailOptions {
     details: bool,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum DetailCommand {
-    Run(DetailOptions),
-    Help,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -102,16 +87,9 @@ enum SimpleCommand {
 }
 
 fn run_events_command(args: impl Iterator<Item = String>) -> ExitCode {
-    let options = match parse_events_command(args) {
-        Ok(EventsCommand::Run(options)) => options,
-        Ok(EventsCommand::Help) => {
-            print_events_help();
-            return ExitCode::SUCCESS;
-        }
-        Err(message) => {
-            eprint_command_usage("events", &message);
-            return ExitCode::from(2);
-        }
+    let options = match resolve_command("events", parse_events_command(args), print_events_help) {
+        Ok(options) => options,
+        Err(code) => return code,
     };
     jottrace::update::maybe_spawn_auto_update();
 
@@ -163,7 +141,7 @@ fn run_events_command(args: impl Iterator<Item = String>) -> ExitCode {
 
 fn parse_events_command(
     mut args: impl Iterator<Item = String>,
-) -> std::result::Result<EventsCommand, String> {
+) -> std::result::Result<ParsedCommand<EventsOptions>, String> {
     let mut source_session_id = None;
     let mut source = None;
     let mut limit = None;
@@ -171,7 +149,7 @@ fn parse_events_command(
 
     while let Some(arg) = args.next() {
         match arg.as_str() {
-            "--help" | "-h" => return Ok(EventsCommand::Help),
+            "--help" | "-h" => return Ok(ParsedCommand::Help),
             "--all" => all = true,
             "--source" => {
                 source = Some(
@@ -213,7 +191,7 @@ fn parse_events_command(
         (false, None) => return Err("events requires --limit <n> or --all".to_string()),
     };
 
-    Ok(EventsCommand::Run(EventsOptions {
+    Ok(ParsedCommand::Run(EventsOptions {
         source,
         source_session_id,
         selection,
@@ -221,16 +199,9 @@ fn parse_events_command(
 }
 
 fn run_web_command(args: impl Iterator<Item = String>) -> ExitCode {
-    let options = match parse_web_command(args) {
-        Ok(WebCommand::Run(options)) => options,
-        Ok(WebCommand::Help) => {
-            print_web_help();
-            return ExitCode::SUCCESS;
-        }
-        Err(message) => {
-            eprint_command_usage("web", &message);
-            return ExitCode::from(2);
-        }
+    let options = match resolve_command("web", parse_web_command(args), print_web_help) {
+        Ok(options) => options,
+        Err(code) => return code,
     };
     jottrace::update::maybe_spawn_auto_update();
 
@@ -269,7 +240,7 @@ fn run_web_command(args: impl Iterator<Item = String>) -> ExitCode {
 
 fn parse_web_command(
     mut args: impl Iterator<Item = String>,
-) -> std::result::Result<WebCommand, String> {
+) -> std::result::Result<ParsedCommand<WebOptions>, String> {
     let mut options = WebOptions {
         port: 0,
         once: false,
@@ -277,7 +248,7 @@ fn parse_web_command(
 
     while let Some(arg) = args.next() {
         match arg.as_str() {
-            "--help" | "-h" => return Ok(WebCommand::Help),
+            "--help" | "-h" => return Ok(ParsedCommand::Help),
             "--once" => options.once = true,
             "--port" => {
                 let value = args
@@ -291,20 +262,17 @@ fn parse_web_command(
         }
     }
 
-    Ok(WebCommand::Run(options))
+    Ok(ParsedCommand::Run(options))
 }
 
 fn run_ingest_command(args: impl Iterator<Item = String>) -> ExitCode {
-    let options = match parse_detail_command("ingest", args) {
-        Ok(DetailCommand::Help) => {
-            print_ingest_help();
-            return ExitCode::SUCCESS;
-        }
-        Ok(DetailCommand::Run(options)) => options,
-        Err(message) => {
-            eprint_command_usage("ingest", &message);
-            return ExitCode::from(2);
-        }
+    let options = match resolve_command(
+        "ingest",
+        parse_detail_command("ingest", args),
+        print_ingest_help,
+    ) {
+        Ok(options) => options,
+        Err(code) => return code,
     };
     jottrace::update::maybe_spawn_auto_update();
 
@@ -327,18 +295,18 @@ fn parse_simple_command(
 fn parse_detail_command(
     command: &str,
     args: impl Iterator<Item = String>,
-) -> std::result::Result<DetailCommand, String> {
+) -> std::result::Result<ParsedCommand<DetailOptions>, String> {
     let mut options = DetailOptions { details: false };
 
     for arg in args {
         match arg.as_str() {
-            "--help" | "-h" => return Ok(DetailCommand::Help),
+            "--help" | "-h" => return Ok(ParsedCommand::Help),
             "--details" => options.details = true,
             _ => return Err(format!("unknown {command} option: {arg}")),
         }
     }
 
-    Ok(DetailCommand::Run(options))
+    Ok(ParsedCommand::Run(options))
 }
 
 fn run_update_command(args: impl Iterator<Item = String>) -> ExitCode {
@@ -360,12 +328,6 @@ fn run_update_command(args: impl Iterator<Item = String>) -> ExitCode {
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct TasteExtractCliOptions {
     extract_options: jottrace::TasteExtractOptions,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-enum TasteCommand {
-    Extract(TasteExtractCliOptions),
-    Help,
 }
 
 fn run_taste_command(mut args: impl Iterator<Item = String>) -> ExitCode {
@@ -403,16 +365,13 @@ fn run_taste_show_command(mut args: impl Iterator<Item = String>) -> ExitCode {
 }
 
 fn run_taste_show_example_command(args: impl Iterator<Item = String>) -> ExitCode {
-    let options = match parse_taste_show_example_command(args) {
-        Ok(TasteShowExampleCommand::Help) => {
-            print_taste_show_example_help();
-            return ExitCode::SUCCESS;
-        }
-        Ok(TasteShowExampleCommand::Run(options)) => options,
-        Err(message) => {
-            eprint_command_usage("taste show example", &message);
-            return ExitCode::from(2);
-        }
+    let options = match resolve_command(
+        "taste show example",
+        parse_taste_show_example_command(args),
+        print_taste_show_example_help,
+    ) {
+        Ok(options) => options,
+        Err(code) => return code,
     };
     jottrace::update::maybe_spawn_auto_update();
 
@@ -424,16 +383,13 @@ fn run_taste_show_example_command(args: impl Iterator<Item = String>) -> ExitCod
 }
 
 fn run_taste_show_timeline_command(args: impl Iterator<Item = String>) -> ExitCode {
-    let options = match parse_taste_show_timeline_command(args) {
-        Ok(TasteShowTimelineCommand::Help) => {
-            print_taste_show_timeline_help();
-            return ExitCode::SUCCESS;
-        }
-        Ok(TasteShowTimelineCommand::Run(options)) => options,
-        Err(message) => {
-            eprint_command_usage("taste show timeline", &message);
-            return ExitCode::from(2);
-        }
+    let options = match resolve_command(
+        "taste show timeline",
+        parse_taste_show_timeline_command(args),
+        print_taste_show_timeline_help,
+    ) {
+        Ok(options) => options,
+        Err(code) => return code,
     };
     jottrace::update::maybe_spawn_auto_update();
 
@@ -442,16 +398,6 @@ fn run_taste_show_timeline_command(args: impl Iterator<Item = String>) -> ExitCo
         jottrace::run_taste_show_timeline(options),
         print_taste_timeline_report,
     )
-}
-
-enum TasteShowExampleCommand {
-    Run(jottrace::TasteShowExampleOptions),
-    Help,
-}
-
-enum TasteShowTimelineCommand {
-    Run(jottrace::TasteShowTimelineOptions),
-    Help,
 }
 
 /// Consume the value following a single-value flag, rejecting a repeated flag.
@@ -475,13 +421,13 @@ fn take_single_flag_value(
 
 fn parse_taste_show_example_command(
     mut args: impl Iterator<Item = String>,
-) -> std::result::Result<TasteShowExampleCommand, String> {
+) -> std::result::Result<ParsedCommand<jottrace::TasteShowExampleOptions>, String> {
     let mut source_session_id = None;
     let mut tool_use_id = None;
 
     while let Some(arg) = args.next() {
         match arg.as_str() {
-            "--help" | "-h" => return Ok(TasteShowExampleCommand::Help),
+            "--help" | "-h" => return Ok(ParsedCommand::Help),
             "--session" => {
                 source_session_id = Some(take_single_flag_value(
                     &mut args,
@@ -507,23 +453,21 @@ fn parse_taste_show_example_command(
     let tool_use_id =
         tool_use_id.ok_or_else(|| "taste show example requires <tool_use_id>".to_string())?;
 
-    Ok(TasteShowExampleCommand::Run(
-        jottrace::TasteShowExampleOptions {
-            tool_use_id,
-            source_session_id,
-        },
-    ))
+    Ok(ParsedCommand::Run(jottrace::TasteShowExampleOptions {
+        tool_use_id,
+        source_session_id,
+    }))
 }
 
 fn parse_taste_show_timeline_command(
     mut args: impl Iterator<Item = String>,
-) -> std::result::Result<TasteShowTimelineCommand, String> {
+) -> std::result::Result<ParsedCommand<jottrace::TasteShowTimelineOptions>, String> {
     let mut source_session_id = None;
     let mut file_path = None;
 
     while let Some(arg) = args.next() {
         match arg.as_str() {
-            "--help" | "-h" => return Ok(TasteShowTimelineCommand::Help),
+            "--help" | "-h" => return Ok(ParsedCommand::Help),
             "--session" => {
                 source_session_id = Some(take_single_flag_value(
                     &mut args,
@@ -549,12 +493,10 @@ fn parse_taste_show_timeline_command(
     let file_path =
         file_path.ok_or_else(|| "taste show timeline requires --file <path>".to_string())?;
 
-    Ok(TasteShowTimelineCommand::Run(
-        jottrace::TasteShowTimelineOptions {
-            source_session_id,
-            file_path,
-        },
-    ))
+    Ok(ParsedCommand::Run(jottrace::TasteShowTimelineOptions {
+        source_session_id,
+        file_path,
+    }))
 }
 
 fn print_taste_example_report(report: &jottrace::TasteExampleShowReport) {
@@ -607,16 +549,13 @@ fn print_taste_timeline_report(report: &jottrace::TasteTimelineShowReport) {
 }
 
 fn run_taste_status_command(args: impl Iterator<Item = String>) -> ExitCode {
-    let options = match parse_detail_command("taste status", args) {
-        Ok(DetailCommand::Help) => {
-            print_taste_status_help();
-            return ExitCode::SUCCESS;
-        }
-        Ok(DetailCommand::Run(options)) => options,
-        Err(message) => {
-            eprint_command_usage("taste status", &message);
-            return ExitCode::from(2);
-        }
+    let options = match resolve_command(
+        "taste status",
+        parse_detail_command("taste status", args),
+        print_taste_status_help,
+    ) {
+        Ok(options) => options,
+        Err(code) => return code,
     };
     jottrace::update::maybe_spawn_auto_update();
 
@@ -659,22 +598,14 @@ fn print_taste_status_report(report: &jottrace::TasteStatusReport, details: bool
     }
 }
 
-enum TasteExportCommand {
-    Run(jottrace::TasteExportOptions),
-    Help,
-}
-
 fn run_taste_export_command(args: impl Iterator<Item = String>) -> ExitCode {
-    let options = match parse_taste_export_command(args) {
-        Ok(TasteExportCommand::Help) => {
-            print_taste_export_help();
-            return ExitCode::SUCCESS;
-        }
-        Ok(TasteExportCommand::Run(options)) => options,
-        Err(message) => {
-            eprint_command_usage("taste export", &message);
-            return ExitCode::from(2);
-        }
+    let options = match resolve_command(
+        "taste export",
+        parse_taste_export_command(args),
+        print_taste_export_help,
+    ) {
+        Ok(options) => options,
+        Err(code) => return code,
     };
     jottrace::update::maybe_spawn_auto_update();
 
@@ -687,13 +618,13 @@ fn run_taste_export_command(args: impl Iterator<Item = String>) -> ExitCode {
 
 fn parse_taste_export_command(
     mut args: impl Iterator<Item = String>,
-) -> std::result::Result<TasteExportCommand, String> {
+) -> std::result::Result<ParsedCommand<jottrace::TasteExportOptions>, String> {
     let mut format = None;
     let mut output_path = None;
 
     while let Some(arg) = args.next() {
         match arg.as_str() {
-            "--help" | "-h" => return Ok(TasteExportCommand::Help),
+            "--help" | "-h" => return Ok(ParsedCommand::Help),
             "--format" => {
                 let value = take_single_flag_value(
                     &mut args,
@@ -724,7 +655,7 @@ fn parse_taste_export_command(
 
     let format = format.ok_or_else(|| "taste export requires --format <format>".to_string())?;
 
-    Ok(TasteExportCommand::Run(jottrace::TasteExportOptions {
+    Ok(ParsedCommand::Run(jottrace::TasteExportOptions {
         format,
         output_path,
     }))
@@ -741,16 +672,13 @@ fn print_taste_export_report(report: &jottrace::TasteExportReport) {
 }
 
 fn run_taste_extract_command(args: impl Iterator<Item = String>) -> ExitCode {
-    let options = match parse_taste_extract_command(args) {
-        Ok(TasteCommand::Help) => {
-            print_taste_extract_help();
-            return ExitCode::SUCCESS;
-        }
-        Ok(TasteCommand::Extract(cli_options)) => cli_options,
-        Err(message) => {
-            eprint_command_usage("taste extract", &message);
-            return ExitCode::from(2);
-        }
+    let options = match resolve_command(
+        "taste extract",
+        parse_taste_extract_command(args),
+        print_taste_extract_help,
+    ) {
+        Ok(options) => options,
+        Err(code) => return code,
     };
     jottrace::update::maybe_spawn_auto_update();
 
@@ -763,12 +691,12 @@ fn run_taste_extract_command(args: impl Iterator<Item = String>) -> ExitCode {
 
 fn parse_taste_extract_command(
     mut args: impl Iterator<Item = String>,
-) -> std::result::Result<TasteCommand, String> {
+) -> std::result::Result<ParsedCommand<TasteExtractCliOptions>, String> {
     let mut options = jottrace::TasteExtractOptions::default();
 
     while let Some(arg) = args.next() {
         match arg.as_str() {
-            "--help" | "-h" => return Ok(TasteCommand::Help),
+            "--help" | "-h" => return Ok(ParsedCommand::Help),
             "--force" => options.force = true,
             "--session" => {
                 options.source_session_id = Some(take_single_flag_value(
@@ -782,7 +710,7 @@ fn parse_taste_extract_command(
         }
     }
 
-    Ok(TasteCommand::Extract(TasteExtractCliOptions {
+    Ok(ParsedCommand::Run(TasteExtractCliOptions {
         extract_options: options,
     }))
 }
@@ -806,17 +734,11 @@ fn run_auto_update_background_command(mut args: impl Iterator<Item = String>) ->
 }
 
 fn run_compact_command(args: impl Iterator<Item = String>) -> ExitCode {
-    let cli_options = match parse_compact_command(args) {
-        Ok(CompactCommand::Run(cli_options)) => cli_options,
-        Ok(CompactCommand::Help) => {
-            print_compact_help();
-            return ExitCode::SUCCESS;
-        }
-        Err(message) => {
-            eprint_command_usage("compact", &message);
-            return ExitCode::from(2);
-        }
-    };
+    let cli_options =
+        match resolve_command("compact", parse_compact_command(args), print_compact_help) {
+            Ok(cli_options) => cli_options,
+            Err(code) => return code,
+        };
     jottrace::update::maybe_spawn_auto_update();
 
     finish_command(
@@ -836,6 +758,27 @@ fn eprint_command_usage(command: &str, message: &str) {
 
 fn eprint_command_failure(command: &str, error: impl Display) {
     eprintln!("jottrace {command} failed: {error}");
+}
+
+/// Resolve a parsed command into its run options, or an [`ExitCode`] the caller
+/// should return immediately: `Help` prints usage and exits 0, a parse error
+/// prints the usage hint and exits 2.
+fn resolve_command<T>(
+    command: &str,
+    parsed: std::result::Result<ParsedCommand<T>, String>,
+    print_help: fn(),
+) -> std::result::Result<T, ExitCode> {
+    match parsed {
+        Ok(ParsedCommand::Run(options)) => Ok(options),
+        Ok(ParsedCommand::Help) => {
+            print_help();
+            Err(ExitCode::SUCCESS)
+        }
+        Err(message) => {
+            eprint_command_usage(command, &message);
+            Err(ExitCode::from(2))
+        }
+    }
 }
 
 /// Print a command's report on success, or report the failure, mapping each to
@@ -1032,7 +975,7 @@ fn print_compact_report(report: &jottrace::CompactReport, details: bool) {
 
 fn parse_compact_command(
     mut args: impl Iterator<Item = String>,
-) -> std::result::Result<CompactCommand, String> {
+) -> std::result::Result<ParsedCommand<CompactCliOptions>, String> {
     let mut options = jottrace::CompactOptions::default();
     let mut details = false;
     let mut explicit_mode = false;
@@ -1040,7 +983,7 @@ fn parse_compact_command(
 
     while let Some(arg) = args.next() {
         match arg.as_str() {
-            "--help" | "-h" => return Ok(CompactCommand::Help),
+            "--help" | "-h" => return Ok(ParsedCommand::Help),
             "--details" => details = true,
             "--apply" => {
                 if explicit_mode {
@@ -1085,7 +1028,7 @@ fn parse_compact_command(
         }
     }
 
-    Ok(CompactCommand::Run(CompactCliOptions {
+    Ok(ParsedCommand::Run(CompactCliOptions {
         compact_options: options,
         details,
     }))
@@ -1100,16 +1043,13 @@ fn compact_mode_name(mode: jottrace::CompactMode) -> &'static str {
 }
 
 fn run_doctor_command(args: impl Iterator<Item = String>) -> ExitCode {
-    let options = match parse_detail_command("doctor", args) {
-        Ok(DetailCommand::Help) => {
-            print_doctor_help();
-            return ExitCode::SUCCESS;
-        }
-        Ok(DetailCommand::Run(options)) => options,
-        Err(message) => {
-            eprint_command_usage("doctor", &message);
-            return ExitCode::from(2);
-        }
+    let options = match resolve_command(
+        "doctor",
+        parse_detail_command("doctor", args),
+        print_doctor_help,
+    ) {
+        Ok(options) => options,
+        Err(code) => return code,
     };
     jottrace::update::maybe_spawn_auto_update();
 
@@ -1125,16 +1065,13 @@ fn run_doctor_command(args: impl Iterator<Item = String>) -> ExitCode {
 }
 
 fn run_status_command(args: impl Iterator<Item = String>) -> ExitCode {
-    let options = match parse_detail_command("status", args) {
-        Ok(DetailCommand::Help) => {
-            print_status_help();
-            return ExitCode::SUCCESS;
-        }
-        Ok(DetailCommand::Run(options)) => options,
-        Err(message) => {
-            eprint_command_usage("status", &message);
-            return ExitCode::from(2);
-        }
+    let options = match resolve_command(
+        "status",
+        parse_detail_command("status", args),
+        print_status_help,
+    ) {
+        Ok(options) => options,
+        Err(code) => return code,
     };
     jottrace::update::maybe_spawn_auto_update();
 
@@ -1143,18 +1080,8 @@ fn run_status_command(args: impl Iterator<Item = String>) -> ExitCode {
     })
 }
 
-enum PackCommand {
-    Run(PackCliOptions),
-    Help,
-}
-
 struct PackCliOptions {
     output: Option<PathBuf>,
-}
-
-enum SettleCommand {
-    Run(SettleCliOptions),
-    Help,
 }
 
 struct SettleCliOptions {
@@ -1164,11 +1091,11 @@ struct SettleCliOptions {
 
 fn parse_pack_command(
     mut args: impl Iterator<Item = String>,
-) -> std::result::Result<PackCommand, String> {
+) -> std::result::Result<ParsedCommand<PackCliOptions>, String> {
     let mut options = PackCliOptions { output: None };
     while let Some(arg) = args.next() {
         match arg.as_str() {
-            "--help" | "-h" => return Ok(PackCommand::Help),
+            "--help" | "-h" => return Ok(ParsedCommand::Help),
             "--output" | "-o" => {
                 let value = args
                     .next()
@@ -1178,17 +1105,17 @@ fn parse_pack_command(
             _ => return Err(format!("unknown pack option: {arg}")),
         }
     }
-    Ok(PackCommand::Run(options))
+    Ok(ParsedCommand::Run(options))
 }
 
 fn parse_settle_command(
     args: impl Iterator<Item = String>,
-) -> std::result::Result<SettleCommand, String> {
+) -> std::result::Result<ParsedCommand<SettleCliOptions>, String> {
     let mut archive: Option<PathBuf> = None;
     let mut force = false;
     for arg in args {
         match arg.as_str() {
-            "--help" | "-h" => return Ok(SettleCommand::Help),
+            "--help" | "-h" => return Ok(ParsedCommand::Help),
             "--force" => force = true,
             arg if arg.starts_with("--") => {
                 return Err(format!("unknown settle option: {arg}"));
@@ -1202,20 +1129,13 @@ fn parse_settle_command(
         }
     }
     let archive = archive.ok_or_else(|| String::from("missing archive path"))?;
-    Ok(SettleCommand::Run(SettleCliOptions { archive, force }))
+    Ok(ParsedCommand::Run(SettleCliOptions { archive, force }))
 }
 
 fn run_pack_command(args: impl Iterator<Item = String>) -> ExitCode {
-    let options = match parse_pack_command(args) {
-        Ok(PackCommand::Help) => {
-            print_pack_help();
-            return ExitCode::SUCCESS;
-        }
-        Ok(PackCommand::Run(options)) => options,
-        Err(message) => {
-            eprint_command_usage("pack", &message);
-            return ExitCode::from(2);
-        }
+    let options = match resolve_command("pack", parse_pack_command(args), print_pack_help) {
+        Ok(options) => options,
+        Err(code) => return code,
     };
     jottrace::update::maybe_spawn_auto_update();
 
@@ -1229,16 +1149,9 @@ fn run_pack_command(args: impl Iterator<Item = String>) -> ExitCode {
 }
 
 fn run_settle_command(args: impl Iterator<Item = String>) -> ExitCode {
-    let options = match parse_settle_command(args) {
-        Ok(SettleCommand::Help) => {
-            print_settle_help();
-            return ExitCode::SUCCESS;
-        }
-        Ok(SettleCommand::Run(options)) => options,
-        Err(message) => {
-            eprint_command_usage("settle", &message);
-            return ExitCode::from(2);
-        }
+    let options = match resolve_command("settle", parse_settle_command(args), print_settle_help) {
+        Ok(options) => options,
+        Err(code) => return code,
     };
 
     finish_command(
