@@ -6,7 +6,7 @@ use std::time::Duration;
 use crate::{JottraceError, Result, data_dir_from_env, ensure_private_file};
 
 pub const DB_FILE_NAME: &str = "db.sqlite";
-pub const LATEST_SCHEMA_VERSION: i64 = 9;
+pub const LATEST_SCHEMA_VERSION: i64 = 10;
 pub(crate) const RAW_CODEC: &str = "raw";
 pub(crate) const ZSTD_CODEC: &str = "zstd";
 /// Minimum source payload size considered for zstd. Keeping this named makes
@@ -49,6 +49,10 @@ const MIGRATIONS: &[Migration] = &[
     Migration {
         version: 9,
         sql: include_str!("migrations/009_session_prefix_fingerprint.sql"),
+    },
+    Migration {
+        version: 10,
+        sql: include_str!("migrations/010_taste_extraction.sql"),
     },
 ];
 const UNRESOLVED_INGEST_ERROR_COUNT_SQL: &str =
@@ -510,6 +514,7 @@ mod tests {
         assert_sql_object(&conn, "table", "sessions");
         assert_sql_object(&conn, "table", "events");
         assert_sql_object(&conn, "table", "ingest_errors");
+        assert_sql_object(&conn, "table", "file_timelines");
         assert_sql_object(&conn, "index", "idx_sessions_source_session_id");
         assert_sql_object(&conn, "index", "idx_sessions_source_started_at");
         assert_sql_object(&conn, "index", "idx_events_session_ts");
@@ -846,6 +851,32 @@ mod tests {
             LATEST_SCHEMA_VERSION
         );
         assert!(columns(&conn, "sessions").contains(&"source_metadata".to_string()));
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn migrates_v9_database_to_add_file_timelines_table() {
+        let root = temp_root("storage-upgrade-v9-file-timelines");
+        let db_path = root.join(DB_FILE_NAME);
+        ensure_private_file(&db_path).expect("create db file");
+
+        {
+            let conn = Connection::open(&db_path).expect("open v9 db");
+            apply_migrations_through(&conn, 9);
+            assert!(!sql_object_exists(&conn, "table", "file_timelines"));
+            conn.pragma_update(None, "user_version", 9)
+                .expect("set user_version");
+        }
+
+        let conn = open_database(&db_path).expect("migrate db");
+
+        assert_eq!(
+            user_version(&db_path, &conn).expect("user_version"),
+            LATEST_SCHEMA_VERSION
+        );
+        assert_sql_object(&conn, "table", "file_timelines");
+        assert_sql_object(&conn, "index", "idx_file_timelines_session_file");
 
         let _ = fs::remove_dir_all(root);
     }
