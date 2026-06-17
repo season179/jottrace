@@ -18,6 +18,7 @@ fn taste_fixture_corpus_has_required_session_shapes() {
         "\"content\":",
         "\"backupFileName\":\"fixture-a1b2c3d4@v1\"",
         "\"backupFileName\":\"fixture-writenew1@v1\"",
+        "\"backupFileName\":\"fixture-subagent1@v1\"",
         "\"name\":\"Edit\"",
         "\"name\":\"Write\"",
         "\"name\":\"Bash\"",
@@ -66,6 +67,19 @@ fn taste_fixture_corpus_has_write_sidecar_blob() {
     assert!(
         body.contains("written by Write tool fixture"),
         "write sidecar should contain Write fixture marker"
+    );
+}
+
+#[test]
+fn taste_fixture_corpus_has_subagent_sidecar_blob() {
+    let sidecar = taste_fixture(&format!(
+        "claude-cli/file-history/{TASTE_SESSION_ID}/fixture-subagent1@v1"
+    ));
+    assert!(sidecar.exists(), "missing sidecar fixture-subagent1@v1");
+    let body = fs::read_to_string(sidecar).expect("read subagent sidecar");
+    assert!(
+        body.contains("subagent_marker"),
+        "subagent sidecar should contain subagent edit marker"
     );
 }
 

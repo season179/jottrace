@@ -69,6 +69,10 @@ fn install_taste_claude_fixture(root: &Path) {
             &history_dir.join(format!("fixture-partial1@{version}")),
         );
     }
+    copy_fixture_file(
+        &format!("claude-cli/file-history/{TASTE_SESSION_ID}/fixture-subagent1@v1"),
+        &history_dir.join("fixture-subagent1@v1"),
+    );
 }
 
 fn run_ingest_with_home(home: &Path, data_dir: &Path) {
@@ -115,13 +119,13 @@ fn taste_status_reports_fixture_coverage_after_extract() {
     assert_eq!(
         report.outcomes,
         TasteOutcomeCounts {
-            accepted: 6,
-            rejected: 3,
+            accepted: 7,
+            rejected: 2,
             edited: 1,
         }
     );
-    assert_eq!(report.high_confidence_proposals, 6);
-    assert!((report.coverage_percent - (6.0 / 10.0 * 100.0)).abs() < 1e-9);
+    assert_eq!(report.high_confidence_proposals, 7);
+    assert!((report.coverage_percent - (7.0 / 10.0 * 100.0)).abs() < 1e-9);
 }
 
 #[test]
@@ -148,10 +152,10 @@ fn taste_status_cli_reports_fixture_counts() {
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(stdout.contains("sessions_processed: 1"));
     assert!(stdout.contains("proposals: 10"));
-    assert!(stdout.contains("accepted: 6"));
-    assert!(stdout.contains("rejected: 3"));
+    assert!(stdout.contains("accepted: 7"));
+    assert!(stdout.contains("rejected: 2"));
     assert!(stdout.contains("edited: 1"));
-    assert!(stdout.contains("high_confidence_coverage: 60.0%"));
+    assert!(stdout.contains("high_confidence_coverage: 70.0%"));
 }
 
 #[test]

@@ -147,8 +147,14 @@ fn compiler_labels_fixture_proposals_with_present_at_session_end_outcomes() {
 
     let sub = example_by_tool(&examples, "toolu_taste_sub_edit");
     assert_eq!(sub.file_path.as_deref(), Some("src/taste_subagent.rs"));
-    assert_eq!(sub.outcome, PreferenceOutcome::Rejected);
-    assert_eq!(sub.evidence_kind, EvidenceKind::MissingFinalState);
+    assert_eq!(sub.outcome, PreferenceOutcome::Accepted);
+    assert_eq!(sub.evidence_kind, EvidenceKind::DirectEdit);
+    assert_eq!(sub.confidence, 1.0);
+    assert!(
+        sub.proposal_content
+            .as_deref()
+            .is_some_and(|content| content.contains("subagent_marker"))
+    );
 
     let notebook = example_by_tool(&examples, "toolu_taste_notebook_edit");
     assert_eq!(

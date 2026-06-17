@@ -135,6 +135,30 @@ fn timeline_materializer_builds_per_file_snapshot_sequence_from_fixture() {
             .as_deref()
             .is_some_and(|content| content.contains("written by Write tool fixture"))
     );
+
+    let subagent_rows: Vec<_> = rows
+        .iter()
+        .filter(|row| row.file_path == "src/taste_subagent.rs")
+        .collect();
+    assert_eq!(
+        subagent_rows.len(),
+        1,
+        "expected one taste_subagent snapshot"
+    );
+    assert_eq!(
+        subagent_rows[0].source_kind,
+        TimelineSourceKind::SidecarSnapshot
+    );
+    assert_eq!(
+        subagent_rows[0].trigger_event_ref.as_deref(),
+        Some("toolu_taste_sub_edit")
+    );
+    assert!(
+        subagent_rows[0]
+            .content
+            .as_deref()
+            .is_some_and(|content| content.contains("subagent_marker"))
+    );
 }
 
 #[test]
