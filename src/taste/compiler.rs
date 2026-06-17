@@ -4,7 +4,7 @@ use std::path::Path;
 use rusqlite::{Connection, params};
 
 use crate::JottraceError;
-use crate::storage::sqlite_error;
+use crate::storage::execute_sql;
 
 use super::parse::{ContentRef, ParseKind, ParsedEvent};
 use super::timeline::{FileTimelineRow, normalize_file_path};
@@ -191,15 +191,18 @@ pub fn replace_session_preference_examples(
     source_session_id: &str,
     examples: &[PreferenceExample],
 ) -> Result<usize, JottraceError> {
-    conn.execute(
+    execute_sql(
+        db_path,
+        conn,
         "DELETE FROM preference_examples WHERE source = ?1 AND source_session_id = ?2",
         params![source, source_session_id],
-    )
-    .map_err(|source| sqlite_error(db_path, source))?;
+    )?;
 
     let mut inserted = 0usize;
     for example in examples {
-        conn.execute(
+        execute_sql(
+            db_path,
+            conn,
             "INSERT INTO preference_examples (
                 source,
                 source_session_id,
@@ -230,8 +233,7 @@ pub fn replace_session_preference_examples(
                 example.evidence_kind.as_str(),
                 example.extractor_version,
             ],
-        )
-        .map_err(|source| sqlite_error(db_path, source))?;
+        )?;
         inserted += 1;
     }
 

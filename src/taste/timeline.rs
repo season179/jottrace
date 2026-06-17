@@ -4,7 +4,7 @@ use std::path::Path;
 use rusqlite::{Connection, params};
 
 use crate::JottraceError;
-use crate::storage::sqlite_error;
+use crate::storage::execute_sql;
 
 use super::parse::{ParseKind, ParsedEvent};
 use super::sidecar::{ResolvedContent, SnapshotSidecarResolver};
@@ -140,15 +140,18 @@ pub fn replace_session_file_timelines(
     source_session_id: &str,
     rows: &[FileTimelineRow],
 ) -> Result<usize, JottraceError> {
-    conn.execute(
+    execute_sql(
+        db_path,
+        conn,
         "DELETE FROM file_timelines WHERE source = ?1 AND source_session_id = ?2",
         params![source, source_session_id],
-    )
-    .map_err(|source| sqlite_error(db_path, source))?;
+    )?;
 
     let mut inserted = 0usize;
     for row in rows {
-        conn.execute(
+        execute_sql(
+            db_path,
+            conn,
             "INSERT INTO file_timelines (
                 source,
                 source_session_id,
@@ -169,8 +172,7 @@ pub fn replace_session_file_timelines(
                 row.trigger_event_ref,
                 row.source_kind.as_str(),
             ],
-        )
-        .map_err(|source| sqlite_error(db_path, source))?;
+        )?;
         inserted += 1;
     }
 
