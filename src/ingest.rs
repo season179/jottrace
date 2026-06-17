@@ -122,6 +122,29 @@ struct StoredSession {
     prefix_fingerprint: Option<String>,
 }
 
+impl StoredSession {
+    /// Build a session from a `sessions` row whose columns are, in order: id,
+    /// source_session_id, file_path, parent_session_id, current_generation,
+    /// file_size, file_mtime, content_fingerprint, source_metadata,
+    /// next_read_offset, event_count, prefix_fingerprint.
+    fn from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Self> {
+        Ok(StoredSession {
+            id: row.get(0)?,
+            source_session_id: row.get(1)?,
+            file_path: row.get(2)?,
+            parent_session_id: row.get(3)?,
+            current_generation: row.get(4)?,
+            file_size: row.get(5)?,
+            file_mtime: row.get(6)?,
+            content_fingerprint: row.get(7)?,
+            source_metadata: row.get(8)?,
+            next_read_offset: row.get(9)?,
+            event_count: row.get(10)?,
+            prefix_fingerprint: row.get(11)?,
+        })
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ImportMode {
     Append,
@@ -1950,22 +1973,7 @@ fn load_session_by_source_session_id(
          FROM sessions
          WHERE source = ?1 AND source_session_id = ?2",
         params![source, source_session_id],
-        |row| {
-            Ok(StoredSession {
-                id: row.get(0)?,
-                source_session_id: row.get(1)?,
-                file_path: row.get(2)?,
-                parent_session_id: row.get(3)?,
-                current_generation: row.get(4)?,
-                file_size: row.get(5)?,
-                file_mtime: row.get(6)?,
-                content_fingerprint: row.get(7)?,
-                source_metadata: row.get(8)?,
-                next_read_offset: row.get(9)?,
-                event_count: row.get(10)?,
-                prefix_fingerprint: row.get(11)?,
-            })
-        },
+        StoredSession::from_row,
     )
 }
 
@@ -1984,22 +1992,7 @@ fn load_session_by_source_file_path(
             source_file.source,
             source_file.path.to_string_lossy().as_ref(),
         ],
-        |row| {
-            Ok(StoredSession {
-                id: row.get(0)?,
-                source_session_id: row.get(1)?,
-                file_path: row.get(2)?,
-                parent_session_id: row.get(3)?,
-                current_generation: row.get(4)?,
-                file_size: row.get(5)?,
-                file_mtime: row.get(6)?,
-                content_fingerprint: row.get(7)?,
-                source_metadata: row.get(8)?,
-                next_read_offset: row.get(9)?,
-                event_count: row.get(10)?,
-                prefix_fingerprint: row.get(11)?,
-            })
-        },
+        StoredSession::from_row,
     )
 }
 
