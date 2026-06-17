@@ -10,7 +10,7 @@ use crate::storage::{
     decode_event_payload_prefix, map_sqlite_error, open_readonly_database, query_collect,
     query_one, query_optional, row_value, sqlite_error, unresolved_ingest_errors_from_connection,
 };
-use crate::{JottraceError, Result, io_error, unsupported_schema_version};
+use crate::{JottraceError, Result, io_error, map_io_error, unsupported_schema_version};
 
 const SESSION_PAGE_SIZE: usize = 50;
 const EVENT_PAGE_SIZE: usize = 25;
@@ -120,8 +120,8 @@ pub struct WebServer {
 impl WebServer {
     pub fn bind(db_path: PathBuf, port: u16) -> Result<Self> {
         drop(open_web_database(&db_path)?);
-        let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, port))
-            .map_err(|source| io_error(&db_path, source))?;
+        let listener =
+            TcpListener::bind((Ipv4Addr::LOCALHOST, port)).map_err(map_io_error(&db_path))?;
         Ok(Self { db_path, listener })
     }
 
@@ -154,7 +154,7 @@ impl WebServer {
         self.listener
             .accept()
             .map(|(stream, _)| stream)
-            .map_err(|source| io_error(&self.db_path, source))
+            .map_err(map_io_error(&self.db_path))
     }
 
     fn handle_stream(&self, stream: &mut TcpStream) -> Result<()> {

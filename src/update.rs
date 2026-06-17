@@ -131,6 +131,13 @@ fn io_error(path: &Path, source: io::Error) -> UpdateError {
     }
 }
 
+/// Build a `map_err` adapter that routes an `io::Error` through [`io_error`] for
+/// `path`, so the per-operation `|source| io_error(path, source)` closure is
+/// written once. The `UpdateError` sibling of `crate::map_io_error`.
+fn map_io_error(path: &Path) -> impl Fn(io::Error) -> UpdateError {
+    move |source| io_error(path, source)
+}
+
 pub fn is_auto_update_command(command: &str) -> bool {
     command == AUTO_UPDATE_COMMAND
 }
@@ -194,7 +201,7 @@ fn install_path() -> Result<PathBuf> {
         return Ok(PathBuf::from(path));
     }
 
-    env::current_exe().map_err(|source| io_error(Path::new("current executable"), source))
+    env::current_exe().map_err(map_io_error(Path::new("current executable")))
 }
 
 fn release_url(target: &str, version: &str) -> String {
@@ -264,7 +271,7 @@ fn binary_version(path: &Path) -> Result<String> {
     let output = Command::new(path)
         .arg("--version")
         .output()
-        .map_err(|source| io_error(path, source))?;
+        .map_err(map_io_error(path))?;
 
     if !output.status.success() {
         return Err(UpdateError::InvalidArtifact(format!(
@@ -525,7 +532,7 @@ fn replace_installed_binary(candidate: &Path, install_path: &Path) -> Result<()>
         unique_suffix()
     ));
 
-    fs::copy(candidate, &staged).map_err(|source| io_error(&staged, source))?;
+    fs::copy(candidate, &staged).map_err(map_io_error(&staged))?;
 
     #[cfg(unix)]
     fs::set_permissions(&staged, fs::Permissions::from_mode(0o755)).map_err(|source| {
@@ -550,7 +557,7 @@ impl TempDir {
             std::process::id(),
             unique_suffix()
         ));
-        fs::create_dir(&path).map_err(|source| io_error(&path, source))?;
+        fs::create_dir(&path).map_err(map_io_error(&path))?;
         Ok(Self { path })
     }
 }

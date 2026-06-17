@@ -12,7 +12,7 @@ use crate::storage::{
     DB_FILE_NAME, encode_event_payload, execute_sql, map_sqlite_error, open_database,
     open_readonly_database, query_one, query_optional, status_from_connection,
 };
-use crate::{JottraceError, Result, io_error};
+use crate::{JottraceError, Result, io_error, map_io_error};
 
 const CLAUDE_SOURCE: &str = "claude_cli";
 const CLAUDE_LOCAL_AGENT_SOURCE: &str = "claude_local_agent";
@@ -793,11 +793,9 @@ fn for_each_dir_entry(
     };
 
     for entry in entries {
-        let entry = entry.map_err(|source| io_error(root, source))?;
+        let entry = entry.map_err(map_io_error(root))?;
         let path = entry.path();
-        let file_type = entry
-            .file_type()
-            .map_err(|source| io_error(&path, source))?;
+        let file_type = entry.file_type().map_err(map_io_error(&path))?;
         handle(path, file_type)?;
     }
 
@@ -881,8 +879,7 @@ fn ingest_source_file(
     ingest_state: &mut IngestState,
     source_file: &SourceFile,
 ) -> Result<u64> {
-    let metadata =
-        fs::metadata(&source_file.path).map_err(|source| io_error(&source_file.path, source))?;
+    let metadata = fs::metadata(&source_file.path).map_err(map_io_error(&source_file.path))?;
     if !metadata.is_file() {
         return Err(JottraceError::NotFile(source_file.path.clone()));
     }
@@ -2624,12 +2621,12 @@ fn generation_event_count(
 }
 
 fn read_bounded(path: &Path, pass_size: u64) -> Result<Vec<u8>> {
-    let file = File::open(path).map_err(|source| io_error(path, source))?;
+    let file = File::open(path).map_err(map_io_error(path))?;
     let mut reader = file.take(pass_size);
     let mut buffer = Vec::with_capacity(pass_size.min(1024 * 1024) as usize);
     reader
         .read_to_end(&mut buffer)
-        .map_err(|source| io_error(path, source))?;
+        .map_err(map_io_error(path))?;
     Ok(buffer)
 }
 
@@ -2940,12 +2937,12 @@ fn first_committed_line(
     byte_limit: u64,
     missing_line_message: &str,
 ) -> Result<Option<Vec<u8>>> {
-    let file = File::open(path).map_err(|source| io_error(path, source))?;
+    let file = File::open(path).map_err(map_io_error(path))?;
     let mut reader = BufReader::new(file).take(byte_limit);
     let mut first_line = Vec::new();
     let read = reader
         .read_until(b'\n', &mut first_line)
-        .map_err(|source| io_error(path, source))?;
+        .map_err(map_io_error(path))?;
     if read == 0 || !first_line.ends_with(b"\n") {
         if read as u64 == byte_limit {
             return Ok(None);

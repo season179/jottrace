@@ -486,7 +486,7 @@ fn acquire_data_lock_file(path: &Path, token: &str) -> Result<File> {
         .write(true)
         .create(true)
         .open(path)
-        .map_err(|source| io_error(path, source))?;
+        .map_err(map_io_error(path))?;
 
     acquire_os_file_lock(&file, path)?;
     write_data_lock_metadata(&mut file, path, token)?;
@@ -589,7 +589,7 @@ pub fn create_private_file(path: &Path) -> Result<File> {
         .write(true)
         .create_new(true)
         .open(path)
-        .map_err(|source| io_error(path, source))?;
+        .map_err(map_io_error(path))?;
 
     #[cfg(unix)]
     // The open mode is the first line of defense, but chmod after creation
@@ -628,9 +628,7 @@ fn create_private_dir(path: &Path) -> Result<()> {
     let mut builder = fs::DirBuilder::new();
     builder.recursive(true);
     builder.mode(PRIVATE_DIR_MODE);
-    builder
-        .create(path)
-        .map_err(|source| io_error(path, source))?;
+    builder.create(path).map_err(map_io_error(path))?;
     // DirBuilder's mode is affected by the process umask, so enforce the final
     // permission after the directory exists.
     set_mode(path, PRIVATE_DIR_MODE)
@@ -638,7 +636,7 @@ fn create_private_dir(path: &Path) -> Result<()> {
 
 #[cfg(not(unix))]
 fn create_private_dir(path: &Path) -> Result<()> {
-    fs::create_dir_all(path).map_err(|source| io_error(path, source))
+    fs::create_dir_all(path).map_err(map_io_error(path))
 }
 
 #[cfg(unix)]
@@ -682,17 +680,17 @@ fn ensure_file_mode(_path: &Path) -> Result<()> {
 #[cfg(unix)]
 fn set_mode(path: &Path, expected: u32) -> Result<()> {
     let mut permissions = fs::metadata(path)
-        .map_err(|source| io_error(path, source))?
+        .map_err(map_io_error(path))?
         .permissions();
     permissions.set_mode(expected);
-    fs::set_permissions(path, permissions).map_err(|source| io_error(path, source))
+    fs::set_permissions(path, permissions).map_err(map_io_error(path))
 }
 
 #[cfg(unix)]
 fn mode(path: &Path) -> Result<u32> {
     // Mask out file-type bits so callers compare only the familiar chmod mode.
     Ok(fs::metadata(path)
-        .map_err(|source| io_error(path, source))?
+        .map_err(map_io_error(path))?
         .permissions()
         .mode()
         & 0o777)
@@ -716,6 +714,13 @@ pub(crate) fn io_error(path: &Path, source: io::Error) -> JottraceError {
         path: path.to_path_buf(),
         source,
     }
+}
+
+/// Build a `map_err` adapter that routes an `io::Error` through [`io_error`] for
+/// `path`, so the per-operation `|source| io_error(path, source)` closure is
+/// written once. Mirrors `storage::map_sqlite_error` for filesystem operations.
+pub(crate) fn map_io_error(path: &Path) -> impl Fn(io::Error) -> JottraceError {
+    move |source| io_error(path, source)
 }
 
 /// Build a `JottraceError::UnsupportedSchemaVersion` for a database at `path`

@@ -4,7 +4,7 @@ use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 
 use crate::storage::query_collect;
-use crate::{JottraceError, io_error};
+use crate::{JottraceError, map_io_error};
 use crate::{Result, data_dir_from_env, open_locked_database, private_open_options};
 
 use super::compiler::{PreferenceExample, PreferenceOutcome};
@@ -123,13 +123,13 @@ fn write_jsonl_export(examples: &[PreferenceExample], output_path: Option<&Path>
             if let Some(parent) = path.parent()
                 && !parent.as_os_str().is_empty()
             {
-                std::fs::create_dir_all(parent).map_err(|source| io_error(parent, source))?;
+                std::fs::create_dir_all(parent).map_err(map_io_error(parent))?;
             }
             let mut file = private_open_options()
                 .write(true)
                 .create_new(true)
                 .open(path)
-                .map_err(|source| io_error(path, source))?;
+                .map_err(map_io_error(path))?;
             file.write_all(&buffer)
                 .map_err(|source| JottraceError::Output { source })?;
         }

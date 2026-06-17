@@ -22,7 +22,8 @@ use rusqlite::Connection;
 use crate::update::{AUTO_UPDATE_LOCK_FILE, AUTO_UPDATE_STAMP_FILE};
 use crate::{
     JottraceError, LOCK_FILE_NAME, PRIVATE_DIR_MODE, PRIVATE_FILE_MODE, Result, acquire_data_lock,
-    data_dir_from_env, ensure_private_dir, io_error, storage, unsupported_schema_version,
+    data_dir_from_env, ensure_private_dir, io_error, map_io_error, storage,
+    unsupported_schema_version,
 };
 
 #[cfg(unix)]
@@ -176,7 +177,7 @@ pub fn run_pack(options: PackOptions) -> Result<PackReport> {
     run_tar(&mut command)?;
 
     let archive_bytes = fs::metadata(&archive)
-        .map_err(|source| io_error(&archive, source))?
+        .map_err(map_io_error(&archive))?
         .len();
 
     claim.commit();
@@ -238,7 +239,7 @@ pub fn run_settle(options: SettleOptions) -> Result<SettleReport> {
     {
         return Err(io_error(&staging, source));
     }
-    fs::create_dir(&staging).map_err(|source| io_error(&staging, source))?;
+    fs::create_dir(&staging).map_err(map_io_error(&staging))?;
     chmod(&staging, PRIVATE_DIR_MODE)?;
     let mut staging_guard = StagingGuard::new(&staging);
 
@@ -282,7 +283,7 @@ pub fn run_settle(options: SettleOptions) -> Result<SettleReport> {
     // within a single filesystem (guaranteed since staging is a child of the
     // journal), and the files keep the 0600 mode set during validation.
     move_staged_into_place(&staging, &data_dir)?;
-    fs::remove_dir(&staging).map_err(|source| io_error(&staging, source))?;
+    fs::remove_dir(&staging).map_err(map_io_error(&staging))?;
     staging_guard.commit();
 
     let db_path = data_dir.join(storage::DB_FILE_NAME);
@@ -316,7 +317,7 @@ fn directory_has_journal_content(path: &Path) -> Result<bool> {
         }
     };
     for entry in entries {
-        let entry = entry.map_err(|source| io_error(path, source))?;
+        let entry = entry.map_err(map_io_error(path))?;
         // Skip runtime artefacts (lock + auto-update sentinels). A directory
         // that only holds these is, from a user's perspective, an empty
         // journal — for example, on installer-managed binaries
@@ -336,9 +337,9 @@ fn directory_has_journal_content(path: &Path) -> Result<bool> {
 }
 
 fn clear_journal_contents(path: &Path) -> Result<()> {
-    let entries = fs::read_dir(path).map_err(|source| io_error(path, source))?;
+    let entries = fs::read_dir(path).map_err(map_io_error(path))?;
     for entry in entries {
-        let entry = entry.map_err(|source| io_error(path, source))?;
+        let entry = entry.map_err(map_io_error(path))?;
         let name = entry.file_name();
         // Preserve the lock file (settle is holding it; removing it would
         // orphan the OS flock) and the staging dir (it holds the validated
@@ -347,9 +348,7 @@ fn clear_journal_contents(path: &Path) -> Result<()> {
             continue;
         }
         let child = entry.path();
-        let file_type = entry
-            .file_type()
-            .map_err(|source| io_error(&child, source))?;
+        let file_type = entry.file_type().map_err(map_io_error(&child))?;
         // remove_dir_all and remove_file both refuse to traverse symlinks, so
         // a stray link in the existing journal can only ever delete itself —
         // never the target it points at.
@@ -358,24 +357,22 @@ fn clear_journal_contents(path: &Path) -> Result<()> {
         } else {
             fs::remove_file(&child)
         };
-        result.map_err(|source| io_error(&child, source))?;
+        result.map_err(map_io_error(&child))?;
     }
     Ok(())
 }
 
 fn enforce_private_permissions(root: &Path) -> Result<()> {
     chmod(root, PRIVATE_DIR_MODE)?;
-    let entries = fs::read_dir(root).map_err(|source| io_error(root, source))?;
+    let entries = fs::read_dir(root).map_err(map_io_error(root))?;
     for entry in entries {
-        let entry = entry.map_err(|source| io_error(root, source))?;
+        let entry = entry.map_err(map_io_error(root))?;
         let path = entry.path();
         // Use `file_type` (which does NOT follow symlinks) instead of
         // `metadata`. A crafted archive could otherwise place a symlink
         // pointing outside `JOTTRACE_HOME`; chmod follows symlinks, so the
         // permission change would land on the target file.
-        let file_type = entry
-            .file_type()
-            .map_err(|source| io_error(&path, source))?;
+        let file_type = entry.file_type().map_err(map_io_error(&path))?;
         if file_type.is_symlink() {
             return Err(unsafe_archive_entry(path, "symbolic link"));
         }
@@ -393,7 +390,7 @@ fn enforce_private_permissions(root: &Path) -> Result<()> {
 #[cfg(unix)]
 fn chmod(path: &Path, mode: u32) -> Result<()> {
     let permissions = fs::Permissions::from_mode(mode);
-    fs::set_permissions(path, permissions).map_err(|source| io_error(path, source))
+    fs::set_permissions(path, permissions).map_err(map_io_error(path))
 }
 
 #[cfg(not(unix))]
@@ -786,12 +783,12 @@ impl Drop for StagingGuard {
 /// for ensuring `dest` already has space for the renamed entries (typically by
 /// running `clear_journal_contents` first).
 fn move_staged_into_place(staging: &Path, dest: &Path) -> Result<()> {
-    let entries = fs::read_dir(staging).map_err(|source| io_error(staging, source))?;
+    let entries = fs::read_dir(staging).map_err(map_io_error(staging))?;
     for entry in entries {
-        let entry = entry.map_err(|source| io_error(staging, source))?;
+        let entry = entry.map_err(map_io_error(staging))?;
         let from = entry.path();
         let to = dest.join(entry.file_name());
-        fs::rename(&from, &to).map_err(|source| io_error(&from, source))?;
+        fs::rename(&from, &to).map_err(map_io_error(&from))?;
     }
     Ok(())
 }
@@ -824,7 +821,7 @@ fn pack_output_inside_journal(output: &Path, data_dir: &Path) -> Result<bool> {
             // proper I/O error with the right path.
             None => return Ok(false),
         },
-        None => fs::canonicalize(".").map_err(|source| io_error(Path::new("."), source))?,
+        None => fs::canonicalize(".").map_err(map_io_error(Path::new(".")))?,
     };
     let file_name = match output.file_name() {
         Some(name) => name,
@@ -839,8 +836,7 @@ fn pack_output_inside_journal(output: &Path, data_dir: &Path) -> Result<bool> {
 /// check. If `data_dir` does not exist yet the check is a no-op: there is
 /// nothing to be inside.
 fn archive_is_inside(archive: &Path, data_dir: &Path) -> Result<bool> {
-    let canonical_archive =
-        fs::canonicalize(archive).map_err(|source| io_error(archive, source))?;
+    let canonical_archive = fs::canonicalize(archive).map_err(map_io_error(archive))?;
     let Some(canonical_data) = canonicalize_optional(data_dir)? else {
         return Ok(false);
     };
