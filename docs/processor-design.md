@@ -66,6 +66,22 @@ cross-process boundary.
 `scheduler` and `recall` remain open seams. The processor must be
 runnable on demand from the CLI without either of them.
 
+### Relationship to taste extraction
+
+Taste extraction (`jottrace taste`, see `docs/design.md` and
+`notes/taste-extraction-plan.md`) is a **separate deterministic stage**
+that already ships. It shares the Claude event parse layer (`src/taste/parse.rs`)
+with the future processor input builder, but the outputs are distinct:
+
+- **Processor** — semantic, narrative, journal-facing extractions
+  (`decision`, `lesson`, `dead_end`, `friction`, …) produced by an LLM.
+- **Taste** — pairwise, trainer-facing preference labels
+  (`accepted`/`rejected`/`edited`) compiled from file timelines and tool
+  proposals without model calls.
+
+The processor input builder should call the same parse module rather than
+re-implementing Claude event decoding.
+
 ## Processor input builder
 
 The input builder is a deterministic function over preserved data:

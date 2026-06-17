@@ -4,7 +4,8 @@
 Two passes: (1) open critique of an emerging plan, (2) validation of the
 locked synthesis. See the end of this file for the documented corrections.*
 
-Status: **DRAFT — awaiting human approval to begin implementation.**
+Status: **IMPLEMENTED** (2026-06-17). Async Task transcripts (R3) remain
+deferred per the section below.
 Created: 2026-06-17. Repo: `github.com/season179/jottrace`.
 
 ## What we are building
