@@ -283,6 +283,49 @@ fn taste_extract_skips_session_with_taste_extractions_row_and_no_preference_exam
 }
 
 #[test]
+fn taste_extract_force_reprocesses_up_to_date_session() {
+    let root = common::temp_root("taste-extract-force");
+    let data_dir = root.join(".jottrace");
+    install_taste_claude_fixture(&root);
+    run_ingest_with_home(&root, &data_dir);
+
+    let first = run_extract(
+        &root,
+        &data_dir,
+        TasteExtractOptions {
+            source_session_id: Some(TASTE_SESSION_ID.to_string()),
+            ..TasteExtractOptions::default()
+        },
+    );
+    assert!(first.contains("sessions_processed=1"));
+
+    let skipped = run_extract(
+        &root,
+        &data_dir,
+        TasteExtractOptions {
+            source_session_id: Some(TASTE_SESSION_ID.to_string()),
+            ..TasteExtractOptions::default()
+        },
+    );
+    assert!(skipped.contains("sessions_skipped=1"));
+
+    let forced = run_extract(
+        &root,
+        &data_dir,
+        TasteExtractOptions {
+            source_session_id: Some(TASTE_SESSION_ID.to_string()),
+            force: true,
+            ..TasteExtractOptions::default()
+        },
+    );
+    assert!(
+        forced.contains("sessions_processed=1"),
+        "expected --force to reprocess up-to-date session, got: {forced}"
+    );
+    assert!(forced.contains("sessions_skipped=0"));
+}
+
+#[test]
 fn taste_extract_cli_reports_counts_for_fixture_session() {
     let root = common::temp_root("taste-extract-cli");
     let data_dir = root.join(".jottrace");
@@ -305,4 +348,55 @@ fn taste_extract_cli_reports_counts_for_fixture_session() {
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(stdout.contains("sessions_processed: 1"));
     assert!(stdout.contains("preference_examples: 13"));
+}
+
+#[test]
+fn taste_extract_cli_force_reprocesses_up_to_date_session() {
+    let root = common::temp_root("taste-extract-cli-force");
+    let data_dir = root.join(".jottrace");
+    install_taste_claude_fixture(&root);
+    run_ingest_with_home(&root, &data_dir);
+
+    let first = Command::new(binary())
+        .args(["taste", "extract", "--session", TASTE_SESSION_ID])
+        .env("HOME", root.as_ref())
+        .env("JOTTRACE_HOME", &data_dir)
+        .output()
+        .expect("run jottrace taste extract");
+    assert!(first.status.success());
+
+    let skipped = Command::new(binary())
+        .args(["taste", "extract", "--session", TASTE_SESSION_ID])
+        .env("HOME", root.as_ref())
+        .env("JOTTRACE_HOME", &data_dir)
+        .output()
+        .expect("run jottrace taste extract again");
+    assert!(skipped.status.success());
+    let skipped_stdout = String::from_utf8_lossy(&skipped.stdout);
+    assert!(skipped_stdout.contains("sessions_skipped: 1"));
+
+    let forced = Command::new(binary())
+        .args([
+            "taste",
+            "extract",
+            "--session",
+            TASTE_SESSION_ID,
+            "--force",
+        ])
+        .env("HOME", root.as_ref())
+        .env("JOTTRACE_HOME", &data_dir)
+        .output()
+        .expect("run jottrace taste extract --force");
+    assert!(
+        forced.status.success(),
+        "stdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&forced.stdout),
+        String::from_utf8_lossy(&forced.stderr)
+    );
+    let forced_stdout = String::from_utf8_lossy(&forced.stdout);
+    assert!(
+        forced_stdout.contains("sessions_processed: 1"),
+        "expected --force to reprocess, got:\n{forced_stdout}"
+    );
+    assert!(forced_stdout.contains("sessions_skipped: 0"));
 }

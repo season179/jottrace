@@ -1304,6 +1304,7 @@ fn print_help() {
     println!("  jottrace taste status [--details]");
     println!("  jottrace taste show timeline --session <id> --file <path>");
     println!("  jottrace taste show example [--session <id>] <tool_use_id>");
+    println!("  jottrace taste export --format jsonl [--out <path>]");
     println!("  jottrace update");
     println!("  jottrace upgrade");
     println!("  jottrace web [--port <port>] [--once]");
