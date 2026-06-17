@@ -1,4 +1,5 @@
 pub mod compiler;
+pub mod export;
 pub mod extract;
 pub mod parse;
 pub mod show;
@@ -9,6 +10,10 @@ pub mod timeline;
 pub use compiler::{
     EXTRACTOR_VERSION, EvidenceKind, HIGH_CONFIDENCE_THRESHOLD, PreferenceCompiler,
     PreferenceExample, PreferenceOutcome, replace_session_preference_examples,
+};
+pub use export::{
+    TasteExportFormat, TasteExportOptions, TasteExportReport, run_taste_export,
+    taste_export_for_data_dir,
 };
 pub use extract::{TasteExtractOptions, TasteExtractReport, run_taste_extract};
 pub use parse::{

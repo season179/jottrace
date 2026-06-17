@@ -391,6 +391,7 @@ fn run_taste_command(mut args: impl Iterator<Item = String>) -> ExitCode {
         Some("extract") => run_taste_extract_command(args),
         Some("status") => run_taste_status_command(args),
         Some("show") => run_taste_show_command(args),
+        Some("export") => run_taste_export_command(args),
         Some(subcommand) => {
             eprintln!("unknown taste subcommand: {subcommand}");
             eprintln!("run `jottrace taste --help` for usage");
@@ -657,6 +658,92 @@ fn print_taste_status_report(report: &jottrace::TasteStatusReport, details: bool
     if !details {
         println!("extractor_version: {}", report.extractor_version);
     }
+}
+
+enum TasteExportCommand {
+    Run(jottrace::TasteExportOptions),
+    Help,
+}
+
+fn run_taste_export_command(args: impl Iterator<Item = String>) -> ExitCode {
+    let options = match parse_taste_export_command(args) {
+        Ok(TasteExportCommand::Help) => {
+            print_taste_export_help();
+            return ExitCode::SUCCESS;
+        }
+        Ok(TasteExportCommand::Run(options)) => options,
+        Err(message) => {
+            eprint_command_usage("taste export", &message);
+            return ExitCode::from(2);
+        }
+    };
+    jottrace::update::maybe_spawn_auto_update();
+
+    match jottrace::run_taste_export(options) {
+        Ok(report) => {
+            print_taste_export_report(&report);
+            ExitCode::SUCCESS
+        }
+        Err(error) => {
+            eprint_command_failure("taste export", error);
+            ExitCode::FAILURE
+        }
+    }
+}
+
+fn parse_taste_export_command(
+    mut args: impl Iterator<Item = String>,
+) -> std::result::Result<TasteExportCommand, String> {
+    let mut format = None;
+    let mut output_path = None;
+
+    while let Some(arg) = args.next() {
+        match arg.as_str() {
+            "--help" | "-h" => return Ok(TasteExportCommand::Help),
+            "--format" => {
+                let value = args
+                    .next()
+                    .ok_or_else(|| "--format requires a value".to_string())?;
+                if format.is_some() {
+                    return Err("taste export accepts only one --format value".to_string());
+                }
+                format = Some(
+                    jottrace::TasteExportFormat::from_cli(&value)
+                        .ok_or_else(|| format!("unsupported export format: {value}"))?,
+                );
+            }
+            "--out" => {
+                let value = args
+                    .next()
+                    .ok_or_else(|| "--out requires a value".to_string())?;
+                if output_path.is_some() {
+                    return Err("taste export accepts only one --out value".to_string());
+                }
+                output_path = Some(PathBuf::from(value));
+            }
+            value if value.starts_with('-') => {
+                return Err(format!("unknown taste export option: {value}"));
+            }
+            value => return Err(format!("unexpected taste export argument: {value}")),
+        }
+    }
+
+    let format = format.ok_or_else(|| "taste export requires --format <format>".to_string())?;
+
+    Ok(TasteExportCommand::Run(jottrace::TasteExportOptions {
+        format,
+        output_path,
+    }))
+}
+
+fn print_taste_export_report(report: &jottrace::TasteExportReport) {
+    eprintln!("jottrace taste export");
+    eprintln!("format: {}", report.format.as_str());
+    match &report.output_path {
+        Some(path) => eprintln!("out: {}", path.display()),
+        None => eprintln!("out: <stdout>"),
+    }
+    eprintln!("rows_exported: {}", report.rows_exported);
 }
 
 fn run_taste_extract_command(args: impl Iterator<Item = String>) -> ExitCode {
@@ -1311,11 +1398,13 @@ fn print_taste_help() {
     println!("  jottrace taste status [--details]");
     println!("  jottrace taste show timeline --session <id> --file <path>");
     println!("  jottrace taste show example [--session <id>] <tool_use_id>");
+    println!("  jottrace taste export --format jsonl [--out <path>]");
     println!();
     println!("Run `jottrace taste extract --help` for extraction options.");
     println!("Run `jottrace taste status --help` for status options.");
     println!("Run `jottrace taste show timeline --help` for timeline inspection options.");
     println!("Run `jottrace taste show example --help` for example inspection options.");
+    println!("Run `jottrace taste export --help` for export options.");
 }
 
 fn print_taste_show_help() {
@@ -1375,12 +1464,25 @@ fn print_taste_extract_help() {
     println!("  jottrace taste status [--details]");
     println!("  jottrace taste show timeline --session <id> --file <path>");
     println!("  jottrace taste show example [--session <id>] <tool_use_id>");
+    println!("  jottrace taste export --format jsonl [--out <path>]");
     println!();
     println!("Options:");
     println!("  --session <id>  Extract only the given Claude parent source_session_id");
     println!(
         "  --force         Re-extract even when rows already use the current extractor version"
     );
+}
+
+fn print_taste_export_help() {
+    println!("jottrace taste export");
+    println!("Emit labeled preference examples as JSONL for external trainer consumption.");
+    println!();
+    println!("Usage:");
+    println!("  jottrace taste export --format jsonl [--out <path>]");
+    println!();
+    println!("Options:");
+    println!("  --format <format>  Export format (only jsonl is supported today)");
+    println!("  --out <path>       Write JSONL to this path instead of stdout");
 }
 
 fn print_update_help() {

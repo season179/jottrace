@@ -24,10 +24,12 @@ pub use compact::{CompactMode, CompactOptions, CompactReport, run_compact};
 pub use ingest::{IngestReport, run_ingest};
 pub use storage::{IngestErrorSummary, StatusReport, run_status};
 pub use taste::{
-    TasteExampleShowReport, TasteExtractOptions, TasteExtractReport, TasteOutcomeCounts,
-    TasteShowExampleOptions, TasteShowTimelineOptions, TasteStatusReport, TasteTimelineShowReport,
+    TasteExampleShowReport, TasteExportFormat, TasteExportOptions, TasteExportReport,
+    TasteExtractOptions, TasteExtractReport, TasteOutcomeCounts, TasteShowExampleOptions,
+    TasteShowTimelineOptions, TasteStatusReport, TasteTimelineShowReport, run_taste_export,
     run_taste_extract, run_taste_show_example, run_taste_show_timeline, run_taste_status,
-    show_example_for_data_dir, show_timeline_for_data_dir, taste_status_for_data_dir,
+    show_example_for_data_dir, show_timeline_for_data_dir, taste_export_for_data_dir,
+    taste_status_for_data_dir,
 };
 pub use transfer::{PackOptions, PackReport, SettleOptions, SettleReport, run_pack, run_settle};
 pub use update::{UpdateReport, run_update};
@@ -695,7 +697,7 @@ fn mode(path: &Path) -> Result<u32> {
         & 0o777)
 }
 
-fn private_open_options() -> OpenOptions {
+pub(crate) fn private_open_options() -> OpenOptions {
     let mut options = OpenOptions::new();
     #[cfg(unix)]
     // File permissions have to be attached before `open`; setting them only
