@@ -69,17 +69,18 @@ fn sidecar_resolver_resolves_parsed_session_snapshots() {
 
     assert_eq!(
         resolved.len(),
-        13,
-        "expected inline + 11 sidecar/inline snapshots"
+        16,
+        "expected inline + sidecar snapshots across full fixture corpus"
     );
 
-    let inline = resolved
+    let inline: Vec<_> = resolved
         .iter()
-        .find(|(_, content)| matches!(content, ResolvedContent::Inline(_)))
-        .expect("inline snapshot");
-    assert!(
-        matches!(&inline.1, ResolvedContent::Inline(content) if content.contains("taste fixture baseline"))
-    );
+        .filter(|(_, content)| matches!(content, ResolvedContent::Inline(_)))
+        .collect();
+    assert_eq!(inline.len(), 4);
+    assert!(inline.iter().any(|(_, content)| {
+        matches!(content, ResolvedContent::Inline(text) if text.contains("taste fixture baseline"))
+    }));
 
     let sidecars: Vec<_> = resolved
         .iter()
@@ -90,7 +91,7 @@ fn sidecar_resolver_resolves_parsed_session_snapshots() {
             _ => None,
         })
         .collect();
-    assert_eq!(sidecars.len(), 10);
+    assert_eq!(sidecars.len(), 11);
     for (seq, name) in sidecars {
         assert!(
             name.starts_with("fixture-a1b2c3d4@v")
@@ -98,10 +99,31 @@ fn sidecar_resolver_resolves_parsed_session_snapshots() {
                 || name == "fixture-writenew1@v1"
                 || name == "fixture-subagent1@v1"
                 || name.starts_with("fixture-partial1@v")
-                || name.starts_with("fixture-manual1@v"),
+                || name.starts_with("fixture-manual1@v")
+                || name == "fixture-missingfinal1@v1",
             "seq {seq} should reference fixture sidecar, got {name}"
         );
     }
+
+    let missing_final = resolved
+        .iter()
+        .find(|(_, content)| {
+            matches!(
+                content,
+                ResolvedContent::MissingSidecar {
+                    backup_file_name,
+                    ..
+                } if backup_file_name == "fixture-missingfinal1@v2"
+            )
+        })
+        .expect("missing final sidecar v2");
+    assert!(matches!(
+        &missing_final.1,
+        ResolvedContent::MissingSidecar {
+            version: Some(2),
+            ..
+        }
+    ));
 
     let final_snapshot = resolved
         .iter()
