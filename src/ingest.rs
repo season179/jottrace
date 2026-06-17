@@ -665,19 +665,16 @@ fn discover_sqlite_session_files(
     let Some(metadata) = metadata_optional(&path)? else {
         return Ok(Vec::new());
     };
-    if !metadata.is_file() {
-        return Ok(sqlite_discovery_errors(
-            source,
-            error_session_id,
-            source_format,
-            path,
-        ));
-    }
 
-    // Any failure reading the store — open, prepare, query, a bad row, or an
-    // empty session id — collapses to a single discovery error so the rest of
-    // ingest can proceed.
-    let Some(sessions) = read_sqlite_session_rows(&path, session_query, open_connection) else {
+    // A non-file path, or any failure reading the store — open, prepare, query,
+    // a bad row, or an empty session id — collapses to a single discovery error
+    // so the rest of ingest can proceed.
+    let sessions = if metadata.is_file() {
+        read_sqlite_session_rows(&path, session_query, open_connection)
+    } else {
+        None
+    };
+    let Some(sessions) = sessions else {
         return Ok(sqlite_discovery_errors(
             source,
             error_session_id,
