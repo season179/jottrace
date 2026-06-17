@@ -10,7 +10,7 @@ use super::parse::{ContentRef, ParseKind, ParsedEvent};
 use super::timeline::{FileTimelineRow, normalize_file_path};
 
 /// Version tag stored on compiled preference rows for idempotent re-extraction.
-pub const EXTRACTOR_VERSION: &str = "0.1.7";
+pub const EXTRACTOR_VERSION: &str = "0.1.8";
 
 /// Minimum confidence for a proposal to count toward high-confidence coverage.
 pub const HIGH_CONFIDENCE_THRESHOLD: f64 = 1.0;
@@ -392,7 +392,7 @@ fn classify_present_at_session_end(
 
     let before = before_state_content(file_path, proposal_seq, timelines);
     let post_apply = post_apply_content(tool_name, tool_use_id, proposal_seq, index, events);
-    let final_content = index.rows.iter().rev().find_map(|row| row.content.as_ref());
+    let final_content = final_state_content(index);
 
     match (post_apply.as_deref(), final_content) {
         (None, _) => (PreferenceOutcome::Rejected, base_confidence, evidence_kind),
@@ -441,6 +441,14 @@ fn tool_executed(events: &[ParsedEvent], tool_use_id: &str) -> bool {
     events.iter().any(|event| {
         event.kind == ParseKind::ToolResult && event.tool_ref.as_deref() == Some(tool_use_id)
     })
+}
+
+/// Session-end file content from the latest timeline row only.
+///
+/// When the latest snapshot sidecar is missing, final state is not reconstructable
+/// even if earlier rows still have content (R1).
+fn final_state_content(index: &FileTimelineIndex) -> Option<&str> {
+    index.rows.last()?.content.as_deref()
 }
 
 fn post_apply_content(
@@ -538,6 +546,24 @@ mod tests {
             content: Some(content.to_string()),
             trigger_event_ref: trigger.map(str::to_string),
             source_kind: TimelineSourceKind::InlineSnapshot,
+        }
+    }
+
+    fn timeline_row_missing_sidecar(
+        file_path: &str,
+        seq: usize,
+        event_seq: usize,
+        trigger: Option<&str>,
+    ) -> FileTimelineRow {
+        FileTimelineRow {
+            source: "claude_cli".to_string(),
+            source_session_id: "sess".to_string(),
+            file_path: file_path.to_string(),
+            seq,
+            event_seq,
+            content: None,
+            trigger_event_ref: trigger.map(str::to_string),
+            source_kind: TimelineSourceKind::MissingSidecar,
         }
     }
 
@@ -652,6 +678,28 @@ mod tests {
 
         let examples = PreferenceCompiler::compile("claude_cli", "sess", None, &events, &rows);
         assert_eq!(examples[0].outcome, PreferenceOutcome::Rejected);
+    }
+
+    #[test]
+    fn compiler_rejects_when_latest_snapshot_sidecar_is_missing() {
+        let events = vec![proposal(
+            1,
+            "toolu_edit",
+            "Edit",
+            Some("src/a.rs"),
+            Some("added\n"),
+        )];
+        let rows = vec![
+            timeline_row("src/a.rs", 0, 0, "base\n", None),
+            timeline_row("src/a.rs", 1, 2, "base\nadded\n", Some("toolu_edit")),
+            timeline_row_missing_sidecar("src/a.rs", 2, 4, None),
+        ];
+
+        let examples = PreferenceCompiler::compile("claude_cli", "sess", None, &events, &rows);
+        assert_eq!(examples.len(), 1);
+        assert_eq!(examples[0].outcome, PreferenceOutcome::Rejected);
+        assert_eq!(examples[0].evidence_kind, EvidenceKind::MissingFinalState);
+        assert_eq!(examples[0].confidence, 0.3);
     }
 
     #[test]
