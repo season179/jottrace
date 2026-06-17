@@ -57,6 +57,10 @@ fn install_taste_claude_fixture(root: &Path) {
             &history_dir.join(format!("fixture-a1b2c3d4@{version}")),
         );
     }
+    copy_fixture_file(
+        &format!("claude-cli/file-history/{TASTE_SESSION_ID}/fixture-mcpb5e6f7a@v1"),
+        &history_dir.join("fixture-mcpb5e6f7a@v1"),
+    );
 }
 
 fn run_ingest_with_home(home: &Path, data_dir: &Path) {
@@ -112,10 +116,10 @@ fn taste_export_writes_fixture_rows_to_file() {
     )
     .expect("export preferences");
 
-    assert_eq!(report.rows_exported, 7);
+    assert_eq!(report.rows_exported, 8);
     let content = fs::read_to_string(&out_path).expect("read export file");
     let rows = parse_jsonl(&content);
-    assert_eq!(rows.len(), 7);
+    assert_eq!(rows.len(), 8);
 
     let rejected = rows
         .iter()
@@ -163,10 +167,10 @@ fn taste_export_cli_writes_jsonl_to_stdout() {
 
     let stdout = String::from_utf8_lossy(&output.stdout);
     let rows = parse_jsonl(&stdout);
-    assert_eq!(rows.len(), 7);
+    assert_eq!(rows.len(), 8);
 
     let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(stderr.contains("rows_exported: 7"));
+    assert!(stderr.contains("rows_exported: 8"));
 
     let bash = rows
         .iter()

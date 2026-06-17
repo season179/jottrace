@@ -67,7 +67,7 @@ fn sidecar_resolver_resolves_parsed_session_snapshots() {
         .resolve_snapshot_events(TASTE_SESSION_ID, &events)
         .expect("resolve snapshots");
 
-    assert_eq!(resolved.len(), 5, "expected inline + 3 sidecar + notebook snapshots");
+    assert_eq!(resolved.len(), 6, "expected inline + 4 sidecar + notebook snapshots");
 
     let inline = resolved
         .iter()
@@ -86,10 +86,10 @@ fn sidecar_resolver_resolves_parsed_session_snapshots() {
             _ => None,
         })
         .collect();
-    assert_eq!(sidecars.len(), 3);
+    assert_eq!(sidecars.len(), 4);
     for (seq, name) in sidecars {
         assert!(
-            name.starts_with("fixture-a1b2c3d4@v"),
+            name.starts_with("fixture-a1b2c3d4@v") || name == "fixture-mcpb5e6f7a@v1",
             "seq {seq} should reference fixture sidecar, got {name}"
         );
     }

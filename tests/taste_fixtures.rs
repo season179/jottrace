@@ -21,6 +21,8 @@ fn taste_fixture_corpus_has_required_session_shapes() {
         "\"name\":\"Write\"",
         "\"name\":\"Bash\"",
         "\"name\":\"NotebookEdit\"",
+        "\"name\":\"mcp_fixture_codedb_edit\"",
+        "mcp_marker",
         "new_string was NOT written",
         "toolu_taste_edit_revert",
         "toolu_taste_notebook_edit",

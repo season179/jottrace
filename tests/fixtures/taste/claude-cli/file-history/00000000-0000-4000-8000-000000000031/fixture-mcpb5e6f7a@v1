@@ -1,0 +1,2 @@
+// mcp fixture target
+pub fn mcp_marker() -> bool { true }

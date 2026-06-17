@@ -57,6 +57,10 @@ fn install_taste_claude_fixture(root: &Path) {
             &history_dir.join(format!("fixture-a1b2c3d4@{version}")),
         );
     }
+    copy_fixture_file(
+        &format!("claude-cli/file-history/{TASTE_SESSION_ID}/fixture-mcpb5e6f7a@v1"),
+        &history_dir.join("fixture-mcpb5e6f7a@v1"),
+    );
 }
 
 fn run_ingest_with_home(home: &Path, data_dir: &Path) {

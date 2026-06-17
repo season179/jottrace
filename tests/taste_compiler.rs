@@ -98,6 +98,7 @@ fn compiler_labels_fixture_proposals_with_present_at_session_end_outcomes() {
         "toolu_taste_edit_revert",
         "toolu_taste_sub_edit",
         "toolu_taste_notebook_edit",
+        "toolu_taste_mcp_edit",
     ] {
         assert!(
             by_tool.contains_key(required),
@@ -154,6 +155,17 @@ fn compiler_labels_fixture_proposals_with_present_at_session_end_outcomes() {
             .proposal_content
             .as_deref()
             .is_some_and(|content| content.contains("notebook_marker"))
+    );
+
+    let mcp = example_by_tool(&examples, "toolu_taste_mcp_edit");
+    assert_eq!(mcp.file_path.as_deref(), Some("src/taste_mcp.rs"));
+    assert_eq!(mcp.outcome, PreferenceOutcome::Accepted);
+    assert_eq!(mcp.evidence_kind, EvidenceKind::McpCorrelation);
+    assert_eq!(mcp.confidence, 0.6);
+    assert!(
+        mcp.proposal_content
+            .as_deref()
+            .is_some_and(|content| content.contains("mcp_marker"))
     );
 }
 
