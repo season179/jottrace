@@ -423,6 +423,31 @@ fn discover_session_files() -> Result<Vec<SourceFile>> {
     Ok(source_files)
 }
 
+/// Build [`SourceFile`]s for a JSONL source whose session id derives purely from
+/// the file path and which never carries a parent session (Codex, Gemini, Factory).
+fn jsonl_source_files_from_paths(
+    paths: Vec<PathBuf>,
+    source: &'static str,
+    source_session_id_kind: SourceSessionIdKind,
+    source_format: SourceFormat,
+) -> Result<Vec<SourceFile>> {
+    paths
+        .into_iter()
+        .map(|path| {
+            let (source_session_id, _) = source_session_ids_from_path(&path)?;
+            Ok(SourceFile {
+                source,
+                source_session_id,
+                source_session_id_kind,
+                parent_source_session_id: None,
+                metadata_path: None,
+                source_format,
+                path,
+            })
+        })
+        .collect()
+}
+
 fn discover_claude_session_files() -> Result<Vec<SourceFile>> {
     let home = home_dir()?;
     let mut paths = Vec::new();
@@ -489,21 +514,12 @@ fn discover_codex_session_files() -> Result<Vec<SourceFile>> {
 
     sort_dedup_paths(&mut paths);
 
-    paths
-        .into_iter()
-        .map(|path| {
-            let (source_session_id, _) = source_session_ids_from_path(&path)?;
-            Ok(SourceFile {
-                source: CODEX_SOURCE,
-                source_session_id,
-                source_session_id_kind: SourceSessionIdKind::CodexSessionMeta,
-                parent_source_session_id: None,
-                metadata_path: None,
-                source_format: SourceFormat::Jsonl,
-                path,
-            })
-        })
-        .collect()
+    jsonl_source_files_from_paths(
+        paths,
+        CODEX_SOURCE,
+        SourceSessionIdKind::CodexSessionMeta,
+        SourceFormat::Jsonl,
+    )
 }
 
 fn discover_gemini_session_files() -> Result<Vec<SourceFile>> {
@@ -534,21 +550,12 @@ fn discover_gemini_session_files() -> Result<Vec<SourceFile>> {
 
     sort_dedup_paths(&mut paths);
 
-    paths
-        .into_iter()
-        .map(|path| {
-            let (source_session_id, _) = source_session_ids_from_path(&path)?;
-            Ok(SourceFile {
-                source: GEMINI_SOURCE,
-                source_session_id,
-                source_session_id_kind: SourceSessionIdKind::GeminiChatJson,
-                parent_source_session_id: None,
-                metadata_path: None,
-                source_format: SourceFormat::GeminiChatJson,
-                path,
-            })
-        })
-        .collect()
+    jsonl_source_files_from_paths(
+        paths,
+        GEMINI_SOURCE,
+        SourceSessionIdKind::GeminiChatJson,
+        SourceFormat::GeminiChatJson,
+    )
 }
 
 fn discover_pi_agent_session_files() -> Result<Vec<SourceFile>> {
@@ -601,21 +608,12 @@ fn discover_factory_session_files() -> Result<Vec<SourceFile>> {
 
     sort_dedup_paths(&mut paths);
 
-    paths
-        .into_iter()
-        .map(|path| {
-            let (source_session_id, _) = source_session_ids_from_path(&path)?;
-            Ok(SourceFile {
-                source: FACTORY_SOURCE,
-                source_session_id,
-                source_session_id_kind: SourceSessionIdKind::FactorySessionStart,
-                parent_source_session_id: None,
-                metadata_path: None,
-                source_format: SourceFormat::Jsonl,
-                path,
-            })
-        })
-        .collect()
+    jsonl_source_files_from_paths(
+        paths,
+        FACTORY_SOURCE,
+        SourceSessionIdKind::FactorySessionStart,
+        SourceFormat::Jsonl,
+    )
 }
 
 fn discover_opencode_session_files() -> Result<Vec<SourceFile>> {
