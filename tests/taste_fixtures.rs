@@ -766,3 +766,65 @@ fn taste_extraction_cli_surface_complete() {
         );
     }
 }
+
+#[test]
+fn taste_extraction_scope_complete() {
+    let plan =
+        fs::read_to_string("notes/taste-extraction-plan.md").expect("read taste extraction plan");
+
+    for required in [
+        "## What we are building",
+        "extract taste",
+        "D_RL",
+        "(context, proposal, outcome)",
+        "data-extraction layer",
+        "not training a model",
+        "notes/command-code-taste-formula.md",
+    ] {
+        assert!(
+            plan.contains(required),
+            "taste extraction plan should document scope via {required}"
+        );
+    }
+
+    let formula = fs::read_to_string("notes/command-code-taste-formula.md")
+        .expect("read command code taste formula notes");
+    for required in [
+        "D_RL",
+        "(context, proposal, outcome)",
+        "jottrace taste",
+        "notes/taste-extraction-plan.md",
+    ] {
+        assert!(
+            formula.contains(required),
+            "command code taste formula should document jottrace D_RL scope via {required}"
+        );
+    }
+
+    let design = fs::read_to_string("docs/design.md").expect("read design.md");
+    for required in [
+        "(context, proposal, outcome)",
+        "reward-model training signal",
+    ] {
+        assert!(
+            design.contains(required),
+            "docs/design.md should document taste scope via {required}"
+        );
+    }
+
+    let compiler = fs::read_to_string("src/taste/compiler.rs").expect("read compiler module");
+    for required in ["PreferenceExample", "proposal_content", "context", "PreferenceOutcome"] {
+        assert!(
+            compiler.contains(required),
+            "compiler should emit labeled preference rows via {required}"
+        );
+    }
+
+    let export = fs::read_to_string("src/taste/export.rs").expect("read export module");
+    for required in ["context", "chosen", "rejected", "PreferenceOutcome"] {
+        assert!(
+            export.contains(required),
+            "export should map preference rows to trainer triples via {required}"
+        );
+    }
+}
