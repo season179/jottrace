@@ -29,6 +29,8 @@ user-facing ingest sources yet.
 - Inspect and compact eligible raw payload rows with `jottrace compact`.
 - Browse preserved sessions, events, and unresolved ingest errors locally with
   `jottrace web`.
+- Extract labeled coding preference examples from preserved Claude sessions
+  with `jottrace taste`.
 - Update the installed binary from GitHub Releases with `jottrace update`.
 
 ## Install
@@ -65,6 +67,8 @@ jottrace status
 jottrace compact
 jottrace pack
 jottrace settle <archive>
+jottrace taste extract
+jottrace taste status
 jottrace web
 ```
 
@@ -182,6 +186,63 @@ refuses to overwrite an existing output file. `settle` refuses to overwrite an
 existing non-empty journal unless invoked with `--force`, and runs pending
 schema migrations on the first DB open.
 
+## Taste Extraction
+
+After ingesting Claude sessions, `jottrace taste` extracts labeled preference
+examples — `(context, proposal, outcome)` rows suitable for external reward-model
+training — from the preserved transcripts. Taste extraction is Claude-only
+today: other ingested sources do not preserve the per-file snapshot history
+needed to recover accept/reject signals.
+
+The pipeline materializes two tables in the local journal:
+
+- `file_timelines` — reconstructed per-file content snapshots over the session
+- `preference_examples` — one row per detected file-modifying tool proposal
+
+Run extraction after ingest:
+
+```sh
+jottrace ingest
+jottrace taste extract
+jottrace taste status
+```
+
+`jottrace taste extract` walks Claude parent sessions (including merged
+subagent sidechains), resolves `file-history` snapshot sidecars from
+`~/.claude/file-history/<session>/`, and writes timeline and preference rows.
+Re-running is idempotent: sessions already extracted at the current extractor
+version are skipped unless raw event counts change or you pass `--force`.
+
+`jottrace taste status` reports sessions processed, proposals detected,
+outcomes by class, and high-confidence coverage. Use `--details` to include the
+database path, extractor version, and evidence-kind breakdown for low-confidence
+gaps.
+
+Inspect materialized rows:
+
+```sh
+jottrace taste show timeline --session <source_session_id> --file <path>
+jottrace taste show example [--session <source_session_id>] <tool_use_id>
+```
+
+Export labeled triples for an external trainer:
+
+```sh
+jottrace taste export --format jsonl > preferences.jsonl
+jottrace taste export --format jsonl --out ./preferences.jsonl
+```
+
+JSONL goes to stdout or `--out`; the row-count summary prints on stderr so
+piping stays clean. Export includes full file content verbatim when snapshot
+sidecars are available.
+
+To extract or inspect a single session:
+
+```sh
+jottrace taste extract --session <source_session_id>
+jottrace taste extract --session <source_session_id> --force
+```
+
 ## Update
 
 To update the installed binary in place:
@@ -243,6 +304,8 @@ cargo run -- doctor
 cargo run -- ingest
 cargo run -- status
 cargo run -- compact
+cargo run -- taste extract
+cargo run -- taste status
 cargo run -- web
 ```
 
