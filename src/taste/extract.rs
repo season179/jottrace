@@ -3,8 +3,8 @@ use std::path::{Path, PathBuf};
 
 use crate::JottraceError;
 use crate::storage::{
-    execute_sql, for_each_decoded_event_payload_for_session, query_collect, query_one,
-    query_optional, sqlite_error,
+    execute_sql, for_each_decoded_event_payload_for_session, map_sqlite_error, query_collect,
+    query_one, query_optional,
 };
 use crate::{Result, data_dir_from_env, open_locked_database};
 
@@ -106,9 +106,7 @@ pub fn taste_extract_for_data_dir(
         let timeline_count;
         let example_count;
         {
-            let tx = conn
-                .transaction()
-                .map_err(|source| sqlite_error(&db_path, source))?;
+            let tx = conn.transaction().map_err(map_sqlite_error(&db_path))?;
             timeline_count = replace_session_file_timelines(
                 &db_path,
                 &tx,
@@ -142,7 +140,7 @@ pub fn taste_extract_for_data_dir(
 }
 
 fn commit_transaction(db_path: &Path, tx: Transaction<'_>) -> Result<()> {
-    tx.commit().map_err(|source| sqlite_error(db_path, source))
+    tx.commit().map_err(map_sqlite_error(db_path))
 }
 
 fn list_parent_claude_sessions(

@@ -7,8 +7,8 @@ use std::time::Duration;
 
 use crate::storage::{
     IngestErrorSummary, LATEST_SCHEMA_VERSION, RAW_CODEC, ZSTD_CODEC, decode_event_payload,
-    decode_event_payload_prefix, open_readonly_database, query_collect, query_one, query_optional,
-    row_value, sqlite_error, unresolved_ingest_errors_from_connection,
+    decode_event_payload_prefix, map_sqlite_error, open_readonly_database, query_collect,
+    query_one, query_optional, row_value, sqlite_error, unresolved_ingest_errors_from_connection,
 };
 use crate::{JottraceError, Result, io_error, unsupported_schema_version};
 
@@ -405,7 +405,7 @@ pub fn render_home_page(view: &JournalView, query: &JournalQuery) -> String {
 fn open_web_database(path: &Path) -> Result<Connection> {
     let conn = open_readonly_database(path, sqlite_error)?;
     conn.busy_timeout(Duration::from_secs(5))
-        .map_err(|source| sqlite_error(path, source))?;
+        .map_err(map_sqlite_error(path))?;
     let schema_version: i64 = query_one(path, &conn, "PRAGMA user_version", [], |row| row.get(0))?;
     if schema_version > LATEST_SCHEMA_VERSION {
         return Err(unsupported_schema_version(
@@ -763,13 +763,13 @@ fn decoded_payload_matching_session_ids(
              WHERE codec IN (?1, ?2)
              ORDER BY session_id, generation, seq",
         )
-        .map_err(|source| sqlite_error(path, source))?;
+        .map_err(map_sqlite_error(path))?;
     let mut rows = statement
         .query(params![RAW_CODEC, ZSTD_CODEC, PAYLOAD_PREVIEW_BYTES as i64])
-        .map_err(|source| sqlite_error(path, source))?;
+        .map_err(map_sqlite_error(path))?;
     let mut session_ids = Vec::new();
     let mut matched_session_id = None;
-    while let Some(row) = rows.next().map_err(|source| sqlite_error(path, source))? {
+    while let Some(row) = rows.next().map_err(map_sqlite_error(path))? {
         let session_id: i64 = row_value(path, row, 0)?;
         if matched_session_id == Some(session_id) {
             continue;

@@ -9,8 +9,8 @@ use std::path::{Path, PathBuf};
 use std::time::UNIX_EPOCH;
 
 use crate::storage::{
-    DB_FILE_NAME, encode_event_payload, execute_sql, open_database, open_readonly_database,
-    query_one, query_optional, sqlite_error, status_from_connection,
+    DB_FILE_NAME, encode_event_payload, execute_sql, map_sqlite_error, open_database,
+    open_readonly_database, query_one, query_optional, status_from_connection,
 };
 use crate::{JottraceError, Result, io_error};
 
@@ -1153,7 +1153,7 @@ fn ingest_sqlite_session_snapshot(
     {
         let mut event_insert = tx
             .prepare(INSERT_EVENT_SQL)
-            .map_err(|source| sqlite_error(&source_file.path, source))?;
+            .map_err(map_sqlite_error(&source_file.path))?;
         for (seq, event) in snapshot.events.iter().enumerate() {
             inserted_event_count += insert_event_payload(
                 &mut event_insert,
@@ -1295,7 +1295,7 @@ fn import_committed_lines(
     let mut seq = line_number_at(buffer, start_offset);
     let mut event_insert = tx
         .prepare(INSERT_EVENT_SQL)
-        .map_err(|source| sqlite_error(&source_file.path, source))?;
+        .map_err(map_sqlite_error(&source_file.path))?;
 
     while byte_offset < committed_len {
         let line_end = next_line_end(buffer, byte_offset, committed_len);
@@ -1364,7 +1364,7 @@ fn insert_event_payload(
             encoded.codec,
             i64_from_usize(encoded.payload_size, &source_file.path)?,
         ])
-        .map_err(|source| sqlite_error(&source_file.path, source))?;
+        .map_err(map_sqlite_error(&source_file.path))?;
     Ok(inserted as u64)
 }
 
@@ -1390,7 +1390,7 @@ fn import_gemini_chat_json(
     let mut inserted_event_count = 0;
     let mut event_insert = tx
         .prepare(INSERT_EVENT_SQL)
-        .map_err(|source| sqlite_error(&source_file.path, source))?;
+        .map_err(map_sqlite_error(&source_file.path))?;
 
     for (index, message) in chat.messages.iter().enumerate() {
         let header = serde_json::from_str::<GeminiMessageHeader<'_>>(message.get())
@@ -2104,12 +2104,11 @@ fn invalid_json_resolution_boundary(
 }
 
 fn begin_transaction<'a>(conn: &'a mut Connection, path: &Path) -> Result<Transaction<'a>> {
-    conn.transaction()
-        .map_err(|source| sqlite_error(path, source))
+    conn.transaction().map_err(map_sqlite_error(path))
 }
 
 fn commit_ingest_transaction(tx: Transaction<'_>, path: &Path) -> Result<()> {
-    tx.commit().map_err(|source| sqlite_error(path, source))
+    tx.commit().map_err(map_sqlite_error(path))
 }
 
 /// Bounds for resolving a stale `invalid_json` ingest error after a JSONL pass:
@@ -2416,13 +2415,13 @@ fn unresolved_source_file_error_paths(
              WHERE error_kind = ?1
                AND resolved_at IS NULL",
         )
-        .map_err(|source| sqlite_error(db_path, source))?;
+        .map_err(map_sqlite_error(db_path))?;
     let rows = statement
         .query_map([error_kind], |row| Ok((row.get(0)?, row.get(1)?)))
-        .map_err(|source| sqlite_error(db_path, source))?;
+        .map_err(map_sqlite_error(db_path))?;
     let mut paths = HashSet::new();
     for row in rows {
-        paths.insert(row.map_err(|source| sqlite_error(db_path, source))?);
+        paths.insert(row.map_err(map_sqlite_error(db_path))?);
     }
     Ok(paths)
 }

@@ -3,7 +3,7 @@ use std::path::PathBuf;
 
 use crate::storage::{
     DB_FILE_NAME, RAW_CODEC, ZSTD_CODEC, ZSTD_MIN_PAYLOAD_BYTES, count, decode_event_payload,
-    encode_event_payload, open_database, query_one, row_value, sqlite_error,
+    encode_event_payload, map_sqlite_error, open_database, query_one, row_value,
     unresolved_ingest_error_count_from_connection,
 };
 use crate::{JottraceError, Result, data_dir_from_env};
@@ -145,7 +145,7 @@ pub fn run_compact_with_diagnostics(
         }
         CompactMode::Vacuum => {
             conn.execute_batch("VACUUM;")
-                .map_err(|source| sqlite_error(&db_path, source))?;
+                .map_err(map_sqlite_error(&db_path))?;
             (RawPayloadAnalysis::default(), before)
         }
     };
@@ -281,9 +281,7 @@ fn apply_update_batch(
         return Ok(AppliedBatch::default());
     }
 
-    let tx = conn
-        .transaction()
-        .map_err(|source| sqlite_error(path, source))?;
+    let tx = conn.transaction().map_err(map_sqlite_error(path))?;
     let mut converted_events = 0;
     let mut saved_bytes = 0;
     {
@@ -298,7 +296,7 @@ fn apply_update_batch(
                    AND seq = ?6
                    AND codec = ?7",
             )
-            .map_err(|source| sqlite_error(path, source))?;
+            .map_err(map_sqlite_error(path))?;
         for update in updates {
             let updated = statement
                 .execute(params![
@@ -310,14 +308,14 @@ fn apply_update_batch(
                     update.key.seq,
                     RAW_CODEC,
                 ])
-                .map_err(|source| sqlite_error(path, source))?;
+                .map_err(map_sqlite_error(path))?;
             if updated > 0 {
                 converted_events += updated as u64;
                 saved_bytes += update.saved_bytes;
             }
         }
     }
-    tx.commit().map_err(|source| sqlite_error(path, source))?;
+    tx.commit().map_err(map_sqlite_error(path))?;
     Ok(AppliedBatch {
         converted_events,
         saved_bytes,
@@ -397,9 +395,7 @@ fn raw_event_batch(
              LIMIT ?3"
         }
     };
-    let mut statement = conn
-        .prepare(sql)
-        .map_err(|source| sqlite_error(path, source))?;
+    let mut statement = conn.prepare(sql).map_err(map_sqlite_error(path))?;
     let mut rows = match cursor {
         Some(cursor) => statement
             .query(params![
@@ -410,17 +406,17 @@ fn raw_event_batch(
                 cursor.seq,
                 batch_size
             ])
-            .map_err(|source| sqlite_error(path, source))?,
+            .map_err(map_sqlite_error(path))?,
         None => statement
             .query(params![
                 RAW_CODEC,
                 ZSTD_MIN_PAYLOAD_BYTES as i64,
                 batch_size
             ])
-            .map_err(|source| sqlite_error(path, source))?,
+            .map_err(map_sqlite_error(path))?,
     };
     let mut events = Vec::new();
-    while let Some(row) = rows.next().map_err(|source| sqlite_error(path, source))? {
+    while let Some(row) = rows.next().map_err(map_sqlite_error(path))? {
         events.push(RawEvent {
             key: EventKey {
                 session_id: row_value(path, row, 0)?,

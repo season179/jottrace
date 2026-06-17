@@ -1,7 +1,7 @@
 use rusqlite::{Connection, params};
 use std::path::{Path, PathBuf};
 
-use crate::storage::{count, sqlite_error};
+use crate::storage::{count, map_sqlite_error};
 use crate::{Result, data_dir_from_env, open_locked_database};
 
 use super::compiler::{EXTRACTOR_VERSION, HIGH_CONFIDENCE_THRESHOLD};
@@ -103,18 +103,17 @@ fn count_sessions_up_to_date(db_path: &Path, conn: &Connection) -> Result<u64> {
              WHERE source = ?1 AND parent_session_id IS NULL
              ORDER BY id",
         )
-        .map_err(|source| sqlite_error(db_path, source))?;
+        .map_err(map_sqlite_error(db_path))?;
 
     let rows = statement
         .query_map(params![CLAUDE_SOURCE], |row| {
             Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?))
         })
-        .map_err(|source| sqlite_error(db_path, source))?;
+        .map_err(map_sqlite_error(db_path))?;
 
     let mut count = 0u64;
     for row in rows {
-        let (parent_db_id, source_session_id) =
-            row.map_err(|source| sqlite_error(db_path, source))?;
+        let (parent_db_id, source_session_id) = row.map_err(map_sqlite_error(db_path))?;
         if session_extract_is_up_to_date(db_path, conn, parent_db_id, &source_session_id)? {
             count += 1;
         }
@@ -133,24 +132,22 @@ fn count_proposals(db_path: &Path, conn: &Connection) -> Result<u64> {
 }
 
 /// Run a `(key, COUNT(*))` GROUP BY query over `CLAUDE_SOURCE` preference rows and hand
-/// each `(key, count)` pair to `record`, routing every fallible step through [`sqlite_error`].
+/// each `(key, count)` pair to `record`, routing every fallible step through [`map_sqlite_error`].
 fn for_each_grouped_count<F: FnMut(&str, u64)>(
     db_path: &Path,
     conn: &Connection,
     sql: &str,
     mut record: F,
 ) -> Result<()> {
-    let mut statement = conn
-        .prepare(sql)
-        .map_err(|source| sqlite_error(db_path, source))?;
+    let mut statement = conn.prepare(sql).map_err(map_sqlite_error(db_path))?;
     let rows = statement
         .query_map(params![CLAUDE_SOURCE], |row| {
             Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
         })
-        .map_err(|source| sqlite_error(db_path, source))?;
+        .map_err(map_sqlite_error(db_path))?;
 
     for row in rows {
-        let (key, count) = row.map_err(|source| sqlite_error(db_path, source))?;
+        let (key, count) = row.map_err(map_sqlite_error(db_path))?;
         let count = u64::try_from(count).expect("grouped count fits in u64");
         record(&key, count);
     }

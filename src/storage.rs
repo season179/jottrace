@@ -191,7 +191,7 @@ fn raw_event_payload(payload: &[u8]) -> EncodedEventPayload {
 pub fn open_database(path: &Path) -> Result<Connection> {
     ensure_private_file(path)?;
 
-    let mut conn = Connection::open(path).map_err(|source| sqlite_error(path, source))?;
+    let mut conn = Connection::open(path).map_err(map_sqlite_error(path))?;
     configure_connection(path, &conn)?;
     run_migrations(path, &mut conn)?;
     Ok(conn)
@@ -215,12 +215,12 @@ pub(crate) fn open_readonly_database(
 
 fn configure_connection(path: &Path, conn: &Connection) -> Result<()> {
     conn.busy_timeout(Duration::from_secs(5))
-        .map_err(|source| sqlite_error(path, source))?;
+        .map_err(map_sqlite_error(path))?;
     conn.execute_batch(
         "PRAGMA foreign_keys = ON;
          PRAGMA journal_mode = WAL;",
     )
-    .map_err(|source| sqlite_error(path, source))
+    .map_err(map_sqlite_error(path))
 }
 
 fn run_migrations(path: &Path, conn: &mut Connection) -> Result<()> {
@@ -238,21 +238,19 @@ fn run_migrations(path: &Path, conn: &mut Connection) -> Result<()> {
         return Ok(());
     }
 
-    let tx = conn
-        .transaction()
-        .map_err(|source| sqlite_error(path, source))?;
+    let tx = conn.transaction().map_err(map_sqlite_error(path))?;
 
     for migration in MIGRATIONS
         .iter()
         .filter(|migration| migration.version > current)
     {
         tx.execute_batch(migration.sql)
-            .map_err(|source| sqlite_error(path, source))?;
+            .map_err(map_sqlite_error(path))?;
         tx.pragma_update(None, "user_version", migration.version)
-            .map_err(|source| sqlite_error(path, source))?;
+            .map_err(map_sqlite_error(path))?;
     }
 
-    tx.commit().map_err(|source| sqlite_error(path, source))
+    tx.commit().map_err(map_sqlite_error(path))
 }
 
 pub(crate) fn status_from_connection(path: &Path, conn: &Connection) -> Result<StatusReport> {
@@ -360,19 +358,17 @@ fn for_each_decoded_event_payload_from_connection(
              ORDER BY events.generation, events.seq"
         }
     };
-    let mut statement = conn
-        .prepare(sql)
-        .map_err(|source| sqlite_error(path, source))?;
+    let mut statement = conn.prepare(sql).map_err(map_sqlite_error(path))?;
     let mut rows = match limit {
         Some(limit) => statement
             .query(params![session_id, limit])
-            .map_err(|source| sqlite_error(path, source))?,
+            .map_err(map_sqlite_error(path))?,
         None => statement
             .query(params![session_id])
-            .map_err(|source| sqlite_error(path, source))?,
+            .map_err(map_sqlite_error(path))?,
     };
 
-    while let Some(row) = rows.next().map_err(|source| sqlite_error(path, source))? {
+    while let Some(row) = rows.next().map_err(map_sqlite_error(path))? {
         let payload: Vec<u8> = row_value(path, row, 0)?;
         let codec: String = row_value(path, row, 1)?;
         if codec == RAW_CODEC {
@@ -510,6 +506,14 @@ pub(crate) fn sqlite_error(path: &Path, source: rusqlite::Error) -> JottraceErro
     }
 }
 
+/// Build a `map_err` adapter that routes a `rusqlite::Error` through [`sqlite_error`]
+/// for `path`, so the per-operation `|source| sqlite_error(path, source)` closure is
+/// written once. Used by the open/transaction/prepare/commit calls and manual
+/// row-streaming loops that fall outside the row-mapping query helpers.
+pub(crate) fn map_sqlite_error(path: &Path) -> impl Fn(rusqlite::Error) -> JottraceError {
+    move |source| sqlite_error(path, source)
+}
+
 /// Prepare `sql`, run it with `params`, and collect every mapped row into a `Vec`,
 /// routing each fallible step's failure through [`sqlite_error`] for `path`.
 pub(crate) fn query_collect<T, P, F>(
@@ -523,14 +527,12 @@ where
     P: rusqlite::Params,
     F: FnMut(&Row<'_>) -> rusqlite::Result<T>,
 {
-    let mut statement = conn
-        .prepare(sql)
-        .map_err(|source| sqlite_error(path, source))?;
+    let mut statement = conn.prepare(sql).map_err(map_sqlite_error(path))?;
     statement
         .query_map(params, mapper)
-        .map_err(|source| sqlite_error(path, source))?
+        .map_err(map_sqlite_error(path))?
         .collect::<std::result::Result<Vec<_>, _>>()
-        .map_err(|source| sqlite_error(path, source))
+        .map_err(map_sqlite_error(path))
 }
 
 /// Run `sql` with `params`, returning the single mapped row if present (`Ok(None)` when
@@ -548,7 +550,7 @@ where
 {
     conn.query_row(sql, params, mapper)
         .optional()
-        .map_err(|source| sqlite_error(path, source))
+        .map_err(map_sqlite_error(path))
 }
 
 /// Run `sql` with `params`, returning the single mapped row and routing query
@@ -565,7 +567,7 @@ where
     F: FnOnce(&Row<'_>) -> rusqlite::Result<T>,
 {
     conn.query_row(sql, params, mapper)
-        .map_err(|source| sqlite_error(path, source))
+        .map_err(map_sqlite_error(path))
 }
 
 /// Execute `sql` with `params`, returning the number of affected rows and
@@ -574,8 +576,7 @@ pub(crate) fn execute_sql<P>(path: &Path, conn: &Connection, sql: &str, params: 
 where
     P: rusqlite::Params,
 {
-    conn.execute(sql, params)
-        .map_err(|source| sqlite_error(path, source))
+    conn.execute(sql, params).map_err(map_sqlite_error(path))
 }
 
 /// Read column `idx` from `row`, routing an access/decode failure through
@@ -586,7 +587,7 @@ pub(crate) fn row_value<T>(path: &Path, row: &Row<'_>, idx: usize) -> Result<T>
 where
     T: rusqlite::types::FromSql,
 {
-    row.get(idx).map_err(|source| sqlite_error(path, source))
+    row.get(idx).map_err(map_sqlite_error(path))
 }
 
 #[cfg(test)]
