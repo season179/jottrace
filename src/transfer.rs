@@ -526,6 +526,17 @@ fn inspect_archive_safety(archive: &Path) -> Result<()> {
     Ok(())
 }
 
+/// Build a `JottraceError::ArchiveDatabaseInvalid` for a staged archive that
+/// failed validation. Mirrors `io_error`/`sqlite_error` so the repeated
+/// `archive: archive.to_path_buf()` struct literal does not recur at every
+/// validation site in this module.
+fn archive_database_invalid(archive: &Path, reason: String) -> JottraceError {
+    JottraceError::ArchiveDatabaseInvalid {
+        archive: archive.to_path_buf(),
+        reason,
+    }
+}
+
 /// Open the staged `db.sqlite` and confirm it is actually a Jottrace journal
 /// at the *latest* schema version before we wipe the live journal. The
 /// `user_version` range check intentionally runs against a bare
@@ -544,10 +555,10 @@ fn validate_staged_jottrace_database(staging: &Path, archive: &Path) -> Result<(
             // `enforce_private_permissions` already rejects non-regular files,
             // so reaching this arm would be a logic bug. Fail loudly with the
             // archive path so the user is not left wondering.
-            return Err(JottraceError::ArchiveDatabaseInvalid {
-                archive: archive.to_path_buf(),
-                reason: format!("{} is not a regular file", storage::DB_FILE_NAME),
-            });
+            return Err(archive_database_invalid(
+                archive,
+                format!("{} is not a regular file", storage::DB_FILE_NAME),
+            ));
         }
         Err(error) if error.kind() == io::ErrorKind::NotFound => {
             return Err(JottraceError::ArchiveMissingDatabase(archive.to_path_buf()));
@@ -558,27 +569,20 @@ fn validate_staged_jottrace_database(staging: &Path, archive: &Path) -> Result<(
     }
 
     let user_version: i64 = {
-        let conn = Connection::open(&staged_db).map_err(|source| {
-            JottraceError::ArchiveDatabaseInvalid {
-                archive: archive.to_path_buf(),
-                reason: source.to_string(),
-            }
-        })?;
+        let conn = Connection::open(&staged_db)
+            .map_err(|source| archive_database_invalid(archive, source.to_string()))?;
         conn.pragma_query_value(None, "user_version", |row| row.get(0))
-            .map_err(|source| JottraceError::ArchiveDatabaseInvalid {
-                archive: archive.to_path_buf(),
-                reason: source.to_string(),
-            })?
+            .map_err(|source| archive_database_invalid(archive, source.to_string()))?
     };
 
     if user_version <= 0 {
-        return Err(JottraceError::ArchiveDatabaseInvalid {
-            archive: archive.to_path_buf(),
-            reason: format!(
+        return Err(archive_database_invalid(
+            archive,
+            format!(
                 "{} has no Jottrace schema (user_version={user_version})",
                 storage::DB_FILE_NAME
             ),
-        });
+        ));
     }
     if user_version > storage::LATEST_SCHEMA_VERSION {
         return Err(JottraceError::UnsupportedSchemaVersion {
@@ -597,10 +601,7 @@ fn validate_staged_jottrace_database(staging: &Path, archive: &Path) -> Result<(
         JottraceError::Sqlite {
             source: rusqlite_err,
             ..
-        } => JottraceError::ArchiveDatabaseInvalid {
-            archive: archive.to_path_buf(),
-            reason: rusqlite_err.to_string(),
-        },
+        } => archive_database_invalid(archive, rusqlite_err.to_string()),
         JottraceError::UnsupportedSchemaVersion {
             actual, supported, ..
         } => JottraceError::UnsupportedSchemaVersion {
@@ -618,11 +619,12 @@ fn validate_staged_jottrace_database(staging: &Path, archive: &Path) -> Result<(
     // 001 — would otherwise wave through here and break the receiving
     // machine after the live journal had already been wiped.
     for (table, probe_sql) in REQUIRED_JOURNAL_SCHEMA_PROBES {
-        conn.prepare(probe_sql)
-            .map_err(|source| JottraceError::ArchiveDatabaseInvalid {
-                archive: archive.to_path_buf(),
-                reason: format!("table `{table}` has unexpected schema: {source}"),
-            })?;
+        conn.prepare(probe_sql).map_err(|source| {
+            archive_database_invalid(
+                archive,
+                format!("table `{table}` has unexpected schema: {source}"),
+            )
+        })?;
     }
 
     // Columns alone do not guarantee a usable journal: ingest relies on the
@@ -679,20 +681,17 @@ fn require_unique_index_named(
             |row| row.get(0),
         )
         .optional()
-        .map_err(|source| JottraceError::ArchiveDatabaseInvalid {
-            archive: archive.to_path_buf(),
-            reason: source.to_string(),
-        })?;
+        .map_err(|source| archive_database_invalid(archive, source.to_string()))?;
     match unique {
         Some(value) if value != 0 => Ok(()),
-        Some(_) => Err(JottraceError::ArchiveDatabaseInvalid {
-            archive: archive.to_path_buf(),
-            reason: format!("index `{index_name}` on `{table}` is not unique"),
-        }),
-        None => Err(JottraceError::ArchiveDatabaseInvalid {
-            archive: archive.to_path_buf(),
-            reason: format!("missing unique index `{index_name}` on `{table}`"),
-        }),
+        Some(_) => Err(archive_database_invalid(
+            archive,
+            format!("index `{index_name}` on `{table}` is not unique"),
+        )),
+        None => Err(archive_database_invalid(
+            archive,
+            format!("missing unique index `{index_name}` on `{table}`"),
+        )),
     }
 }
 
@@ -709,20 +708,17 @@ fn require_primary_key_unique_index(conn: &Connection, archive: &Path, table: &s
             |row| row.get(0),
         )
         .optional()
-        .map_err(|source| JottraceError::ArchiveDatabaseInvalid {
-            archive: archive.to_path_buf(),
-            reason: source.to_string(),
-        })?;
+        .map_err(|source| archive_database_invalid(archive, source.to_string()))?;
     match unique {
         Some(value) if value != 0 => Ok(()),
-        Some(_) => Err(JottraceError::ArchiveDatabaseInvalid {
-            archive: archive.to_path_buf(),
-            reason: format!("PRIMARY KEY index on `{table}` is not unique"),
-        }),
-        None => Err(JottraceError::ArchiveDatabaseInvalid {
-            archive: archive.to_path_buf(),
-            reason: format!("missing PRIMARY KEY index on `{table}`"),
-        }),
+        Some(_) => Err(archive_database_invalid(
+            archive,
+            format!("PRIMARY KEY index on `{table}` is not unique"),
+        )),
+        None => Err(archive_database_invalid(
+            archive,
+            format!("missing PRIMARY KEY index on `{table}`"),
+        )),
     }
 }
 
