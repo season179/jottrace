@@ -178,7 +178,10 @@ fn taste_subcommand_help_aliases_print_command_specific_usage() {
         ("taste extract", "Materialize file timelines"),
         ("taste status", "high-confidence coverage"),
         ("taste export", "JSONL for external trainer"),
-        ("taste show", "Inspect materialized taste extraction artifacts"),
+        (
+            "taste show",
+            "Inspect materialized taste extraction artifacts",
+        ),
         ("taste show timeline", "--session <source_session_id>"),
         ("taste show example", "preference example"),
     ];

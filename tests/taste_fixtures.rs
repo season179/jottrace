@@ -295,8 +295,9 @@ fn taste_extraction_plan_implementation_complete() {
         "migration 011 should define preference_examples"
     );
 
-    let migration_012 = fs::read_to_string("src/migrations/012_preference_examples_mcp_evidence.sql")
-        .expect("read migration 012");
+    let migration_012 =
+        fs::read_to_string("src/migrations/012_preference_examples_mcp_evidence.sql")
+            .expect("read migration 012");
     assert!(
         migration_012.contains("mcp_correlation"),
         "migration 012 should allow mcp_correlation evidence_kind"
@@ -489,7 +490,11 @@ fn taste_extraction_locked_decisions_complete() {
     }
 
     let extract = fs::read_to_string("src/taste/extract.rs").expect("read extract module");
-    for required in ["claude_cli", "list_parent_claude_sessions", "EXTRACTOR_VERSION"] {
+    for required in [
+        "claude_cli",
+        "list_parent_claude_sessions",
+        "EXTRACTOR_VERSION",
+    ] {
         assert!(
             extract.contains(required),
             "extract module should implement Claude-only materialized extraction via {required}"
@@ -746,7 +751,11 @@ fn taste_extraction_cli_surface_complete() {
     }
 
     let extract = fs::read_to_string("src/taste/extract.rs").expect("read extract module");
-    for required in ["session_needs_extract", "EXTRACTOR_VERSION", "taste_extractions"] {
+    for required in [
+        "session_needs_extract",
+        "EXTRACTOR_VERSION",
+        "taste_extractions",
+    ] {
         assert!(
             extract.contains(required),
             "extract module should implement idempotent CLI semantics via {required}"
@@ -813,7 +822,12 @@ fn taste_extraction_scope_complete() {
     }
 
     let compiler = fs::read_to_string("src/taste/compiler.rs").expect("read compiler module");
-    for required in ["PreferenceExample", "proposal_content", "context", "PreferenceOutcome"] {
+    for required in [
+        "PreferenceExample",
+        "proposal_content",
+        "context",
+        "PreferenceOutcome",
+    ] {
         assert!(
             compiler.contains(required),
             "compiler should emit labeled preference rows via {required}"
@@ -887,7 +901,11 @@ fn taste_extraction_implementation_sequence_complete() {
 
     // Step 3 — sidecar resolver
     let sidecar = fs::read_to_string("src/taste/sidecar.rs").expect("read sidecar module");
-    for required in ["SnapshotSidecarResolver", "backupFileName", "MissingSidecar"] {
+    for required in [
+        "SnapshotSidecarResolver",
+        "backupFileName",
+        "MissingSidecar",
+    ] {
         assert!(
             sidecar.contains(required),
             "step 3 sidecar resolver should implement {required}"
@@ -904,7 +922,11 @@ fn taste_extraction_implementation_sequence_complete() {
 
     // Step 5 — preference compiler
     let compiler = fs::read_to_string("src/taste/compiler.rs").expect("read compiler module");
-    for required in ["PreferenceCompiler", "classify_present_at_session_end", "EvidenceKind"] {
+    for required in [
+        "PreferenceCompiler",
+        "classify_present_at_session_end",
+        "EvidenceKind",
+    ] {
         assert!(
             compiler.contains(required),
             "step 5 compiler should implement {required}"
@@ -935,7 +957,11 @@ fn taste_extraction_implementation_sequence_complete() {
 
     // Step 7 — coverage report
     let status = fs::read_to_string("src/taste/status.rs").expect("read status module");
-    for required in ["coverage_percent", "HIGH_CONFIDENCE_THRESHOLD", "run_taste_status"] {
+    for required in [
+        "coverage_percent",
+        "HIGH_CONFIDENCE_THRESHOLD",
+        "run_taste_status",
+    ] {
         assert!(
             status.contains(required),
             "step 7 status should report coverage via {required}"
@@ -1028,11 +1054,7 @@ fn taste_extraction_reference_complete() {
 
     let formula = fs::read_to_string("notes/command-code-taste-formula.md")
         .expect("read command code taste formula notes");
-    for required in [
-        "notes/taste-extraction-plan.md",
-        "jottrace taste",
-        "D_RL",
-    ] {
+    for required in ["notes/taste-extraction-plan.md", "jottrace taste", "D_RL"] {
         assert!(
             formula.contains(required),
             "formula reference should link back to taste extraction via {required}"
@@ -1091,8 +1113,7 @@ fn taste_extraction_reference_complete() {
 
 #[test]
 fn taste_extraction_plan_closure_complete() {
-    let fixtures =
-        fs::read_to_string("tests/taste_fixtures.rs").expect("read taste_fixtures.rs");
+    let fixtures = fs::read_to_string("tests/taste_fixtures.rs").expect("read taste_fixtures.rs");
 
     // Every major plan section must have a dedicated CI regression lock.
     for (section, test_name) in [
@@ -1100,22 +1121,13 @@ fn taste_extraction_plan_closure_complete() {
             "Status: IMPLEMENTED + R3",
             "taste_extraction_plan_documents_implemented_status_and_r3_exclusion",
         ),
-        (
-            "What we are building",
-            "taste_extraction_scope_complete",
-        ),
+        ("What we are building", "taste_extraction_scope_complete"),
         (
             "Locked decisions",
             "taste_extraction_locked_decisions_complete",
         ),
-        (
-            "Architecture",
-            "taste_extraction_architecture_complete",
-        ),
-        (
-            "CLI surface",
-            "taste_extraction_cli_surface_complete",
-        ),
+        ("Architecture", "taste_extraction_architecture_complete"),
+        ("CLI surface", "taste_extraction_cli_surface_complete"),
         (
             "Open implementation risks",
             "taste_extraction_risk_coverage_complete",
@@ -1128,14 +1140,8 @@ fn taste_extraction_plan_closure_complete() {
             "Deferred: async Task transcripts",
             "taste_extraction_deferred_r3_complete",
         ),
-        (
-            "Corrections",
-            "taste_extraction_plan_corrections_complete",
-        ),
-        (
-            "Reference",
-            "taste_extraction_reference_complete",
-        ),
+        ("Corrections", "taste_extraction_plan_corrections_complete"),
+        ("Reference", "taste_extraction_reference_complete"),
         (
             "Artifact existence (steps 1-7)",
             "taste_extraction_plan_implementation_complete",

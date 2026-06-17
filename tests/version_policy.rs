@@ -7,7 +7,10 @@ fn cargo_version_matches_changelog_head() {
     let manifest = fs::read_to_string("Cargo.toml").expect("read Cargo.toml");
     let cargo_version = manifest
         .lines()
-        .find_map(|line| line.strip_prefix("version = \"").and_then(|rest| rest.strip_suffix('"')))
+        .find_map(|line| {
+            line.strip_prefix("version = \"")
+                .and_then(|rest| rest.strip_suffix('"'))
+        })
         .expect("Cargo.toml package version");
 
     let changelog = fs::read_to_string("CHANGELOG.md").expect("read CHANGELOG.md");
