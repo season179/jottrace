@@ -531,6 +531,16 @@ where
         .map_err(|source| sqlite_error(path, source))
 }
 
+/// Execute `sql` with `params`, returning the number of affected rows and
+/// routing failures through [`sqlite_error`] for `path`.
+pub(crate) fn execute_sql<P>(path: &Path, conn: &Connection, sql: &str, params: P) -> Result<usize>
+where
+    P: rusqlite::Params,
+{
+    conn.execute(sql, params)
+        .map_err(|source| sqlite_error(path, source))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

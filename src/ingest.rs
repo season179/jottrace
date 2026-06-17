@@ -9,7 +9,7 @@ use std::path::{Path, PathBuf};
 use std::time::UNIX_EPOCH;
 
 use crate::storage::{
-    DB_FILE_NAME, encode_event_payload, open_database, query_optional, sqlite_error,
+    DB_FILE_NAME, encode_event_payload, execute_sql, open_database, query_optional, sqlite_error,
     status_from_connection,
 };
 use crate::{JottraceError, Result, io_error};
@@ -1913,7 +1913,9 @@ fn source_file_error_kind(error: &JottraceError) -> &'static str {
 }
 
 fn insert_session_if_missing(tx: &Transaction<'_>, source_file: &SourceFile) -> Result<()> {
-    tx.execute(
+    execute_sql(
+        &source_file.path,
+        tx,
         "INSERT OR IGNORE INTO sessions (source, source_session_id, file_path)
          VALUES (?1, ?2, ?3)",
         params![
@@ -1921,8 +1923,7 @@ fn insert_session_if_missing(tx: &Transaction<'_>, source_file: &SourceFile) -> 
             source_file.source_session_id.as_str(),
             source_file.path.to_string_lossy(),
         ],
-    )
-    .map_err(|source| sqlite_error(&source_file.path, source))?;
+    )?;
     Ok(())
 }
 
@@ -2189,7 +2190,9 @@ fn update_skipped_session(tx: &Transaction<'_>, update: &SkippedSessionUpdate<'_
     let file_path = update.source_file.path.to_string_lossy();
     let has_parent_source = update.source_file.parent_source_session_id.is_some();
 
-    tx.execute(
+    execute_sql(
+        &update.source_file.path,
+        tx,
         "UPDATE sessions
          SET file_path = :file_path,
              parent_session_id = CASE
@@ -2217,8 +2220,7 @@ fn update_skipped_session(tx: &Transaction<'_>, update: &SkippedSessionUpdate<'_
             ":content_fingerprint": content_fingerprint,
             ":session_id": update.session_id,
         },
-    )
-    .map_err(|source| sqlite_error(&update.source_file.path, source))?;
+    )?;
     Ok(())
 }
 
@@ -2226,7 +2228,9 @@ fn update_session_after_import(tx: &Transaction<'_>, update: SessionUpdate<'_>) 
     let file_path = update.source_file.path.to_string_lossy();
     let has_parent_source = update.source_file.parent_source_session_id.is_some();
 
-    tx.execute(
+    execute_sql(
+        &update.source_file.path,
+        tx,
         "UPDATE sessions
          SET file_path = :file_path,
              parent_session_id = CASE
@@ -2274,8 +2278,7 @@ fn update_session_after_import(tx: &Transaction<'_>, update: SessionUpdate<'_>) 
             ":event_count": update.event_count,
             ":session_id": update.session_id,
         },
-    )
-    .map_err(|source| sqlite_error(&update.source_file.path, source))?;
+    )?;
     Ok(())
 }
 
@@ -2305,14 +2308,15 @@ fn reuse_source_file_session_identity(
         return Ok(());
     }
 
-    conn.execute(
+    execute_sql(
+        &source_file.path,
+        conn,
         "UPDATE sessions
          SET source_session_id = ?1,
              updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
          WHERE id = ?2",
         params![source_session_id, stored.id],
-    )
-    .map_err(|source| sqlite_error(&source_file.path, source))?;
+    )?;
     Ok(())
 }
 
@@ -2516,7 +2520,9 @@ fn resolve_source_file_error(
         return Ok(());
     }
 
-    conn.execute(
+    execute_sql(
+        &source_file.path,
+        conn,
         "UPDATE ingest_errors
          SET resolved_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now'),
              resolution_note = ?1
@@ -2530,8 +2536,7 @@ fn resolve_source_file_error(
             source_file.path.to_string_lossy(),
             error_kind,
         ],
-    )
-    .map_err(|source| sqlite_error(&source_file.path, source))?;
+    )?;
     Ok(())
 }
 
@@ -2554,15 +2559,20 @@ fn remove_empty_source_file_placeholder(
         return Ok(());
     }
 
-    conn.execute("DELETE FROM sessions WHERE id = ?1", [stored.id])
-        .map_err(|source| sqlite_error(&source_file.path, source))?;
+    execute_sql(
+        &source_file.path,
+        conn,
+        "DELETE FROM sessions WHERE id = ?1",
+        [stored.id],
+    )?;
     Ok(())
 }
 
 fn record_ingest_error(tx: &Transaction<'_>, record: IngestErrorRecord<'_>) -> Result<()> {
-    let updated = tx
-        .execute(
-            "UPDATE ingest_errors
+    let updated = execute_sql(
+        &record.source_file.path,
+        tx,
+        "UPDATE ingest_errors
              SET session_id = ?1,
                  message = ?2,
                  last_seen_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now'),
@@ -2575,25 +2585,26 @@ fn record_ingest_error(tx: &Transaction<'_>, record: IngestErrorRecord<'_>) -> R
                AND line_number IS ?8
                AND error_kind = ?9
                AND resolved_at IS NULL",
-            params![
-                record.session_id,
-                record.message,
-                record.source_file.source,
-                record.source_file.source_session_id.as_str(),
-                record.source_file.path.to_string_lossy(),
-                record.generation,
-                record.byte_offset,
-                record.line_number,
-                record.error_kind,
-            ],
-        )
-        .map_err(|source| sqlite_error(&record.source_file.path, source))?;
+        params![
+            record.session_id,
+            record.message,
+            record.source_file.source,
+            record.source_file.source_session_id.as_str(),
+            record.source_file.path.to_string_lossy(),
+            record.generation,
+            record.byte_offset,
+            record.line_number,
+            record.error_kind,
+        ],
+    )?;
 
     if updated > 0 {
         return Ok(());
     }
 
-    tx.execute(
+    execute_sql(
+        &record.source_file.path,
+        tx,
         "INSERT INTO ingest_errors
             (source, source_session_id, session_id, file_path, generation, byte_offset,
              line_number, error_kind, message)
@@ -2609,8 +2620,7 @@ fn record_ingest_error(tx: &Transaction<'_>, record: IngestErrorRecord<'_>) -> R
             record.error_kind,
             record.message,
         ],
-    )
-    .map_err(|source| sqlite_error(&record.source_file.path, source))?;
+    )?;
     Ok(())
 }
 

@@ -3,7 +3,8 @@ use std::path::{Path, PathBuf};
 
 use crate::JottraceError;
 use crate::storage::{
-    for_each_decoded_event_payload_for_session, query_collect, query_optional, sqlite_error,
+    execute_sql, for_each_decoded_event_payload_for_session, query_collect, query_optional,
+    sqlite_error,
 };
 use crate::{Result, data_dir_from_env, open_locked_database};
 
@@ -303,7 +304,9 @@ fn replace_taste_extraction_meta(
     source_session_id: &str,
     event_count: u64,
 ) -> Result<()> {
-    conn.execute(
+    execute_sql(
+        db_path,
+        conn,
         "INSERT INTO taste_extractions (source, source_session_id, extractor_version, event_count)
          VALUES (?1, ?2, ?3, ?4)
          ON CONFLICT (source, source_session_id) DO UPDATE SET
@@ -315,8 +318,7 @@ fn replace_taste_extraction_meta(
             EXTRACTOR_VERSION,
             i64::try_from(event_count).expect("event_count fits in i64"),
         ],
-    )
-    .map_err(|source| sqlite_error(db_path, source))?;
+    )?;
     Ok(())
 }
 
