@@ -22,7 +22,7 @@ use rusqlite::Connection;
 use crate::update::{AUTO_UPDATE_LOCK_FILE, AUTO_UPDATE_STAMP_FILE};
 use crate::{
     JottraceError, LOCK_FILE_NAME, PRIVATE_DIR_MODE, PRIVATE_FILE_MODE, Result, acquire_data_lock,
-    data_dir_from_env, ensure_private_dir, storage,
+    data_dir_from_env, ensure_private_dir, io_error, storage,
 };
 
 #[cfg(unix)]
@@ -104,10 +104,7 @@ pub fn run_pack(options: PackOptions) -> Result<PackReport> {
             return Err(JottraceError::NotDirectory(data_dir));
         }
         Err(source) => {
-            return Err(JottraceError::Io {
-                path: data_dir,
-                source,
-            });
+            return Err(io_error(&data_dir, source));
         }
     }
 
@@ -179,10 +176,7 @@ pub fn run_pack(options: PackOptions) -> Result<PackReport> {
     run_tar(&mut command)?;
 
     let archive_bytes = fs::metadata(&archive)
-        .map_err(|source| JottraceError::Io {
-            path: archive.clone(),
-            source,
-        })?
+        .map_err(|source| io_error(&archive, source))?
         .len();
 
     claim.commit();
@@ -242,15 +236,9 @@ pub fn run_settle(options: SettleOptions) -> Result<SettleReport> {
     if let Err(source) = fs::remove_dir_all(&staging)
         && source.kind() != io::ErrorKind::NotFound
     {
-        return Err(JottraceError::Io {
-            path: staging.clone(),
-            source,
-        });
+        return Err(io_error(&staging, source));
     }
-    fs::create_dir(&staging).map_err(|source| JottraceError::Io {
-        path: staging.clone(),
-        source,
-    })?;
+    fs::create_dir(&staging).map_err(|source| io_error(&staging, source))?;
     chmod(&staging, PRIVATE_DIR_MODE)?;
     let mut staging_guard = StagingGuard::new(&staging);
 
@@ -294,10 +282,7 @@ pub fn run_settle(options: SettleOptions) -> Result<SettleReport> {
     // within a single filesystem (guaranteed since staging is a child of the
     // journal), and the files keep the 0600 mode set during validation.
     move_staged_into_place(&staging, &data_dir)?;
-    fs::remove_dir(&staging).map_err(|source| JottraceError::Io {
-        path: staging.clone(),
-        source,
-    })?;
+    fs::remove_dir(&staging).map_err(|source| io_error(&staging, source))?;
     staging_guard.commit();
 
     let db_path = data_dir.join(storage::DB_FILE_NAME);
@@ -327,17 +312,11 @@ fn directory_has_journal_content(path: &Path) -> Result<bool> {
         Ok(entries) => entries,
         Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(false),
         Err(source) => {
-            return Err(JottraceError::Io {
-                path: path.to_path_buf(),
-                source,
-            });
+            return Err(io_error(path, source));
         }
     };
     for entry in entries {
-        let entry = entry.map_err(|source| JottraceError::Io {
-            path: path.to_path_buf(),
-            source,
-        })?;
+        let entry = entry.map_err(|source| io_error(path, source))?;
         // Skip runtime artefacts (lock + auto-update sentinels). A directory
         // that only holds these is, from a user's perspective, an empty
         // journal — for example, on installer-managed binaries
@@ -357,15 +336,9 @@ fn directory_has_journal_content(path: &Path) -> Result<bool> {
 }
 
 fn clear_journal_contents(path: &Path) -> Result<()> {
-    let entries = fs::read_dir(path).map_err(|source| JottraceError::Io {
-        path: path.to_path_buf(),
-        source,
-    })?;
+    let entries = fs::read_dir(path).map_err(|source| io_error(path, source))?;
     for entry in entries {
-        let entry = entry.map_err(|source| JottraceError::Io {
-            path: path.to_path_buf(),
-            source,
-        })?;
+        let entry = entry.map_err(|source| io_error(path, source))?;
         let name = entry.file_name();
         // Preserve the lock file (settle is holding it; removing it would
         // orphan the OS flock) and the staging dir (it holds the validated
@@ -374,10 +347,9 @@ fn clear_journal_contents(path: &Path) -> Result<()> {
             continue;
         }
         let child = entry.path();
-        let file_type = entry.file_type().map_err(|source| JottraceError::Io {
-            path: child.clone(),
-            source,
-        })?;
+        let file_type = entry
+            .file_type()
+            .map_err(|source| io_error(&child, source))?;
         // remove_dir_all and remove_file both refuse to traverse symlinks, so
         // a stray link in the existing journal can only ever delete itself —
         // never the target it points at.
@@ -386,34 +358,24 @@ fn clear_journal_contents(path: &Path) -> Result<()> {
         } else {
             fs::remove_file(&child)
         };
-        result.map_err(|source| JottraceError::Io {
-            path: child,
-            source,
-        })?;
+        result.map_err(|source| io_error(&child, source))?;
     }
     Ok(())
 }
 
 fn enforce_private_permissions(root: &Path) -> Result<()> {
     chmod(root, PRIVATE_DIR_MODE)?;
-    let entries = fs::read_dir(root).map_err(|source| JottraceError::Io {
-        path: root.to_path_buf(),
-        source,
-    })?;
+    let entries = fs::read_dir(root).map_err(|source| io_error(root, source))?;
     for entry in entries {
-        let entry = entry.map_err(|source| JottraceError::Io {
-            path: root.to_path_buf(),
-            source,
-        })?;
+        let entry = entry.map_err(|source| io_error(root, source))?;
         let path = entry.path();
         // Use `file_type` (which does NOT follow symlinks) instead of
         // `metadata`. A crafted archive could otherwise place a symlink
         // pointing outside `JOTTRACE_HOME`; chmod follows symlinks, so the
         // permission change would land on the target file.
-        let file_type = entry.file_type().map_err(|source| JottraceError::Io {
-            path: path.clone(),
-            source,
-        })?;
+        let file_type = entry
+            .file_type()
+            .map_err(|source| io_error(&path, source))?;
         if file_type.is_symlink() {
             return Err(JottraceError::UnsafeArchiveEntry {
                 path,
@@ -437,10 +399,7 @@ fn enforce_private_permissions(root: &Path) -> Result<()> {
 #[cfg(unix)]
 fn chmod(path: &Path, mode: u32) -> Result<()> {
     let permissions = fs::Permissions::from_mode(mode);
-    fs::set_permissions(path, permissions).map_err(|source| JottraceError::Io {
-        path: path.to_path_buf(),
-        source,
-    })
+    fs::set_permissions(path, permissions).map_err(|source| io_error(path, source))
 }
 
 #[cfg(not(unix))]
@@ -594,10 +553,7 @@ fn validate_staged_jottrace_database(staging: &Path, archive: &Path) -> Result<(
             return Err(JottraceError::ArchiveMissingDatabase(archive.to_path_buf()));
         }
         Err(source) => {
-            return Err(JottraceError::Io {
-                path: staged_db,
-                source,
-            });
+            return Err(io_error(&staged_db, source));
         }
     }
 
@@ -697,10 +653,7 @@ fn validate_staged_jottrace_database(staging: &Path, archive: &Path) -> Result<(
             }
             Err(error) if error.kind() == io::ErrorKind::NotFound => {}
             Err(source) => {
-                return Err(JottraceError::Io {
-                    path: sidecar,
-                    source,
-                });
+                return Err(io_error(&sidecar, source));
             }
         }
     }
@@ -786,10 +739,7 @@ fn claim_private_path(path: &Path) -> Result<std::fs::File> {
         if source.kind() == io::ErrorKind::AlreadyExists {
             JottraceError::PackOutputExists(path.to_path_buf())
         } else {
-            JottraceError::Io {
-                path: path.to_path_buf(),
-                source,
-            }
+            io_error(path, source)
         }
     })
 }
@@ -856,18 +806,12 @@ impl Drop for StagingGuard {
 /// for ensuring `dest` already has space for the renamed entries (typically by
 /// running `clear_journal_contents` first).
 fn move_staged_into_place(staging: &Path, dest: &Path) -> Result<()> {
-    let entries = fs::read_dir(staging).map_err(|source| JottraceError::Io {
-        path: staging.to_path_buf(),
-        source,
-    })?;
+    let entries = fs::read_dir(staging).map_err(|source| io_error(staging, source))?;
     for entry in entries {
-        let entry = entry.map_err(|source| JottraceError::Io {
-            path: staging.to_path_buf(),
-            source,
-        })?;
+        let entry = entry.map_err(|source| io_error(staging, source))?;
         let from = entry.path();
         let to = dest.join(entry.file_name());
-        fs::rename(&from, &to).map_err(|source| JottraceError::Io { path: from, source })?;
+        fs::rename(&from, &to).map_err(|source| io_error(&from, source))?;
     }
     Ok(())
 }
@@ -881,10 +825,7 @@ fn pack_output_inside_journal(output: &Path, data_dir: &Path) -> Result<bool> {
         Ok(path) => path,
         Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(false),
         Err(source) => {
-            return Err(JottraceError::Io {
-                path: data_dir.to_path_buf(),
-                source,
-            });
+            return Err(io_error(data_dir, source));
         }
     };
     let parent = output.parent().filter(|p| !p.as_os_str().is_empty());
@@ -896,16 +837,10 @@ fn pack_output_inside_journal(output: &Path, data_dir: &Path) -> Result<bool> {
             // proper I/O error with the right path.
             Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(false),
             Err(source) => {
-                return Err(JottraceError::Io {
-                    path: parent.to_path_buf(),
-                    source,
-                });
+                return Err(io_error(parent, source));
             }
         },
-        None => fs::canonicalize(".").map_err(|source| JottraceError::Io {
-            path: PathBuf::from("."),
-            source,
-        })?,
+        None => fs::canonicalize(".").map_err(|source| io_error(Path::new("."), source))?,
     };
     let file_name = match output.file_name() {
         Some(name) => name,
@@ -920,18 +855,13 @@ fn pack_output_inside_journal(output: &Path, data_dir: &Path) -> Result<bool> {
 /// check. If `data_dir` does not exist yet the check is a no-op: there is
 /// nothing to be inside.
 fn archive_is_inside(archive: &Path, data_dir: &Path) -> Result<bool> {
-    let canonical_archive = fs::canonicalize(archive).map_err(|source| JottraceError::Io {
-        path: archive.to_path_buf(),
-        source,
-    })?;
+    let canonical_archive =
+        fs::canonicalize(archive).map_err(|source| io_error(archive, source))?;
     let canonical_data = match fs::canonicalize(data_dir) {
         Ok(path) => path,
         Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(false),
         Err(source) => {
-            return Err(JottraceError::Io {
-                path: data_dir.to_path_buf(),
-                source,
-            });
+            return Err(io_error(data_dir, source));
         }
     };
     Ok(canonical_archive.starts_with(canonical_data))

@@ -471,10 +471,7 @@ fn acquire_data_lock_file(path: &Path, token: &str) -> Result<File> {
         .write(true)
         .create(true)
         .open(path)
-        .map_err(|source| JottraceError::Io {
-            path: path.to_path_buf(),
-            source,
-        })?;
+        .map_err(|source| io_error(path, source))?;
 
     acquire_os_file_lock(&file, path)?;
     write_data_lock_metadata(&mut file, path, token)?;
@@ -511,10 +508,7 @@ fn write_data_lock_metadata(file: &mut File, path: &Path, token: &str) -> Result
 
     result.map_err(|source| {
         let _ = fs::remove_file(path);
-        JottraceError::Io {
-            path: path.to_path_buf(),
-            source,
-        }
+        io_error(path, source)
     })
 }
 
@@ -529,10 +523,7 @@ fn acquire_os_file_lock(file: &File, path: &Path) -> Result<()> {
     if source.kind() == io::ErrorKind::WouldBlock {
         return Err(JottraceError::LockHeld(path.to_path_buf()));
     }
-    Err(JottraceError::Io {
-        path: path.to_path_buf(),
-        source,
-    })
+    Err(io_error(path, source))
 }
 
 fn remove_data_lock_file_if_owned(path: &Path, token: &str) {
@@ -567,10 +558,7 @@ pub fn ensure_private_dir(path: &Path) -> Result<()> {
             create_private_dir(path)?;
             ensure_dir_mode(path)
         }
-        Err(source) => Err(JottraceError::Io {
-            path: path.to_path_buf(),
-            source,
-        }),
+        Err(source) => Err(io_error(path, source)),
     }
 }
 
@@ -586,10 +574,7 @@ pub fn create_private_file(path: &Path) -> Result<File> {
         .write(true)
         .create_new(true)
         .open(path)
-        .map_err(|source| JottraceError::Io {
-            path: path.to_path_buf(),
-            source,
-        })?;
+        .map_err(|source| io_error(path, source))?;
 
     #[cfg(unix)]
     // The open mode is the first line of defense, but chmod after creation
@@ -619,10 +604,7 @@ pub fn ensure_private_file(path: &Path) -> Result<()> {
             drop(create_private_file(path)?);
             Ok(())
         }
-        Err(source) => Err(JottraceError::Io {
-            path: path.to_path_buf(),
-            source,
-        }),
+        Err(source) => Err(io_error(path, source)),
     }
 }
 
@@ -631,10 +613,9 @@ fn create_private_dir(path: &Path) -> Result<()> {
     let mut builder = fs::DirBuilder::new();
     builder.recursive(true);
     builder.mode(PRIVATE_DIR_MODE);
-    builder.create(path).map_err(|source| JottraceError::Io {
-        path: path.to_path_buf(),
-        source,
-    })?;
+    builder
+        .create(path)
+        .map_err(|source| io_error(path, source))?;
     // DirBuilder's mode is affected by the process umask, so enforce the final
     // permission after the directory exists.
     set_mode(path, PRIVATE_DIR_MODE)
@@ -642,10 +623,7 @@ fn create_private_dir(path: &Path) -> Result<()> {
 
 #[cfg(not(unix))]
 fn create_private_dir(path: &Path) -> Result<()> {
-    fs::create_dir_all(path).map_err(|source| JottraceError::Io {
-        path: path.to_path_buf(),
-        source,
-    })
+    fs::create_dir_all(path).map_err(|source| io_error(path, source))
 }
 
 #[cfg(unix)]
@@ -689,26 +667,17 @@ fn ensure_file_mode(_path: &Path) -> Result<()> {
 #[cfg(unix)]
 fn set_mode(path: &Path, expected: u32) -> Result<()> {
     let mut permissions = fs::metadata(path)
-        .map_err(|source| JottraceError::Io {
-            path: path.to_path_buf(),
-            source,
-        })?
+        .map_err(|source| io_error(path, source))?
         .permissions();
     permissions.set_mode(expected);
-    fs::set_permissions(path, permissions).map_err(|source| JottraceError::Io {
-        path: path.to_path_buf(),
-        source,
-    })
+    fs::set_permissions(path, permissions).map_err(|source| io_error(path, source))
 }
 
 #[cfg(unix)]
 fn mode(path: &Path) -> Result<u32> {
     // Mask out file-type bits so callers compare only the familiar chmod mode.
     Ok(fs::metadata(path)
-        .map_err(|source| JottraceError::Io {
-            path: path.to_path_buf(),
-            source,
-        })?
+        .map_err(|source| io_error(path, source))?
         .permissions()
         .mode()
         & 0o777)
@@ -721,6 +690,17 @@ pub(crate) fn private_open_options() -> OpenOptions {
     // afterwards would leave a small window with process-default permissions.
     options.mode(PRIVATE_FILE_MODE);
     options
+}
+
+/// Build a `JottraceError::Io` for a filesystem operation that failed at `path`.
+/// Mirrors `storage::sqlite_error` so the pervasive
+/// `.map_err(|source| io_error(path, source))` idiom stays uniform across the
+/// crate instead of repeating the struct literal at every call site.
+pub(crate) fn io_error(path: &Path, source: io::Error) -> JottraceError {
+    JottraceError::Io {
+        path: path.to_path_buf(),
+        source,
+    }
 }
 
 fn lock_token() -> String {
