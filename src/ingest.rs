@@ -1559,7 +1559,7 @@ fn opencode_session_event(
                         rank: 0,
                         id: event_id,
                         ts: event_ts,
-                        payload: serde_json::to_vec(&payload).expect("serialize OpenCode payload"),
+                        payload: serialize_payload(&payload),
                     },
                     metadata,
                     source_metadata,
@@ -1623,7 +1623,7 @@ fn opencode_row_events(
                 rank: table.rank(),
                 id: event_id,
                 ts: event_ts,
-                payload: serde_json::to_vec(&payload).expect("serialize OpenCode payload"),
+                payload: serialize_payload(&payload),
             })
         })
         .map_err(|source| opencode_sqlite_error(&source_file.path, source))?;
@@ -1736,7 +1736,7 @@ fn hermes_session_event(
                         rank: 0,
                         id: source_file.source_session_id.clone(),
                         ts: metadata.started_at.clone(),
-                        payload: serde_json::to_vec(&payload).expect("serialize Hermes payload"),
+                        payload: serialize_payload(&payload),
                     },
                     metadata,
                     source_metadata,
@@ -1805,7 +1805,7 @@ fn hermes_message_events(conn: &Connection, source_file: &SourceFile) -> Result<
                 rank: 1,
                 id: format!("{id:020}"),
                 ts: event_ts,
-                payload: serde_json::to_vec(&payload).expect("serialize Hermes payload"),
+                payload: serialize_payload(&payload),
             })
         })
         .map_err(|source| hermes_sqlite_error(&source_file.path, source))?;
@@ -1818,6 +1818,10 @@ fn json_text_column(value: Option<String>) -> serde_json::Value {
     value.map_or(serde_json::Value::Null, |value| {
         serde_json::from_str(&value).unwrap_or(serde_json::Value::String(value))
     })
+}
+
+fn serialize_payload(payload: &serde_json::Value) -> Vec<u8> {
+    serde_json::to_vec(payload).expect("serialize source payload")
 }
 
 fn source_events_fingerprint(events: &[SourceEvent]) -> String {
