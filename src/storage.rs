@@ -134,12 +134,7 @@ pub fn decode_event_payload(payload: &[u8], codec: &str) -> Result<Vec<u8>> {
         return Ok(payload.to_vec());
     }
     if codec == ZSTD_CODEC {
-        return zstd::stream::decode_all(payload).map_err(|source| {
-            JottraceError::EventPayloadCodec {
-                codec: ZSTD_CODEC.to_string(),
-                source,
-            }
-        });
+        return zstd::stream::decode_all(payload).map_err(zstd_codec_error);
     }
 
     Err(unsupported_event_payload_codec(codec))
@@ -154,20 +149,12 @@ pub(crate) fn decode_event_payload_prefix(
         return Ok(payload[..payload.len().min(byte_limit)].to_vec());
     }
     if codec == ZSTD_CODEC {
-        let decoder = zstd::stream::read::Decoder::new(payload).map_err(|source| {
-            JottraceError::EventPayloadCodec {
-                codec: ZSTD_CODEC.to_string(),
-                source,
-            }
-        })?;
+        let decoder = zstd::stream::read::Decoder::new(payload).map_err(zstd_codec_error)?;
         let mut decoder = decoder.take(byte_limit as u64);
         let mut decoded = Vec::with_capacity(byte_limit);
         decoder
             .read_to_end(&mut decoded)
-            .map_err(|source| JottraceError::EventPayloadCodec {
-                codec: ZSTD_CODEC.to_string(),
-                source,
-            })?;
+            .map_err(zstd_codec_error)?;
         return Ok(decoded);
     }
 
@@ -179,12 +166,7 @@ pub(crate) fn encode_event_payload(payload: &[u8]) -> Result<EncodedEventPayload
         return Ok(raw_event_payload(payload));
     }
 
-    let compressed = zstd::stream::encode_all(payload, 0).map_err(|source| {
-        JottraceError::EventPayloadCodec {
-            codec: ZSTD_CODEC.to_string(),
-            source,
-        }
-    })?;
+    let compressed = zstd::stream::encode_all(payload, 0).map_err(zstd_codec_error)?;
     if compressed.len() < payload.len() {
         return Ok(EncodedEventPayload {
             payload: compressed,
@@ -458,6 +440,13 @@ fn selected_event_upper_bound(
 fn unsupported_event_payload_codec(codec: &str) -> JottraceError {
     JottraceError::UnsupportedEventPayloadCodec {
         codec: codec.to_string(),
+    }
+}
+
+fn zstd_codec_error(source: std::io::Error) -> JottraceError {
+    JottraceError::EventPayloadCodec {
+        codec: ZSTD_CODEC.to_string(),
+        source,
     }
 }
 
