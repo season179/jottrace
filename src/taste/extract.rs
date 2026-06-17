@@ -1,4 +1,4 @@
-use rusqlite::{Connection, Transaction, params};
+use rusqlite::{Connection, OptionalExtension, Transaction, params};
 use std::path::{Path, PathBuf};
 
 use crate::JottraceError;
@@ -77,12 +77,15 @@ pub fn taste_extract_for_data_dir(
     };
 
     for target in targets {
-        if !options.force && !session_needs_extract(&db_path, &conn, &target.source_session_id)? {
+        if !options.force
+            && !session_needs_extract(&db_path, &conn, target.db_id, &target.source_session_id)?
+        {
             report.sessions_skipped += 1;
             continue;
         }
 
         let children = list_child_sessions(&db_path, &conn, target.db_id)?;
+        let merged_event_count = count_merged_session_events(&db_path, &conn, target.db_id)?;
         let events = load_merged_session_events(&db_path, &target, &children)?;
         let cwd = target.cwd.as_deref();
 
@@ -120,6 +123,13 @@ pub fn taste_extract_for_data_dir(
                 CLAUDE_SOURCE,
                 &target.source_session_id,
                 &examples,
+            )?;
+            replace_taste_extraction_meta(
+                &db_path,
+                &tx,
+                CLAUDE_SOURCE,
+                &target.source_session_id,
+                merged_event_count,
             )?;
             commit_transaction(&db_path, tx)?;
         }
@@ -205,6 +215,7 @@ fn list_child_sessions(
 fn session_needs_extract(
     db_path: &Path,
     conn: &Connection,
+    parent_db_id: i64,
     source_session_id: &str,
 ) -> Result<bool> {
     let total: i64 = conn
@@ -231,7 +242,83 @@ fn session_needs_extract(
             |row| row.get(0),
         )
         .map_err(|source| sqlite_error(db_path, source))?;
-    Ok(stale > 0)
+    if stale > 0 {
+        return Ok(true);
+    }
+
+    let current_event_count = count_merged_session_events(db_path, conn, parent_db_id)?;
+    let stored = conn
+        .query_row(
+            "SELECT extractor_version, event_count
+             FROM taste_extractions
+             WHERE source = ?1 AND source_session_id = ?2",
+            params![CLAUDE_SOURCE, source_session_id],
+            |row| Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?)),
+        )
+        .optional()
+        .map_err(|source| sqlite_error(db_path, source))?;
+
+    Ok(match stored {
+        None => true,
+        Some((version, event_count)) => {
+            version != EXTRACTOR_VERSION
+                || u64::try_from(event_count).expect("event_count fits in u64")
+                    != current_event_count
+        }
+    })
+}
+
+fn count_merged_session_events(
+    db_path: &Path,
+    conn: &Connection,
+    parent_db_id: i64,
+) -> Result<u64> {
+    let parent_count: i64 = conn
+        .query_row(
+            "SELECT event_count FROM sessions WHERE id = ?1",
+            params![parent_db_id],
+            |row| row.get(0),
+        )
+        .map_err(|source| sqlite_error(db_path, source))?;
+
+    let child_count: i64 = conn
+        .query_row(
+            "SELECT COALESCE(SUM(event_count), 0)
+             FROM sessions
+             WHERE source = ?1 AND parent_session_id = ?2",
+            params![CLAUDE_SOURCE, parent_db_id],
+            |row| row.get(0),
+        )
+        .map_err(|source| sqlite_error(db_path, source))?;
+
+    let total = parent_count
+        .checked_add(child_count)
+        .expect("merged session event count fits in i64");
+    Ok(u64::try_from(total).expect("merged session event count fits in u64"))
+}
+
+fn replace_taste_extraction_meta(
+    db_path: &Path,
+    conn: &Connection,
+    source: &str,
+    source_session_id: &str,
+    event_count: u64,
+) -> Result<()> {
+    conn.execute(
+        "INSERT INTO taste_extractions (source, source_session_id, extractor_version, event_count)
+         VALUES (?1, ?2, ?3, ?4)
+         ON CONFLICT (source, source_session_id) DO UPDATE SET
+             extractor_version = excluded.extractor_version,
+             event_count = excluded.event_count",
+        params![
+            source,
+            source_session_id,
+            EXTRACTOR_VERSION,
+            i64::try_from(event_count).expect("event_count fits in i64"),
+        ],
+    )
+    .map_err(|source| sqlite_error(db_path, source))?;
+    Ok(())
 }
 
 fn load_merged_session_events(

@@ -6,7 +6,7 @@ use std::time::Duration;
 use crate::{JottraceError, Result, data_dir_from_env, ensure_private_file};
 
 pub const DB_FILE_NAME: &str = "db.sqlite";
-pub const LATEST_SCHEMA_VERSION: i64 = 12;
+pub const LATEST_SCHEMA_VERSION: i64 = 13;
 pub(crate) const RAW_CODEC: &str = "raw";
 pub(crate) const ZSTD_CODEC: &str = "zstd";
 /// Minimum source payload size considered for zstd. Keeping this named makes
@@ -61,6 +61,10 @@ const MIGRATIONS: &[Migration] = &[
     Migration {
         version: 12,
         sql: include_str!("migrations/012_preference_examples_mcp_evidence.sql"),
+    },
+    Migration {
+        version: 13,
+        sql: include_str!("migrations/013_taste_extractions.sql"),
     },
 ];
 const UNRESOLVED_INGEST_ERROR_COUNT_SQL: &str =
@@ -962,6 +966,38 @@ mod tests {
             [],
         )
         .expect("insert mcp_correlation row");
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn migrates_v12_database_to_add_taste_extractions_table() {
+        let root = temp_root("storage-upgrade-v12-taste-extractions");
+        let db_path = root.join(DB_FILE_NAME);
+        ensure_private_file(&db_path).expect("create db file");
+
+        {
+            let conn = Connection::open(&db_path).expect("open v12 db");
+            apply_migrations_through(&conn, 12);
+            assert!(!sql_object_exists(&conn, "table", "taste_extractions"));
+            conn.pragma_update(None, "user_version", 12)
+                .expect("set user_version");
+        }
+
+        let conn = open_database(&db_path).expect("migrate db");
+
+        assert_eq!(
+            user_version(&db_path, &conn).expect("user_version"),
+            LATEST_SCHEMA_VERSION
+        );
+        assert_sql_object(&conn, "table", "taste_extractions");
+
+        conn.execute(
+            "INSERT INTO taste_extractions (source, source_session_id, extractor_version, event_count)
+             VALUES ('claude_cli', 'sess', '0.1.6', 42)",
+            [],
+        )
+        .expect("insert taste extraction row");
 
         let _ = fs::remove_dir_all(root);
     }

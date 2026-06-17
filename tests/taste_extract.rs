@@ -187,6 +187,52 @@ fn taste_extract_skips_sessions_already_at_current_extractor_version() {
 }
 
 #[test]
+fn taste_extract_reprocesses_session_when_merged_event_count_changes() {
+    let root = common::temp_root("taste-extract-event-change");
+    let data_dir = root.join(".jottrace");
+    install_taste_claude_fixture(&root);
+    run_ingest_with_home(&root, &data_dir);
+
+    let first = run_extract(
+        &root,
+        &data_dir,
+        TasteExtractOptions {
+            source_session_id: Some(TASTE_SESSION_ID.to_string()),
+            ..TasteExtractOptions::default()
+        },
+    );
+    assert!(first.contains("sessions_processed=1"));
+
+    let conn = open_database(&data_dir.join(DB_FILE_NAME)).expect("open db");
+    let session_db_id: i64 = conn
+        .query_row(
+            "SELECT id FROM sessions WHERE source = 'claude_cli' AND source_session_id = ?1",
+            params![TASTE_SESSION_ID],
+            |row| row.get(0),
+        )
+        .expect("parent session id");
+    conn.execute(
+        "UPDATE sessions SET event_count = event_count + 1 WHERE id = ?1",
+        params![session_db_id],
+    )
+    .expect("bump event_count");
+
+    let second = run_extract(
+        &root,
+        &data_dir,
+        TasteExtractOptions {
+            source_session_id: Some(TASTE_SESSION_ID.to_string()),
+            ..TasteExtractOptions::default()
+        },
+    );
+    assert!(
+        second.contains("sessions_processed=1"),
+        "expected re-extract after event count change, got: {second}"
+    );
+    assert!(second.contains("sessions_skipped=0"));
+}
+
+#[test]
 fn taste_extract_cli_reports_counts_for_fixture_session() {
     let root = common::temp_root("taste-extract-cli");
     let data_dir = root.join(".jottrace");
