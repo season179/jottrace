@@ -320,3 +320,62 @@ fn taste_extraction_plan_implementation_complete() {
     assert_eq!(jottrace::taste::EXTRACTOR_VERSION, "0.1.11");
     assert_eq!(jottrace::taste::HIGH_CONFIDENCE_THRESHOLD, 1.0);
 }
+
+#[test]
+fn taste_extraction_documentation_complete() {
+    let design = fs::read_to_string("docs/design.md").expect("read design.md");
+    for required in [
+        "## Taste extraction",
+        "jottrace taste",
+        "file_timelines",
+        "preference_examples",
+        "taste_extractions",
+        "notes/taste-extraction-plan.md",
+    ] {
+        assert!(
+            design.contains(required),
+            "docs/design.md should document taste extraction via {required}"
+        );
+    }
+
+    let processor =
+        fs::read_to_string("docs/processor-design.md").expect("read processor-design.md");
+    for required in [
+        "Relationship to taste extraction",
+        "jottrace taste",
+        "src/taste/parse.rs",
+        "notes/taste-extraction-plan.md",
+    ] {
+        assert!(
+            processor.contains(required),
+            "docs/processor-design.md should document taste extraction via {required}"
+        );
+    }
+
+    let readme = fs::read_to_string("README.md").expect("read README.md");
+    for required in [
+        "## Taste Extraction",
+        "jottrace taste extract",
+        "jottrace taste status",
+        "jottrace taste export",
+    ] {
+        assert!(
+            readme.contains(required),
+            "README.md should document taste extraction via {required}"
+        );
+    }
+
+    let changelog = fs::read_to_string("CHANGELOG.md").expect("read CHANGELOG.md");
+    for required in [
+        "## v26.7.0",
+        "jottrace taste",
+        "file_timelines",
+        "preference_examples",
+        "taste_extractions",
+    ] {
+        assert!(
+            changelog.contains(required),
+            "CHANGELOG.md should document taste extraction release via {required}"
+        );
+    }
+}
