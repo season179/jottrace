@@ -6,7 +6,7 @@ use crate::storage::{
     execute_sql, for_each_decoded_event_payload_for_session, map_sqlite_error, query_collect,
     query_one, query_optional,
 };
-use crate::{Result, data_dir_from_env, open_locked_database};
+use crate::{Result, data_dir_from_env, open_locked_database, session_not_found};
 
 use super::compiler::{EXTRACTOR_VERSION, PreferenceCompiler, replace_session_preference_examples};
 use super::parse::{SourceStream, merge_streams, parse_jsonl};
@@ -170,10 +170,7 @@ fn list_parent_claude_sessions(
     if let Some(requested) = source_session_id
         && rows.is_empty()
     {
-        return Err(JottraceError::SessionNotFound {
-            source: CLAUDE_SOURCE.to_string(),
-            source_session_id: requested.to_string(),
-        });
+        return Err(session_not_found(CLAUDE_SOURCE, requested));
     }
 
     Ok(rows)

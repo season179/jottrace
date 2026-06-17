@@ -740,6 +740,17 @@ pub(crate) fn unsupported_schema_version(
     }
 }
 
+/// Build a `JottraceError::SessionNotFound` for the session identified by
+/// `source` and `source_session_id`. Mirrors `io_error` so the not-found guard
+/// stays uniform across the storage reader, `taste show`, and `taste extract`
+/// instead of repeating the struct literal at every call site.
+pub(crate) fn session_not_found(source: &str, source_session_id: &str) -> JottraceError {
+    JottraceError::SessionNotFound {
+        source: source.to_string(),
+        source_session_id: source_session_id.to_string(),
+    }
+}
+
 fn lock_token() -> String {
     let started_at = SystemTime::now()
         .duration_since(UNIX_EPOCH)

@@ -4,7 +4,8 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use crate::{
-    JottraceError, Result, data_dir_from_env, ensure_private_file, unsupported_schema_version,
+    JottraceError, Result, data_dir_from_env, ensure_private_file, session_not_found,
+    unsupported_schema_version,
 };
 
 pub const DB_FILE_NAME: &str = "db.sqlite";
@@ -298,13 +299,8 @@ pub fn for_each_decoded_event_payload_for_session(
     visit: impl FnMut(&[u8]) -> Result<()>,
 ) -> Result<()> {
     let conn = open_database(path)?;
-    let session_id =
-        event_session_id(path, &conn, source, source_session_id)?.ok_or_else(|| {
-            JottraceError::SessionNotFound {
-                source: source.to_string(),
-                source_session_id: source_session_id.to_string(),
-            }
-        })?;
+    let session_id = event_session_id(path, &conn, source, source_session_id)?
+        .ok_or_else(|| session_not_found(source, source_session_id))?;
     for_each_decoded_event_payload_from_connection(path, &conn, session_id, limit, visit)
 }
 

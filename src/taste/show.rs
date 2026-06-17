@@ -3,7 +3,7 @@ use std::path::{Path, PathBuf};
 
 use crate::JottraceError;
 use crate::storage::{query_collect, sqlite_error};
-use crate::{Result, data_dir_from_env, open_locked_database};
+use crate::{Result, data_dir_from_env, open_locked_database, session_not_found};
 
 use super::compiler::PreferenceExample;
 use super::timeline::{FileTimelineRow, TimelineSourceKind, normalize_file_path};
@@ -134,10 +134,7 @@ fn lookup_session_cwd(
         |row| row.get(0),
     )
     .map_err(|source| match source {
-        rusqlite::Error::QueryReturnedNoRows => JottraceError::SessionNotFound {
-            source: CLAUDE_SOURCE.to_string(),
-            source_session_id: source_session_id.to_string(),
-        },
+        rusqlite::Error::QueryReturnedNoRows => session_not_found(CLAUDE_SOURCE, source_session_id),
         source => sqlite_error(db_path, source),
     })
 }
