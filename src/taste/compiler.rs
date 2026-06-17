@@ -465,19 +465,20 @@ fn post_apply_content(
         .and_then(|row| row.content.clone())
 }
 
+fn content_has_line(content: &str, line: &str) -> bool {
+    content.lines().any(|content_line| content_line == line)
+}
+
 fn effect_present(before: &str, after: &str, final_content: &str) -> bool {
     let added = line_delta(before, after);
     let removed = line_delta(after, before);
 
-    added.iter().all(|line| {
-        final_content
-            .lines()
-            .any(|final_line| final_line == line.as_str())
-    }) && removed.iter().all(|line| {
-        !final_content
-            .lines()
-            .any(|final_line| final_line == line.as_str())
-    })
+    added
+        .iter()
+        .all(|line| content_has_line(final_content, line))
+        && removed
+            .iter()
+            .all(|line| !content_has_line(final_content, line))
 }
 
 fn partial_effect_present(before: &str, after: &str, final_content: &str) -> bool {
@@ -487,11 +488,7 @@ fn partial_effect_present(before: &str, after: &str, final_content: &str) -> boo
     }
     let preserved = added
         .iter()
-        .filter(|line| {
-            final_content
-                .lines()
-                .any(|final_line| final_line == line.as_str())
-        })
+        .filter(|line| content_has_line(final_content, line))
         .count();
     preserved > 0 && preserved < added.len()
 }

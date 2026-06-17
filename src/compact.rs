@@ -2,7 +2,7 @@ use rusqlite::{Connection, params};
 use std::path::PathBuf;
 
 use crate::storage::{
-    DB_FILE_NAME, RAW_CODEC, ZSTD_CODEC, ZSTD_MIN_PAYLOAD_BYTES, decode_event_payload,
+    DB_FILE_NAME, RAW_CODEC, ZSTD_CODEC, ZSTD_MIN_PAYLOAD_BYTES, count, decode_event_payload,
     encode_event_payload, open_database, query_one, row_value, sqlite_error,
     unresolved_ingest_error_count_from_connection,
 };
@@ -434,7 +434,7 @@ fn raw_event_batch(
 }
 
 fn count_small_raw_events(path: &std::path::Path, conn: &Connection) -> Result<u64> {
-    let count: i64 = query_one(
+    count(
         path,
         conn,
         "SELECT COUNT(*)
@@ -442,9 +442,7 @@ fn count_small_raw_events(path: &std::path::Path, conn: &Connection) -> Result<u
              WHERE codec = ?1
                AND payload_size < ?2",
         params![RAW_CODEC, ZSTD_MIN_PAYLOAD_BYTES as i64],
-        |row| row.get(0),
-    )?;
-    Ok(count as u64)
+    )
 }
 
 fn event_storage_stats(path: &std::path::Path, conn: &Connection) -> Result<EventStorageStats> {
