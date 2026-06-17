@@ -218,6 +218,48 @@ fn taste_export_cli_writes_jsonl_to_stdout() {
 }
 
 #[test]
+fn taste_export_cli_writes_jsonl_to_file() {
+    let root = common::temp_root("taste-export-cli-out");
+    let data_dir = root.join(".jottrace");
+    let out_path = root.join("preferences.jsonl");
+    install_taste_claude_fixture(&root);
+    run_ingest_with_home(&root, &data_dir);
+    run_extract(&root, &data_dir);
+
+    let output = Command::new(binary())
+        .args([
+            "taste",
+            "export",
+            "--format",
+            "jsonl",
+            "--out",
+            out_path.to_str().expect("utf-8 out path"),
+        ])
+        .env("HOME", root.as_ref())
+        .env("JOTTRACE_HOME", &data_dir)
+        .output()
+        .expect("run jottrace taste export --out");
+
+    assert!(
+        output.status.success(),
+        "stdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        output.stdout.is_empty(),
+        "file export should not write stdout"
+    );
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("rows_exported: 13"));
+
+    let content = fs::read_to_string(&out_path).expect("read export file");
+    let rows = parse_jsonl(&content);
+    assert_eq!(rows.len(), 13);
+}
+
+#[test]
 fn taste_export_returns_empty_file_before_extract() {
     let root = common::temp_root("taste-export-empty");
     let data_dir = root.join(".jottrace");

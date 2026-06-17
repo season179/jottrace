@@ -376,13 +376,7 @@ fn taste_extract_cli_force_reprocesses_up_to_date_session() {
     assert!(skipped_stdout.contains("sessions_skipped: 1"));
 
     let forced = Command::new(binary())
-        .args([
-            "taste",
-            "extract",
-            "--session",
-            TASTE_SESSION_ID,
-            "--force",
-        ])
+        .args(["taste", "extract", "--session", TASTE_SESSION_ID, "--force"])
         .env("HOME", root.as_ref())
         .env("JOTTRACE_HOME", &data_dir)
         .output()
