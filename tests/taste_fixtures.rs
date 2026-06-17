@@ -605,3 +605,97 @@ fn taste_extraction_plan_corrections_complete() {
         );
     }
 }
+
+#[test]
+fn taste_extraction_architecture_complete() {
+    let plan =
+        fs::read_to_string("notes/taste-extraction-plan.md").expect("read taste extraction plan");
+
+    for required in [
+        "## Architecture",
+        "Timeline-first",
+        "file_timelines",
+        "preference_examples",
+        "[Claude event parser]",
+        "[preference compiler:",
+        "`jottrace taste show timeline`",
+        "(context, chosen, rejected)",
+    ] {
+        assert!(
+            plan.contains(required),
+            "taste extraction plan should document architecture via {required}"
+        );
+    }
+
+    let migration_010 =
+        fs::read_to_string("src/migrations/010_taste_extraction.sql").expect("read migration 010");
+    for required in [
+        "source_session_id",
+        "file_path",
+        "seq",
+        "event_seq",
+        "content",
+        "trigger_event_ref",
+        "source_kind",
+        "inline_snapshot",
+        "sidecar_snapshot",
+        "missing_sidecar",
+    ] {
+        assert!(
+            migration_010.contains(required),
+            "file_timelines schema should match plan architecture via {required}"
+        );
+    }
+
+    let migration_011 = fs::read_to_string("src/migrations/011_preference_examples.sql")
+        .expect("read migration 011");
+    for required in [
+        "generation",
+        "proposal_event_seq",
+        "tool_use_id",
+        "proposal_content",
+        "context",
+        "outcome",
+        "confidence",
+        "evidence_kind",
+        "extractor_version",
+        "'accepted'",
+        "'rejected'",
+        "'edited'",
+    ] {
+        assert!(
+            migration_011.contains(required),
+            "preference_examples schema should match plan architecture via {required}"
+        );
+    }
+
+    let extract = fs::read_to_string("src/taste/extract.rs").expect("read extract module");
+    for required in [
+        "parse_jsonl",
+        "merge_streams",
+        "SnapshotSidecarResolver",
+        "FileTimelineMaterializer::materialize",
+        "PreferenceCompiler::compile",
+        "replace_session_file_timelines",
+        "replace_session_preference_examples",
+    ] {
+        assert!(
+            extract.contains(required),
+            "extract pipeline should wire architecture stages via {required}"
+        );
+    }
+
+    let export = fs::read_to_string("src/taste/export.rs").expect("read export module");
+    for required in ["context", "chosen", "rejected", "TasteExportRecord"] {
+        assert!(
+            export.contains(required),
+            "export should emit trainer-facing triples via {required}"
+        );
+    }
+
+    let show = fs::read_to_string("src/taste/show.rs").expect("read show module");
+    assert!(
+        show.contains("run_taste_show_timeline"),
+        "show module should expose inspectable file_timelines via run_taste_show_timeline"
+    );
+}
