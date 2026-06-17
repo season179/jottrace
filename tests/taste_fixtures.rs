@@ -470,6 +470,85 @@ fn taste_extraction_risk_coverage_complete() {
 }
 
 #[test]
+fn taste_extraction_locked_decisions_complete() {
+    let plan =
+        fs::read_to_string("notes/taste-extraction-plan.md").expect("read taste extraction plan");
+
+    for required in [
+        "**Source scope — Claude only.**",
+        "**Tool scope — complete coverage, not incremental.**",
+        "**Subagents — merged into the parent timeline.**",
+        "**Accept definition — present-at-session-end.**",
+        "**Privacy — not a concern for this user.**",
+        "**Execution model — separate command, materialized.**",
+    ] {
+        assert!(
+            plan.contains(required),
+            "taste extraction plan should document locked decision via {required}"
+        );
+    }
+
+    let extract = fs::read_to_string("src/taste/extract.rs").expect("read extract module");
+    for required in ["claude_cli", "list_parent_claude_sessions", "EXTRACTOR_VERSION"] {
+        assert!(
+            extract.contains(required),
+            "extract module should implement Claude-only materialized extraction via {required}"
+        );
+    }
+
+    let parse = fs::read_to_string("src/taste/parse.rs").expect("read parse module");
+    assert!(
+        parse.contains("merge_streams"),
+        "parse layer should merge subagent streams into parent timeline"
+    );
+
+    let compiler = fs::read_to_string("src/taste/compiler.rs").expect("read compiler module");
+    assert!(
+        compiler.contains("classify_present_at_session_end"),
+        "compiler should use present-at-session-end accept definition"
+    );
+
+    let export = fs::read_to_string("src/taste/export.rs").expect("read export module");
+    for required in ["proposal_content", "context"] {
+        assert!(
+            export.contains(required),
+            "export should emit full proposal/context content via {required}"
+        );
+    }
+
+    let session = taste_fixture(&format!(
+        "claude-cli/projects/-Users-fixture-Workspace-jottrace/{TASTE_SESSION_ID}.jsonl"
+    ));
+    let content = fs::read_to_string(&session).expect("read taste session fixture");
+
+    for required in [
+        "\"name\":\"Edit\"",
+        "\"name\":\"Write\"",
+        "\"name\":\"Bash\"",
+        "\"name\":\"NotebookEdit\"",
+        "\"name\":\"mcp_fixture_codedb_edit\"",
+        "taste_subagent.rs",
+        "fixture-subagent1@v1",
+    ] {
+        assert!(
+            content.contains(required),
+            "taste fixture should cover complete tool scope via {required}"
+        );
+    }
+
+    let migration_010 =
+        fs::read_to_string("src/migrations/010_taste_extraction.sql").expect("read migration 010");
+    let migration_011 = fs::read_to_string("src/migrations/011_preference_examples.sql")
+        .expect("read migration 011");
+    for required in ["file_timelines", "preference_examples", "extractor_version"] {
+        assert!(
+            migration_010.contains(required) || migration_011.contains(required),
+            "migrations should materialize taste tables with {required}"
+        );
+    }
+}
+
+#[test]
 fn taste_extraction_plan_corrections_complete() {
     let plan =
         fs::read_to_string("notes/taste-extraction-plan.md").expect("read taste extraction plan");
