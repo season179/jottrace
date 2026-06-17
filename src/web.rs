@@ -680,30 +680,23 @@ fn journal_event_with_payload(
     payload_size: u64,
     payload: Vec<u8>,
 ) -> Result<JournalEvent> {
-    let payload_preview = match decode_event_payload_prefix(&payload, &codec, PAYLOAD_PREVIEW_BYTES)
-    {
-        Ok(decoded) => String::from_utf8_lossy(&decoded)
-            .chars()
-            .take(PAYLOAD_PREVIEW_CHARS)
-            .collect(),
-        Err(error) => {
-            return Ok(JournalEvent {
-                generation,
-                seq,
-                ts,
-                payload_preview: String::new(),
-                payload_error: Some(error.to_string()),
-                codec,
-                payload_size,
-            });
-        }
-    };
+    let (payload_preview, payload_error) =
+        match decode_event_payload_prefix(&payload, &codec, PAYLOAD_PREVIEW_BYTES) {
+            Ok(decoded) => (
+                String::from_utf8_lossy(&decoded)
+                    .chars()
+                    .take(PAYLOAD_PREVIEW_CHARS)
+                    .collect(),
+                None,
+            ),
+            Err(error) => (String::new(), Some(error.to_string())),
+        };
     Ok(JournalEvent {
         generation,
         seq,
         ts,
         payload_preview,
-        payload_error: None,
+        payload_error,
         codec,
         payload_size,
     })
