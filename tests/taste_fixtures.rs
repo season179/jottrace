@@ -2,6 +2,7 @@ mod common;
 
 use common::taste_fixture;
 use std::fs;
+use std::path::Path;
 
 const TASTE_SESSION_ID: &str = "00000000-0000-4000-8000-000000000031";
 
@@ -209,8 +210,8 @@ fn check_taste_file(path: &std::path::Path, markers: &[&str]) {
 
 #[test]
 fn taste_extraction_plan_documents_implemented_status_and_r3_exclusion() {
-    let plan = fs::read_to_string("notes/taste-extraction-plan.md")
-        .expect("read taste extraction plan");
+    let plan =
+        fs::read_to_string("notes/taste-extraction-plan.md").expect("read taste extraction plan");
 
     for required in [
         "Status: **IMPLEMENTED**",
@@ -240,4 +241,82 @@ fn command_code_taste_formula_links_to_jottrace_implementation() {
             "command code taste formula should link to jottrace implementation via {required}"
         );
     }
+}
+
+#[test]
+fn taste_extraction_plan_implementation_complete() {
+    for path in [
+        // Step 1 — fixture corpus
+        "tests/fixtures/taste/README.md",
+        // Step 2 — shared Claude parse layer
+        "src/taste/parse.rs",
+        "tests/taste_parse.rs",
+        // Step 3 — snapshot sidecar resolver
+        "src/taste/sidecar.rs",
+        "tests/taste_sidecar.rs",
+        // Step 4 — file_timelines materialization
+        "src/migrations/010_taste_extraction.sql",
+        "src/taste/timeline.rs",
+        "tests/taste_timeline.rs",
+        // Step 5 — preference compiler
+        "src/taste/compiler.rs",
+        "tests/taste_compiler.rs",
+        // Step 6 — preference_examples + CLI
+        "src/migrations/011_preference_examples.sql",
+        "tests/taste_preference_examples.rs",
+        "src/taste/extract.rs",
+        "src/taste/show.rs",
+        "src/taste/export.rs",
+        "tests/taste_extract.rs",
+        "tests/taste_show_timeline.rs",
+        "tests/taste_show_example.rs",
+        "tests/taste_export.rs",
+        // Step 7 — coverage report
+        "src/taste/status.rs",
+        "tests/taste_status.rs",
+        // Follow-on migrations
+        "src/migrations/012_preference_examples_mcp_evidence.sql",
+        "src/migrations/013_taste_extractions.sql",
+    ] {
+        assert!(Path::new(path).exists(), "plan artifact missing: {path}");
+    }
+
+    let migration_010 =
+        fs::read_to_string("src/migrations/010_taste_extraction.sql").expect("read migration 010");
+    assert!(
+        migration_010.contains("file_timelines"),
+        "migration 010 should define file_timelines"
+    );
+
+    let migration_011 = fs::read_to_string("src/migrations/011_preference_examples.sql")
+        .expect("read migration 011");
+    assert!(
+        migration_011.contains("preference_examples"),
+        "migration 011 should define preference_examples"
+    );
+
+    let migration_013 =
+        fs::read_to_string("src/migrations/013_taste_extractions.sql").expect("read migration 013");
+    assert!(
+        migration_013.contains("taste_extractions"),
+        "migration 013 should define taste_extractions"
+    );
+
+    let main_rs = fs::read_to_string("src/main.rs").expect("read main.rs");
+    for required in [
+        "jottrace taste extract",
+        "jottrace taste status",
+        "jottrace taste show timeline",
+        "jottrace taste show example",
+        "jottrace taste export",
+    ] {
+        assert!(
+            main_rs.contains(required),
+            "main.rs should document {required}"
+        );
+    }
+
+    assert_eq!(jottrace::storage::LATEST_SCHEMA_VERSION, 13);
+    assert_eq!(jottrace::taste::EXTRACTOR_VERSION, "0.1.11");
+    assert_eq!(jottrace::taste::HIGH_CONFIDENCE_THRESHOLD, 1.0);
 }
