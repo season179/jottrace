@@ -223,3 +223,21 @@ fn taste_extraction_plan_documents_implemented_status_and_r3_exclusion() {
         );
     }
 }
+
+#[test]
+fn command_code_taste_formula_links_to_jottrace_implementation() {
+    let formula = fs::read_to_string("notes/command-code-taste-formula.md")
+        .expect("read command code taste formula notes");
+
+    for required in [
+        "## Jottrace implementation",
+        "jottrace taste",
+        "notes/taste-extraction-plan.md",
+        "IMPLEMENTED",
+    ] {
+        assert!(
+            formula.contains(required),
+            "command code taste formula should link to jottrace implementation via {required}"
+        );
+    }
+}

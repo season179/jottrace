@@ -1,5 +1,34 @@
 # Changelog
 
+## v26.7.0 - 2026-06-17
+
+### Summary
+
+- Adds `jottrace taste` to extract labeled coding-preference examples from
+  preserved Claude sessions and export them as `(context, chosen, rejected)`
+  triples for external reward-model training. Changes since `v26.6.0`.
+
+### Changes
+
+- `jottrace taste extract [--session <id>] [--force]` materializes
+  `file_timelines` and `preference_examples` from Claude parent sessions
+  (including merged subagent sidechains). Resolves `file-history` snapshot
+  sidecars from `~/.claude/file-history/<session>/`. Skips sessions already
+  extracted at the current extractor version unless raw event counts change or
+  `--force` is set.
+- `jottrace taste status [--details]` reports sessions processed/pending,
+  proposals by outcome class, high-confidence coverage, and (with `--details`)
+  evidence-kind breakdown for low-confidence gaps.
+- `jottrace taste show timeline` and `jottrace taste show example` inspect
+  materialized per-file timelines and individual labeled preference rows.
+- `jottrace taste export --format jsonl [--out <path>]` emits export-ready
+  JSONL triples; stdout stays clean for piping when `--out` is used.
+- Migrations `010`–`013` add `file_timelines`, `preference_examples`,
+  `taste_extractions`, and MCP evidence-kind support. Present-at-session-end
+  outcome labeling covers Edit, Write, NotebookEdit, Bash, MCP file tools, and
+  subagent edits. Async Task `tasks/*.output` transcripts are explicitly out of
+  scope.
+
 ## v26.6.0 - 2026-06-17
 
 ### Summary
