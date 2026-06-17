@@ -2,11 +2,8 @@ use rusqlite::{Connection, OptionalExtension, Transaction, params};
 use std::path::{Path, PathBuf};
 
 use crate::JottraceError;
-use crate::storage::{
-    DB_FILE_NAME, for_each_decoded_event_payload_for_session, open_database, query_collect,
-    sqlite_error,
-};
-use crate::{Result, acquire_data_lock, data_dir_from_env};
+use crate::storage::{for_each_decoded_event_payload_for_session, query_collect, sqlite_error};
+use crate::{Result, data_dir_from_env, open_locked_database};
 
 use super::compiler::{EXTRACTOR_VERSION, PreferenceCompiler, replace_session_preference_examples};
 use super::parse::{SourceStream, merge_streams, parse_jsonl};
@@ -57,9 +54,7 @@ pub fn taste_extract_for_data_dir(
     data_dir: &Path,
     options: TasteExtractOptions,
 ) -> Result<TasteExtractReport> {
-    let db_path = data_dir.join(DB_FILE_NAME);
-    let _lock = acquire_data_lock(data_dir)?;
-    let mut conn = open_database(&db_path)?;
+    let (db_path, _lock, mut conn) = open_locked_database(data_dir)?;
 
     let resolver = match &options.sidecar_history_root {
         Some(root) => SnapshotSidecarResolver::with_history_root(root),

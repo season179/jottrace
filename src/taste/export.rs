@@ -3,9 +3,9 @@ use serde::Serialize;
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 
-use crate::storage::{DB_FILE_NAME, open_database, query_collect};
+use crate::storage::query_collect;
 use crate::{JottraceError, io_error};
-use crate::{Result, acquire_data_lock, data_dir_from_env, private_open_options};
+use crate::{Result, data_dir_from_env, open_locked_database, private_open_options};
 
 use super::compiler::{EvidenceKind, PreferenceExample, PreferenceOutcome};
 
@@ -75,9 +75,7 @@ pub fn taste_export_for_data_dir(
     data_dir: &Path,
     options: TasteExportOptions,
 ) -> Result<TasteExportReport> {
-    let db_path = data_dir.join(DB_FILE_NAME);
-    let _lock = acquire_data_lock(data_dir)?;
-    let conn = open_database(&db_path)?;
+    let (db_path, _lock, conn) = open_locked_database(data_dir)?;
     let examples = load_preference_examples(&db_path, &conn)?;
     let rows_exported = u64::try_from(examples.len()).expect("row count fits in u64");
     write_export(&examples, &options)?;

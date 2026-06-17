@@ -2,8 +2,8 @@ use rusqlite::{Connection, params};
 use std::path::{Path, PathBuf};
 
 use crate::JottraceError;
-use crate::storage::{DB_FILE_NAME, open_database, query_collect, sqlite_error};
-use crate::{Result, acquire_data_lock, data_dir_from_env};
+use crate::storage::{query_collect, sqlite_error};
+use crate::{Result, data_dir_from_env, open_locked_database};
 
 use super::compiler::{EvidenceKind, PreferenceExample, PreferenceOutcome};
 use super::timeline::{FileTimelineRow, TimelineSourceKind, normalize_file_path};
@@ -51,9 +51,7 @@ pub fn show_example_for_data_dir(
     data_dir: &Path,
     options: TasteShowExampleOptions,
 ) -> Result<TasteExampleShowReport> {
-    let db_path = data_dir.join(DB_FILE_NAME);
-    let _lock = acquire_data_lock(data_dir)?;
-    let conn = open_database(&db_path)?;
+    let (db_path, _lock, conn) = open_locked_database(data_dir)?;
     load_example(&db_path, &conn, options)
 }
 
@@ -70,9 +68,7 @@ pub fn show_timeline_for_data_dir(
     data_dir: &Path,
     options: TasteShowTimelineOptions,
 ) -> Result<TasteTimelineShowReport> {
-    let db_path = data_dir.join(DB_FILE_NAME);
-    let _lock = acquire_data_lock(data_dir)?;
-    let conn = open_database(&db_path)?;
+    let (db_path, _lock, conn) = open_locked_database(data_dir)?;
     load_timeline(&db_path, &conn, options)
 }
 

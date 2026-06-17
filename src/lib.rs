@@ -435,6 +435,21 @@ pub(crate) fn acquire_data_lock(data_dir: &Path) -> Result<DataLock> {
     })
 }
 
+/// Acquire the data lock and open the journal database under `data_dir`.
+///
+/// Returns the database path, the held [`DataLock`] (bind it to a live name so
+/// the lock is released only when the caller's scope ends), and an open
+/// connection, bundling the `join(DB_FILE_NAME)` + [`acquire_data_lock`] +
+/// [`storage::open_database`] prologue shared by the locked journal commands.
+pub(crate) fn open_locked_database(
+    data_dir: &Path,
+) -> Result<(PathBuf, DataLock, rusqlite::Connection)> {
+    let db_path = data_dir.join(storage::DB_FILE_NAME);
+    let lock = acquire_data_lock(data_dir)?;
+    let conn = storage::open_database(&db_path)?;
+    Ok((db_path, lock, conn))
+}
+
 fn acquire_process_data_lock(path: &Path) -> Result<ProcessDataLock> {
     // `flock` behavior for duplicate locks inside one process varies by
     // platform and kernel. Track the path in-process too, preserving the old

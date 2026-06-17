@@ -1,8 +1,8 @@
 use rusqlite::{Connection, params};
 use std::path::{Path, PathBuf};
 
-use crate::storage::{DB_FILE_NAME, open_database, sqlite_error};
-use crate::{Result, acquire_data_lock, data_dir_from_env};
+use crate::storage::sqlite_error;
+use crate::{Result, data_dir_from_env, open_locked_database};
 
 use super::compiler::{EXTRACTOR_VERSION, HIGH_CONFIDENCE_THRESHOLD};
 use super::extract::session_extract_is_up_to_date;
@@ -52,9 +52,7 @@ pub fn run_taste_status() -> Result<TasteStatusReport> {
 
 /// Report taste extraction counts for a specific journal directory (tests).
 pub fn taste_status_for_data_dir(data_dir: &Path) -> Result<TasteStatusReport> {
-    let db_path = data_dir.join(DB_FILE_NAME);
-    let _lock = acquire_data_lock(data_dir)?;
-    let conn = open_database(&db_path)?;
+    let (db_path, _lock, conn) = open_locked_database(data_dir)?;
     taste_status_from_connection(&db_path, &conn)
 }
 
