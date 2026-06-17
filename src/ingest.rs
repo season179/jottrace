@@ -2744,8 +2744,7 @@ fn claude_local_agent_metadata(metadata_path: Option<&Path>) -> Result<ParsedMet
             return Err(io_error(path, source));
         }
     };
-    let metadata = serde_json::from_slice::<ClaudeLocalAgentMetadata<'_>>(&bytes)
-        .map_err(|source| invalid_session_meta(path, source.to_string()))?;
+    let metadata = parse_session_json::<ClaudeLocalAgentMetadata<'_>>(path, &bytes)?;
     let started_at = claude_local_agent_metadata_timestamp(path, "createdAt", metadata.started_at)?;
     let ended_at =
         claude_local_agent_metadata_timestamp(path, "lastActivityAt", metadata.ended_at)?;
@@ -2875,8 +2874,7 @@ fn claude_local_agent_source_session_id_from_file(path: &Path) -> Result<String>
     else {
         return claude_local_agent_fallback_source_session_id(path);
     };
-    let header = serde_json::from_slice::<ClaudeLocalAgentAuditHeader<'_>>(&first_line)
-        .map_err(|source| invalid_session_meta(path, source.to_string()))?;
+    let header = parse_session_json::<ClaudeLocalAgentAuditHeader<'_>>(path, &first_line)?;
 
     header
         .session_id
@@ -2898,8 +2896,7 @@ fn codex_source_session_id_from_file(path: &Path) -> Result<String> {
         )
     })?;
 
-    let header = serde_json::from_slice::<EventHeader<'_>>(&first_line)
-        .map_err(|source| invalid_session_meta(path, source.to_string()))?;
+    let header = parse_session_json::<EventHeader<'_>>(path, &first_line)?;
     if header.event_type != Some("session_meta") {
         if header.event_type.is_none()
             && let Ok(legacy_header) = serde_json::from_slice::<LegacyCodexHeader<'_>>(&first_line)
@@ -2928,8 +2925,7 @@ fn factory_source_session_id_from_file(path: &Path) -> Result<String> {
         FACTORY_SESSION_START_MISSING_MESSAGE,
     )?
     .ok_or_else(|| invalid_session_meta(path, FACTORY_SESSION_START_MISSING_MESSAGE))?;
-    let header = serde_json::from_slice::<EventHeader<'_>>(&first_line)
-        .map_err(|source| invalid_session_meta(path, source.to_string()))?;
+    let header = parse_session_json::<EventHeader<'_>>(path, &first_line)?;
     if header.event_type != Some("session_start") {
         return Err(invalid_session_meta(
             path,
@@ -2999,8 +2995,7 @@ fn claude_local_agent_metadata_path(path: &Path) -> Option<PathBuf> {
 }
 
 fn gemini_source_session_id_from_buffer(path: &Path, buffer: &[u8]) -> Result<String> {
-    let identity = serde_json::from_slice::<GeminiChatIdentity<'_>>(buffer)
-        .map_err(|source| invalid_session_meta(path, source.to_string()))?;
+    let identity = parse_session_json::<GeminiChatIdentity<'_>>(path, buffer)?;
     if identity.session_id.trim().is_empty() {
         return Err(invalid_session_meta(
             path,
@@ -3011,8 +3006,7 @@ fn gemini_source_session_id_from_buffer(path: &Path, buffer: &[u8]) -> Result<St
 }
 
 fn gemini_chat_from_buffer<'a>(path: &Path, buffer: &'a [u8]) -> Result<GeminiChatFile<'a>> {
-    let chat = serde_json::from_slice::<GeminiChatFile<'a>>(buffer)
-        .map_err(|source| invalid_session_meta(path, source.to_string()))?;
+    let chat = parse_session_json::<GeminiChatFile<'a>>(path, buffer)?;
     if chat.session_id.trim().is_empty() {
         return Err(invalid_session_meta(
             path,
@@ -3101,8 +3095,7 @@ fn pi_agent_source_session_id_from_file(path: &Path) -> Result<String> {
         PI_AGENT_SESSION_HEADER_MISSING_MESSAGE,
     )?
     .ok_or_else(|| invalid_session_meta(path, PI_AGENT_SESSION_HEADER_MISSING_MESSAGE))?;
-    let header = serde_json::from_slice::<EventHeader<'_>>(&first_line)
-        .map_err(|source| invalid_session_meta(path, source.to_string()))?;
+    let header = parse_session_json::<EventHeader<'_>>(path, &first_line)?;
     if header.event_type != Some("session") {
         return Err(invalid_session_meta(
             path,
@@ -3210,6 +3203,14 @@ fn invalid_session_meta(path: &Path, message: impl Into<String>) -> JottraceErro
         path: path.to_path_buf(),
         message: message.into(),
     }
+}
+
+fn parse_session_json<'a, T>(path: &Path, bytes: &'a [u8]) -> Result<T>
+where
+    T: Deserialize<'a>,
+{
+    serde_json::from_slice::<T>(bytes)
+        .map_err(|source| invalid_session_meta(path, source.to_string()))
 }
 
 #[cfg(test)]
