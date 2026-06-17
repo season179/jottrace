@@ -99,6 +99,8 @@ fn compiler_labels_fixture_proposals_with_present_at_session_end_outcomes() {
         "toolu_taste_sub_edit",
         "toolu_taste_notebook_edit",
         "toolu_taste_mcp_edit",
+        "toolu_taste_edit_partial",
+        "toolu_taste_edit_partial_fix",
     ] {
         assert!(
             by_tool.contains_key(required),
@@ -167,6 +169,27 @@ fn compiler_labels_fixture_proposals_with_present_at_session_end_outcomes() {
             .as_deref()
             .is_some_and(|content| content.contains("mcp_marker"))
     );
+
+    let partial = example_by_tool(&examples, "toolu_taste_edit_partial");
+    assert_eq!(partial.file_path.as_deref(), Some("src/taste_partial.rs"));
+    assert_eq!(partial.outcome, PreferenceOutcome::Edited);
+    assert_eq!(partial.evidence_kind, EvidenceKind::DirectEdit);
+    assert_eq!(partial.confidence, 0.5);
+    assert!(
+        partial
+            .proposal_content
+            .as_deref()
+            .is_some_and(|content| content.contains("partial_drop"))
+    );
+
+    let partial_fix = example_by_tool(&examples, "toolu_taste_edit_partial_fix");
+    assert_eq!(
+        partial_fix.file_path.as_deref(),
+        Some("src/taste_partial.rs")
+    );
+    assert_eq!(partial_fix.outcome, PreferenceOutcome::Accepted);
+    assert_eq!(partial_fix.evidence_kind, EvidenceKind::DirectEdit);
+    assert_eq!(partial_fix.confidence, 1.0);
 }
 
 #[test]

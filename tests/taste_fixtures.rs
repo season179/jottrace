@@ -26,6 +26,8 @@ fn taste_fixture_corpus_has_required_session_shapes() {
         "new_string was NOT written",
         "toolu_taste_edit_revert",
         "toolu_taste_notebook_edit",
+        "toolu_taste_edit_partial",
+        "partial_drop",
         "notebook_marker",
     ] {
         assert!(

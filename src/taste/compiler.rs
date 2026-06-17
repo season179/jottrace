@@ -10,7 +10,7 @@ use super::parse::{ContentRef, ParseKind, ParsedEvent};
 use super::timeline::{FileTimelineRow, normalize_file_path};
 
 /// Version tag stored on compiled preference rows for idempotent re-extraction.
-pub const EXTRACTOR_VERSION: &str = "0.1.3";
+pub const EXTRACTOR_VERSION: &str = "0.1.4";
 
 /// Minimum confidence for a proposal to count toward high-confidence coverage.
 pub const HIGH_CONFIDENCE_THRESHOLD: f64 = 1.0;
@@ -236,8 +236,7 @@ pub fn replace_session_preference_examples(
 }
 
 fn is_file_modifying_tool(tool_name: &str) -> bool {
-    matches!(tool_name, "Edit" | "Write" | "NotebookEdit" | "Bash")
-        || tool_name.starts_with("mcp_")
+    matches!(tool_name, "Edit" | "Write" | "NotebookEdit" | "Bash") || tool_name.starts_with("mcp_")
 }
 
 fn content_ref_text(content_ref: &ContentRef) -> Option<String> {
@@ -511,6 +510,19 @@ mod tests {
         let after = "a\nb\nc\n";
         assert!(effect_present(before, after, "a\nb\nc\n"));
         assert!(!effect_present(before, after, "a\nb\n"));
+    }
+
+    #[test]
+    fn partial_effect_present_detects_partially_persisted_deltas() {
+        let before = "base\n";
+        let after = "base\nkeep\n drop\n";
+        assert!(partial_effect_present(before, after, "base\nkeep\n"));
+        assert!(!partial_effect_present(before, after, "base\n"));
+        assert!(!partial_effect_present(
+            before,
+            after,
+            "base\nkeep\n drop\n"
+        ));
     }
 
     #[test]

@@ -1,0 +1,3 @@
+// partial fixture baseline
+
+pub fn partial_keep() -> i32 { 1 }
