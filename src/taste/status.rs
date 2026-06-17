@@ -5,6 +5,7 @@ use crate::storage::{DB_FILE_NAME, open_database, sqlite_error};
 use crate::{Result, acquire_data_lock, data_dir_from_env};
 
 use super::compiler::{EXTRACTOR_VERSION, HIGH_CONFIDENCE_THRESHOLD};
+use super::extract::session_extract_is_up_to_date;
 
 const CLAUDE_SOURCE: &str = "claude_cli";
 
@@ -59,7 +60,7 @@ pub fn taste_status_for_data_dir(data_dir: &Path) -> Result<TasteStatusReport> {
 
 fn taste_status_from_connection(db_path: &Path, conn: &Connection) -> Result<TasteStatusReport> {
     let claude_parent_sessions = count_claude_parent_sessions(db_path, conn)?;
-    let sessions_processed = count_sessions_at_extractor_version(db_path, conn)?;
+    let sessions_processed = count_sessions_up_to_date(db_path, conn)?;
     let sessions_pending = claude_parent_sessions.saturating_sub(sessions_processed);
     let proposals = count_proposals(db_path, conn)?;
     let outcomes = count_outcomes(db_path, conn)?;
@@ -98,17 +99,32 @@ fn count_claude_parent_sessions(db_path: &Path, conn: &Connection) -> Result<u64
     Ok(u64::try_from(count).expect("session count fits in u64"))
 }
 
-fn count_sessions_at_extractor_version(db_path: &Path, conn: &Connection) -> Result<u64> {
-    let count: i64 = conn
-        .query_row(
-            "SELECT COUNT(DISTINCT source_session_id)
-             FROM preference_examples
-             WHERE source = ?1 AND extractor_version = ?2",
-            params![CLAUDE_SOURCE, EXTRACTOR_VERSION],
-            |row| row.get(0),
+fn count_sessions_up_to_date(db_path: &Path, conn: &Connection) -> Result<u64> {
+    let mut statement = conn
+        .prepare(
+            "SELECT id, source_session_id
+             FROM sessions
+             WHERE source = ?1 AND parent_session_id IS NULL
+             ORDER BY id",
         )
         .map_err(|source| sqlite_error(db_path, source))?;
-    Ok(u64::try_from(count).expect("processed session count fits in u64"))
+
+    let rows = statement
+        .query_map(params![CLAUDE_SOURCE], |row| {
+            Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?))
+        })
+        .map_err(|source| sqlite_error(db_path, source))?;
+
+    let mut count = 0u64;
+    for row in rows {
+        let (parent_db_id, source_session_id) =
+            row.map_err(|source| sqlite_error(db_path, source))?;
+        if session_extract_is_up_to_date(db_path, conn, parent_db_id, &source_session_id)? {
+            count += 1;
+        }
+    }
+
+    Ok(count)
 }
 
 fn count_proposals(db_path: &Path, conn: &Connection) -> Result<u64> {

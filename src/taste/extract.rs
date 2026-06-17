@@ -212,6 +212,21 @@ fn list_child_sessions(
         .map_err(|source| sqlite_error(db_path, source))
 }
 
+/// Whether a parent session's stored extraction matches the current extractor and event stream.
+pub(crate) fn session_extract_is_up_to_date(
+    db_path: &Path,
+    conn: &Connection,
+    parent_db_id: i64,
+    source_session_id: &str,
+) -> Result<bool> {
+    Ok(!session_needs_extract(
+        db_path,
+        conn,
+        parent_db_id,
+        source_session_id,
+    )?)
+}
+
 fn session_needs_extract(
     db_path: &Path,
     conn: &Connection,

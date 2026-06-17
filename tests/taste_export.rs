@@ -147,6 +147,11 @@ fn taste_export_writes_fixture_rows_to_file() {
             .as_str()
             .is_some_and(|content| content.contains("taste fixture baseline"))
     );
+    assert!(
+        rejected["context"]
+            .as_str()
+            .is_some_and(|content| content.contains("--- prior events ---"))
+    );
 
     let accepted = rows
         .iter()

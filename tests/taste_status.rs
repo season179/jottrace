@@ -1,10 +1,12 @@
 mod common;
 
 use common::taste_fixture;
+use jottrace::storage::{DB_FILE_NAME, open_database};
 use jottrace::taste::{
     TasteEvidenceCounts, TasteExtractOptions, TasteOutcomeCounts, taste_extract_for_data_dir,
     taste_status_for_data_dir,
 };
+use rusqlite::params;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -210,4 +212,52 @@ fn taste_status_before_extract_shows_pending_session() {
     assert_eq!(report.sessions_pending, 1);
     assert_eq!(report.proposals, 0);
     assert_eq!(report.coverage_percent, 0.0);
+}
+
+#[test]
+fn taste_status_counts_extracted_session_processed_when_preference_examples_cleared() {
+    let root = common::temp_root("taste-status-zero-proposals");
+    let data_dir = root.join(".jottrace");
+    install_taste_claude_fixture(&root);
+    run_ingest_with_home(&root, &data_dir);
+    run_extract(&root, &data_dir);
+
+    let conn = open_database(&data_dir.join(DB_FILE_NAME)).expect("open db");
+    conn.execute(
+        "DELETE FROM preference_examples WHERE source = 'claude_cli' AND source_session_id = ?1",
+        params![TASTE_SESSION_ID],
+    )
+    .expect("clear preference examples");
+
+    let report = taste_status_for_data_dir(&data_dir).expect("taste status");
+    assert_eq!(report.sessions_processed, 1);
+    assert_eq!(report.sessions_pending, 0);
+    assert_eq!(report.proposals, 0);
+}
+
+#[test]
+fn taste_status_marks_session_pending_when_merged_event_count_changes() {
+    let root = common::temp_root("taste-status-stale-events");
+    let data_dir = root.join(".jottrace");
+    install_taste_claude_fixture(&root);
+    run_ingest_with_home(&root, &data_dir);
+    run_extract(&root, &data_dir);
+
+    let conn = open_database(&data_dir.join(DB_FILE_NAME)).expect("open db");
+    let session_db_id: i64 = conn
+        .query_row(
+            "SELECT id FROM sessions WHERE source = 'claude_cli' AND source_session_id = ?1",
+            params![TASTE_SESSION_ID],
+            |row| row.get(0),
+        )
+        .expect("parent session id");
+    conn.execute(
+        "UPDATE sessions SET event_count = event_count + 1 WHERE id = ?1",
+        params![session_db_id],
+    )
+    .expect("bump event_count");
+
+    let report = taste_status_for_data_dir(&data_dir).expect("taste status");
+    assert_eq!(report.sessions_processed, 0);
+    assert_eq!(report.sessions_pending, 1);
 }
