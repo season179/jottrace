@@ -1,4 +1,4 @@
-use rusqlite::{Connection, OpenFlags, OptionalExtension, Transaction, named_params, params};
+use rusqlite::{Connection, OptionalExtension, Transaction, named_params, params};
 use serde::Deserialize;
 use serde_json::value::RawValue;
 use std::collections::HashSet;
@@ -9,8 +9,8 @@ use std::path::{Path, PathBuf};
 use std::time::UNIX_EPOCH;
 
 use crate::storage::{
-    DB_FILE_NAME, encode_event_payload, execute_sql, open_database, query_one, query_optional,
-    sqlite_error, status_from_connection,
+    DB_FILE_NAME, encode_event_payload, execute_sql, open_database, open_readonly_database,
+    query_one, query_optional, sqlite_error, status_from_connection,
 };
 use crate::{JottraceError, Result, io_error};
 
@@ -1449,13 +1449,11 @@ fn opencode_session_snapshot(source_file: &SourceFile) -> Result<SqliteSessionSn
 }
 
 fn opencode_source_connection(path: &Path) -> Result<Connection> {
-    Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_ONLY)
-        .map_err(|source| opencode_sqlite_error(path, source))
+    open_readonly_database(path, opencode_sqlite_error)
 }
 
 fn hermes_source_connection(path: &Path) -> Result<Connection> {
-    Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_ONLY)
-        .map_err(|source| hermes_sqlite_error(path, source))
+    open_readonly_database(path, hermes_sqlite_error)
 }
 
 fn opencode_session_event(

@@ -1,4 +1,4 @@
-use rusqlite::{Connection, OpenFlags, Row, params};
+use rusqlite::{Connection, Row, params};
 use std::fmt::Write as _;
 use std::io::{self, Read, Write as IoWrite};
 use std::net::{Ipv4Addr, SocketAddr, TcpListener, TcpStream};
@@ -7,8 +7,8 @@ use std::time::Duration;
 
 use crate::storage::{
     IngestErrorSummary, LATEST_SCHEMA_VERSION, RAW_CODEC, ZSTD_CODEC, decode_event_payload,
-    decode_event_payload_prefix, query_collect, query_one, query_optional, row_value, sqlite_error,
-    unresolved_ingest_errors_from_connection,
+    decode_event_payload_prefix, open_readonly_database, query_collect, query_one, query_optional,
+    row_value, sqlite_error, unresolved_ingest_errors_from_connection,
 };
 use crate::{JottraceError, Result, io_error};
 
@@ -418,8 +418,7 @@ pub fn render_home_page(view: &JournalView, query: &JournalQuery) -> String {
 }
 
 fn open_web_database(path: &Path) -> Result<Connection> {
-    let conn = Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_ONLY)
-        .map_err(|source| sqlite_error(path, source))?;
+    let conn = open_readonly_database(path, sqlite_error)?;
     conn.busy_timeout(Duration::from_secs(5))
         .map_err(|source| sqlite_error(path, source))?;
     let schema_version: i64 = query_one(path, &conn, "PRAGMA user_version", [], |row| row.get(0))?;

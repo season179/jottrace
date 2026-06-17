@@ -1,4 +1,4 @@
-use rusqlite::{Connection, OptionalExtension, Row, params};
+use rusqlite::{Connection, OpenFlags, OptionalExtension, Row, params};
 use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -193,6 +193,22 @@ pub fn open_database(path: &Path) -> Result<Connection> {
     configure_connection(path, &conn)?;
     run_migrations(path, &mut conn)?;
     Ok(conn)
+}
+
+/// Open a SQLite database read-only, reporting a failed open through
+/// `make_error`.
+///
+/// Foreign session stores (and jottrace's own journal in the web server) are
+/// only ever read, so they are opened with `SQLITE_OPEN_READ_ONLY` rather than
+/// through [`open_database`], which migrates and writes. Callers pass a
+/// source-specific error constructor because the same open failure is labelled
+/// differently per store.
+pub(crate) fn open_readonly_database(
+    path: &Path,
+    make_error: fn(&Path, rusqlite::Error) -> JottraceError,
+) -> Result<Connection> {
+    Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_ONLY)
+        .map_err(|source| make_error(path, source))
 }
 
 fn configure_connection(path: &Path, conn: &Connection) -> Result<()> {
