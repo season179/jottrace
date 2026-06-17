@@ -6,6 +6,7 @@ use rusqlite::{Connection, params};
 use crate::JottraceError;
 use crate::storage::execute_sql;
 
+use super::db_string_enum;
 use super::parse::{ContentRef, ParseKind, ParsedEvent};
 use super::timeline::{FileTimelineRow, normalize_file_path};
 
@@ -18,66 +19,24 @@ pub const HIGH_CONFIDENCE_THRESHOLD: f64 = 1.0;
 /// Maximum number of prior tool events included in proposal context.
 pub const PRIOR_EVENT_CONTEXT_LIMIT: usize = 5;
 
-/// Labeled outcome for a detected tool proposal.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum PreferenceOutcome {
-    Accepted,
-    Rejected,
-    Edited,
-}
-
-impl PreferenceOutcome {
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Self::Accepted => "accepted",
-            Self::Rejected => "rejected",
-            Self::Edited => "edited",
-        }
-    }
-
-    pub fn from_db_str(value: &str) -> Option<Self> {
-        match value {
-            "accepted" => Some(Self::Accepted),
-            "rejected" => Some(Self::Rejected),
-            "edited" => Some(Self::Edited),
-            _ => None,
-        }
+db_string_enum! {
+    /// Labeled outcome for a detected tool proposal.
+    pub enum PreferenceOutcome {
+        Accepted => "accepted",
+        Rejected => "rejected",
+        Edited => "edited",
     }
 }
 
-/// How a proposal was linked to file state for outcome detection.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum EvidenceKind {
-    DirectEdit,
-    DirectWrite,
-    BashCorrelation,
-    McpCorrelation,
-    PermissionDenial,
-    MissingFinalState,
-}
-
-impl EvidenceKind {
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Self::DirectEdit => "direct_edit",
-            Self::DirectWrite => "direct_write",
-            Self::BashCorrelation => "bash_correlation",
-            Self::McpCorrelation => "mcp_correlation",
-            Self::PermissionDenial => "permission_denial",
-            Self::MissingFinalState => "missing_final_state",
-        }
-    }
-
-    pub fn from_db_str(value: &str) -> Option<Self> {
-        match value {
-            "direct_edit" => Some(Self::DirectEdit),
-            "direct_write" => Some(Self::DirectWrite),
-            "bash_correlation" => Some(Self::BashCorrelation),
-            "mcp_correlation" => Some(Self::McpCorrelation),
-            "permission_denial" => Some(Self::PermissionDenial),
-            "missing_final_state" => Some(Self::MissingFinalState),
-            _ => None,
-        }
+db_string_enum! {
+    /// How a proposal was linked to file state for outcome detection.
+    pub enum EvidenceKind {
+        DirectEdit => "direct_edit",
+        DirectWrite => "direct_write",
+        BashCorrelation => "bash_correlation",
+        McpCorrelation => "mcp_correlation",
+        PermissionDenial => "permission_denial",
+        MissingFinalState => "missing_final_state",
     }
 }
 

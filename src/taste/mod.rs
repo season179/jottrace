@@ -7,6 +7,40 @@ pub mod sidecar;
 pub mod status;
 pub mod timeline;
 
+/// Defines a database-backed enum whose variants serialize to and from fixed
+/// strings, generating the inverse `as_str` / `from_db_str` pair from a single
+/// variant-to-string table so the two directions cannot drift apart.
+macro_rules! db_string_enum {
+    (
+        $(#[$enum_meta:meta])*
+        $vis:vis enum $name:ident {
+            $($variant:ident => $value:literal),+ $(,)?
+        }
+    ) => {
+        $(#[$enum_meta])*
+        #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+        $vis enum $name {
+            $($variant),+
+        }
+
+        impl $name {
+            pub fn as_str(self) -> &'static str {
+                match self {
+                    $(Self::$variant => $value,)+
+                }
+            }
+
+            pub fn from_db_str(value: &str) -> Option<Self> {
+                match value {
+                    $($value => Some(Self::$variant),)+
+                    _ => None,
+                }
+            }
+        }
+    };
+}
+pub(crate) use db_string_enum;
+
 pub use compiler::{
     EXTRACTOR_VERSION, EvidenceKind, HIGH_CONFIDENCE_THRESHOLD, PreferenceCompiler,
     PreferenceExample, PreferenceOutcome, replace_session_preference_examples,
