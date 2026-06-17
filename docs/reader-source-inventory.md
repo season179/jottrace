@@ -66,6 +66,9 @@ ordered session content:
   tool, and result events from generic app state.
 - Manual backup/reference copies such as `~/Downloads/CodexSessionBackup-*`;
   they may seed fixtures but are not automatic scan roots.
+- Claude async Task agent `tasks/*.output` transcripts (referenced by parent
+  events but not preserved by jottrace; excluded from taste-extraction scope
+  per `notes/taste-extraction-plan.md` R3).
 
 ### Ignored By Default
 

@@ -4,8 +4,8 @@
 Two passes: (1) open critique of an emerging plan, (2) validation of the
 locked synthesis. See the end of this file for the documented corrections.*
 
-Status: **IMPLEMENTED** (2026-06-17). Async Task transcripts (R3) remain
-deferred per the section below.
+Status: **IMPLEMENTED** (2026-06-17). R3 async Task transcripts are
+explicitly excluded; see the section below.
 Created: 2026-06-17. Repo: `github.com/season179/jottrace`.
 
 ## What we are building
@@ -129,11 +129,12 @@ design and must be handled, not deferred:
   a bug to fix — the design treats Bash attribution as best-effort
   snapshot-diff correlation with a lowered `confidence` and a distinct
   `evidence_kind`.
-- **R3 — Async Task transcripts are not ingested.** Claude's async Task
-  agents write transcripts to `/private/tmp/claude-501/.../tasks/*.output`,
-  referenced by parent events but **not preserved** by jottrace today. If
-  those edits count toward "complete," a new reader for `tasks/*.output`
-  is required. **Decision needed from the human** (see Open Questions).
+- **R3 — Async Task transcripts are not ingested (excluded).** Claude's
+  async Task agents write transcripts to
+  `/private/tmp/claude-501/.../tasks/*.output`, referenced by parent events
+  but **not preserved** by jottrace today. **Decision (2026-06-17): no** —
+  async Task transcript edits are out of scope for taste-extraction
+  completeness; this feature ships without a `tasks/*.output` reader.
 - **R4 — Manual human edits and untracked paths.** A snapshot may change
   with no corresponding `tool_use` (the human edited in the IDE), and some
   files never enter `trackedFileBackups`. These produce timeline entries
@@ -171,15 +172,16 @@ each step is part of one done feature, not a releasable subset.
 
 ## Deferred: async Task transcripts (R3)
 
-**Status: deferred — revisit later.** Claude's async Task agents write to
+**Status: excluded (2026-06-17).** Claude's async Task agents write to
 `/private/tmp/claude-501/.../tasks/*.output`, which jottrace does not
-ingest today. Whether those edits count toward "complete" coverage is an
-open scope call that was deliberately set aside (2026-06-17). When picked
-back up:
+ingest today. **Decision: no** — async Task transcript edits are out of
+scope for taste-extraction completeness; this feature ships without a
+`tasks/*.output` reader.
+
+If scope changes later:
 
 - If **yes** → this plan grows a new reader for `tasks/*.output` before
-  taste extraction can be called done.
-- If **no** → write a one-line exception here and proceed.
+  taste extraction can be called done for that expanded scope.
 
 ---
 

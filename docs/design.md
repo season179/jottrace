@@ -370,6 +370,9 @@ CLI surface (`jottrace taste`):
 - `export --format jsonl [--out <path>]` — emit `(context, chosen,
   rejected)` triples for external training.
 
+**R3 exception:** Claude async Task `tasks/*.output` transcripts are not
+ingested and are explicitly out of scope for taste-extraction completeness.
+
 Design detail and risk coverage: `notes/taste-extraction-plan.md`.
 
 ## Reader: Claude CLI

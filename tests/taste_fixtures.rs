@@ -206,3 +206,20 @@ fn check_taste_file(path: &std::path::Path, markers: &[&str]) {
         );
     }
 }
+
+#[test]
+fn taste_extraction_plan_documents_implemented_status_and_r3_exclusion() {
+    let plan = fs::read_to_string("notes/taste-extraction-plan.md")
+        .expect("read taste extraction plan");
+
+    for required in [
+        "Status: **IMPLEMENTED**",
+        "Decision: no",
+        "out of scope for taste-extraction",
+    ] {
+        assert!(
+            plan.contains(required),
+            "taste extraction plan should document {required}"
+        );
+    }
+}
