@@ -178,6 +178,7 @@ fn taste_subcommand_help_aliases_print_command_specific_usage() {
         ("taste extract", "Materialize file timelines"),
         ("taste status", "high-confidence coverage"),
         ("taste export", "JSONL for external trainer"),
+        ("taste show", "Inspect materialized taste extraction artifacts"),
         ("taste show timeline", "--session <source_session_id>"),
         ("taste show example", "preference example"),
     ];
@@ -230,7 +231,13 @@ fn taste_subcommand_help_aliases_print_command_specific_usage() {
 
 #[test]
 fn taste_subcommand_unknown_options_exit_with_targeted_help_hint() {
-    for command in ["taste extract", "taste status", "taste export"] {
+    for command in [
+        "taste extract",
+        "taste status",
+        "taste export",
+        "taste show timeline",
+        "taste show example",
+    ] {
         let root = temp_root(&format!("{}-unknown-option", command.replace(' ', "-")));
         let data_dir = root.join(".jottrace");
         let mut args: Vec<&str> = command.split_whitespace().collect();
