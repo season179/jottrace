@@ -355,8 +355,8 @@ fn for_each_decoded_event_payload_from_connection(
     };
 
     while let Some(row) = rows.next().map_err(|source| sqlite_error(path, source))? {
-        let payload: Vec<u8> = row.get(0).map_err(|source| sqlite_error(path, source))?;
-        let codec: String = row.get(1).map_err(|source| sqlite_error(path, source))?;
+        let payload: Vec<u8> = row_value(path, row, 0)?;
+        let codec: String = row_value(path, row, 1)?;
         if codec == RAW_CODEC {
             visit(&payload)?;
         } else {
@@ -553,6 +553,17 @@ where
 {
     conn.execute(sql, params)
         .map_err(|source| sqlite_error(path, source))
+}
+
+/// Read column `idx` from `row`, routing an access/decode failure through
+/// [`sqlite_error`] for `path`. The manual row-streaming loops (whose bodies run
+/// in the crate `Result` rather than a `rusqlite::Result` mapper closure) use
+/// this to map each column read without repeating the `sqlite_error` closure.
+pub(crate) fn row_value<T>(path: &Path, row: &Row<'_>, idx: usize) -> Result<T>
+where
+    T: rusqlite::types::FromSql,
+{
+    row.get(idx).map_err(|source| sqlite_error(path, source))
 }
 
 #[cfg(test)]

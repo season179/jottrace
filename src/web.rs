@@ -7,7 +7,7 @@ use std::time::Duration;
 
 use crate::storage::{
     IngestErrorSummary, LATEST_SCHEMA_VERSION, RAW_CODEC, ZSTD_CODEC, decode_event_payload,
-    decode_event_payload_prefix, query_collect, query_one, query_optional, sqlite_error,
+    decode_event_payload_prefix, query_collect, query_one, query_optional, row_value, sqlite_error,
     unresolved_ingest_errors_from_connection,
 };
 use crate::{JottraceError, Result, io_error};
@@ -793,12 +793,12 @@ fn decoded_payload_matching_session_ids(
     let mut session_ids = Vec::new();
     let mut matched_session_id = None;
     while let Some(row) = rows.next().map_err(|source| sqlite_error(path, source))? {
-        let session_id: i64 = row.get(0).map_err(|source| sqlite_error(path, source))?;
+        let session_id: i64 = row_value(path, row, 0)?;
         if matched_session_id == Some(session_id) {
             continue;
         }
-        let payload: Vec<u8> = row.get(1).map_err(|source| sqlite_error(path, source))?;
-        let codec: String = row.get(2).map_err(|source| sqlite_error(path, source))?;
+        let payload: Vec<u8> = row_value(path, row, 1)?;
+        let codec: String = row_value(path, row, 2)?;
         let Ok(decoded) = decode_event_payload_prefix(&payload, &codec, PAYLOAD_PREVIEW_BYTES)
         else {
             continue;

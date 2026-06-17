@@ -3,7 +3,7 @@ use std::path::PathBuf;
 
 use crate::storage::{
     DB_FILE_NAME, RAW_CODEC, ZSTD_CODEC, ZSTD_MIN_PAYLOAD_BYTES, decode_event_payload,
-    encode_event_payload, open_database, query_one, sqlite_error,
+    encode_event_payload, open_database, query_one, row_value, sqlite_error,
     unresolved_ingest_error_count_from_connection,
 };
 use crate::{JottraceError, Result, data_dir_from_env};
@@ -423,11 +423,11 @@ fn raw_event_batch(
     while let Some(row) = rows.next().map_err(|source| sqlite_error(path, source))? {
         events.push(RawEvent {
             key: EventKey {
-                session_id: row.get(0).map_err(|source| sqlite_error(path, source))?,
-                generation: row.get(1).map_err(|source| sqlite_error(path, source))?,
-                seq: row.get(2).map_err(|source| sqlite_error(path, source))?,
+                session_id: row_value(path, row, 0)?,
+                generation: row_value(path, row, 1)?,
+                seq: row_value(path, row, 2)?,
             },
-            payload: row.get(3).map_err(|source| sqlite_error(path, source))?,
+            payload: row_value(path, row, 3)?,
         });
     }
     Ok(events)
