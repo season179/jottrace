@@ -524,25 +524,14 @@ fn discover_codex_session_files() -> Result<Vec<SourceFile>> {
 
 fn discover_gemini_session_files() -> Result<Vec<SourceFile>> {
     let root = home_dir()?.join(GEMINI_TMP_DIR);
-    let entries = match fs::read_dir(&root) {
-        Ok(entries) => entries,
-        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(Vec::new()),
-        Err(source) => {
-            return Err(io_error(&root, source));
-        }
-    };
 
     let mut paths = Vec::new();
-    for entry in entries {
-        let entry = entry.map_err(|source| io_error(&root, source))?;
-        let path = entry.path();
-        let file_type = entry
-            .file_type()
-            .map_err(|source| io_error(&path, source))?;
+    for_each_dir_entry(&root, |path, file_type| {
         if file_type.is_dir() {
             collect_json_files(&path.join("chats"), false, &mut paths)?;
         }
-    }
+        Ok(())
+    })?;
 
     sort_dedup_paths(&mut paths);
 
@@ -764,7 +753,16 @@ fn home_dir() -> Result<PathBuf> {
         .ok_or(JottraceError::MissingHome)
 }
 
-fn collect_claude_local_agent_audit_files(root: &Path, paths: &mut Vec<PathBuf>) -> Result<()> {
+/// Iterate the entries of `root`, invoking `handle` with each entry's path and
+/// file type. A missing directory is treated as empty (returns `Ok(())`),
+/// matching the discovery callers that tolerate absent source roots; any other
+/// `read_dir`/`file_type` failure becomes an [`io_error`]. Entries are read and
+/// handled lazily so the first failure short-circuits exactly as an inline loop
+/// would.
+fn for_each_dir_entry(
+    root: &Path,
+    mut handle: impl FnMut(PathBuf, fs::FileType) -> Result<()>,
+) -> Result<()> {
     let entries = match fs::read_dir(root) {
         Ok(entries) => entries,
         Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
@@ -779,8 +777,16 @@ fn collect_claude_local_agent_audit_files(root: &Path, paths: &mut Vec<PathBuf>)
         let file_type = entry
             .file_type()
             .map_err(|source| io_error(&path, source))?;
+        handle(path, file_type)?;
+    }
+
+    Ok(())
+}
+
+fn collect_claude_local_agent_audit_files(root: &Path, paths: &mut Vec<PathBuf>) -> Result<()> {
+    for_each_dir_entry(root, |path, file_type| {
         if !file_type.is_dir() {
-            continue;
+            return Ok(());
         }
 
         if is_claude_local_agent_session_dir(&path) {
@@ -788,9 +794,8 @@ fn collect_claude_local_agent_audit_files(root: &Path, paths: &mut Vec<PathBuf>)
         } else {
             collect_claude_local_agent_audit_files(&path, paths)?;
         }
-    }
-
-    Ok(())
+        Ok(())
+    })
 }
 
 fn is_claude_local_agent_session_dir(path: &Path) -> bool {
@@ -826,20 +831,7 @@ fn collect_files_with_extension(
     recursive: bool,
     paths: &mut Vec<PathBuf>,
 ) -> Result<()> {
-    let entries = match fs::read_dir(root) {
-        Ok(entries) => entries,
-        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
-        Err(source) => {
-            return Err(io_error(root, source));
-        }
-    };
-
-    for entry in entries {
-        let entry = entry.map_err(|source| io_error(root, source))?;
-        let path = entry.path();
-        let file_type = entry
-            .file_type()
-            .map_err(|source| io_error(&path, source))?;
+    for_each_dir_entry(root, |path, file_type| {
         if file_type.is_dir() {
             if recursive {
                 collect_files_with_extension(&path, extension, true, paths)?;
@@ -851,9 +843,8 @@ fn collect_files_with_extension(
         {
             paths.push(path);
         }
-    }
-
-    Ok(())
+        Ok(())
+    })
 }
 
 fn collect_flat_session_files(root: &Path, paths: &mut Vec<PathBuf>) -> Result<()> {
