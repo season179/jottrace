@@ -645,6 +645,15 @@ fn print_taste_status_report(report: &jottrace::TasteStatusReport, details: bool
     if details {
         println!("db: {}", report.db_path.display());
         println!("extractor_version: {}", report.extractor_version);
+        println!("evidence:");
+        println!("  direct_edit: {}", report.evidence.direct_edit);
+        println!("  direct_write: {}", report.evidence.direct_write);
+        println!("  bash_correlation: {}", report.evidence.bash_correlation);
+        println!("  mcp_correlation: {}", report.evidence.mcp_correlation);
+        println!("  permission_denial: {}", report.evidence.permission_denial);
+        println!("  missing_final_state: {}", report.evidence.missing_final_state);
+        let low_confidence = report.proposals.saturating_sub(report.high_confidence_proposals);
+        println!("low_confidence_proposals: {low_confidence}");
     }
     println!("claude_parent_sessions: {}", report.claude_parent_sessions);
     println!("sessions_processed: {}", report.sessions_processed);
@@ -1452,7 +1461,7 @@ fn print_taste_status_help() {
     println!("  jottrace taste status [--details]");
     println!();
     println!("Options:");
-    println!("  --details  Include the database path and extractor version header");
+    println!("  --details  Include database path, extractor version, and evidence-kind breakdown");
 }
 
 fn print_taste_extract_help() {

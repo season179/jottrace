@@ -15,7 +15,9 @@ pub use export::{
     TasteExportFormat, TasteExportOptions, TasteExportReport, run_taste_export,
     taste_export_for_data_dir,
 };
-pub use extract::{TasteExtractOptions, TasteExtractReport, run_taste_extract};
+pub use extract::{
+    TasteExtractOptions, TasteExtractReport, run_taste_extract, taste_extract_for_data_dir,
+};
 pub use parse::{
     ClaudeSessionParser, ContentRef, ParseKind, ParsedEvent, SessionEventParser, SourceStream,
     merge_streams, parse_jsonl, renumber_seq,
@@ -27,7 +29,8 @@ pub use show::{
 };
 pub use sidecar::{ResolvedContent, SnapshotSidecarResolver};
 pub use status::{
-    TasteOutcomeCounts, TasteStatusReport, run_taste_status, taste_status_for_data_dir,
+    TasteEvidenceCounts, TasteOutcomeCounts, TasteStatusReport, run_taste_status,
+    taste_status_for_data_dir,
 };
 pub use timeline::{
     FileTimelineMaterializer, FileTimelineRow, TimelineSourceKind, replace_session_file_timelines,

@@ -48,8 +48,16 @@ struct ChildSession {
 /// Run the taste extraction pipeline for Claude sessions in the local journal.
 pub fn run_taste_extract(options: TasteExtractOptions) -> Result<TasteExtractReport> {
     let data_dir = data_dir_from_env()?;
+    taste_extract_for_data_dir(&data_dir, options)
+}
+
+/// Run taste extraction against a specific journal directory (tests).
+pub fn taste_extract_for_data_dir(
+    data_dir: &Path,
+    options: TasteExtractOptions,
+) -> Result<TasteExtractReport> {
     let db_path = data_dir.join(DB_FILE_NAME);
-    let _lock = acquire_data_lock(&data_dir)?;
+    let _lock = acquire_data_lock(data_dir)?;
     let mut conn = open_database(&db_path)?;
 
     let resolver = match &options.sidecar_history_root {

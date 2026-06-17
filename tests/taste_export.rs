@@ -3,7 +3,7 @@ mod common;
 use common::taste_fixture;
 use jottrace::taste::{
     PreferenceOutcome, TasteExportFormat, TasteExportOptions, TasteExtractOptions,
-    run_taste_extract, taste_export_for_data_dir,
+    taste_export_for_data_dir, taste_extract_for_data_dir,
 };
 use serde_json::Value;
 use std::fs;
@@ -92,15 +92,15 @@ fn run_ingest_with_home(home: &Path, data_dir: &Path) {
     );
 }
 
-fn run_extract_with_home(home: &Path, data_dir: &Path) {
-    unsafe {
-        std::env::set_var("HOME", home);
-        std::env::set_var("JOTTRACE_HOME", data_dir);
-    }
-    run_taste_extract(TasteExtractOptions {
-        source_session_id: Some(TASTE_SESSION_ID.to_string()),
-        ..TasteExtractOptions::default()
-    })
+fn run_extract(root: &Path, data_dir: &Path) {
+    taste_extract_for_data_dir(
+        data_dir,
+        TasteExtractOptions {
+            source_session_id: Some(TASTE_SESSION_ID.to_string()),
+            sidecar_history_root: Some(root.join(".claude/file-history")),
+            ..TasteExtractOptions::default()
+        },
+    )
     .expect("run taste extract");
 }
 
@@ -119,7 +119,7 @@ fn taste_export_writes_fixture_rows_to_file() {
     let out_path = root.join("preferences.jsonl");
     install_taste_claude_fixture(&root);
     run_ingest_with_home(&root, &data_dir);
-    run_extract_with_home(&root, &data_dir);
+    run_extract(&root, &data_dir);
 
     let report = taste_export_for_data_dir(
         &data_dir,
@@ -163,7 +163,7 @@ fn taste_export_cli_writes_jsonl_to_stdout() {
     let data_dir = root.join(".jottrace");
     install_taste_claude_fixture(&root);
     run_ingest_with_home(&root, &data_dir);
-    run_extract_with_home(&root, &data_dir);
+    run_extract(&root, &data_dir);
 
     let output = Command::new(binary())
         .args(["taste", "export", "--format", "jsonl"])

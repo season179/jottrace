@@ -16,6 +16,17 @@ pub struct TasteOutcomeCounts {
     pub edited: u64,
 }
 
+/// Evidence-kind counts from materialized preference rows.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct TasteEvidenceCounts {
+    pub direct_edit: u64,
+    pub direct_write: u64,
+    pub bash_correlation: u64,
+    pub mcp_correlation: u64,
+    pub permission_denial: u64,
+    pub missing_final_state: u64,
+}
+
 /// Summary of taste extraction coverage in the local journal.
 #[derive(Debug, Clone, PartialEq)]
 pub struct TasteStatusReport {
@@ -26,6 +37,7 @@ pub struct TasteStatusReport {
     pub sessions_pending: u64,
     pub proposals: u64,
     pub outcomes: TasteOutcomeCounts,
+    pub evidence: TasteEvidenceCounts,
     pub high_confidence_proposals: u64,
     /// Percentage of proposals resolved with high confidence (0–100).
     pub coverage_percent: f64,
@@ -51,6 +63,7 @@ fn taste_status_from_connection(db_path: &Path, conn: &Connection) -> Result<Tas
     let sessions_pending = claude_parent_sessions.saturating_sub(sessions_processed);
     let proposals = count_proposals(db_path, conn)?;
     let outcomes = count_outcomes(db_path, conn)?;
+    let evidence = count_evidence(db_path, conn)?;
     let high_confidence_proposals = count_high_confidence_proposals(db_path, conn)?;
     let coverage_percent = if proposals == 0 {
         0.0
@@ -66,6 +79,7 @@ fn taste_status_from_connection(db_path: &Path, conn: &Connection) -> Result<Tas
         sessions_pending,
         proposals,
         outcomes,
+        evidence,
         high_confidence_proposals,
         coverage_percent,
     })
@@ -132,6 +146,40 @@ fn count_outcomes(db_path: &Path, conn: &Connection) -> Result<TasteOutcomeCount
             "accepted" => counts.accepted = count,
             "rejected" => counts.rejected = count,
             "edited" => counts.edited = count,
+            _ => {}
+        }
+    }
+
+    Ok(counts)
+}
+
+fn count_evidence(db_path: &Path, conn: &Connection) -> Result<TasteEvidenceCounts> {
+    let mut statement = conn
+        .prepare(
+            "SELECT evidence_kind, COUNT(*)
+             FROM preference_examples
+             WHERE source = ?1
+             GROUP BY evidence_kind",
+        )
+        .map_err(|source| sqlite_error(db_path, source))?;
+
+    let mut counts = TasteEvidenceCounts::default();
+    let rows = statement
+        .query_map(params![CLAUDE_SOURCE], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
+        })
+        .map_err(|source| sqlite_error(db_path, source))?;
+
+    for row in rows {
+        let (evidence_kind, count) = row.map_err(|source| sqlite_error(db_path, source))?;
+        let count = u64::try_from(count).expect("evidence count fits in u64");
+        match evidence_kind.as_str() {
+            "direct_edit" => counts.direct_edit = count,
+            "direct_write" => counts.direct_write = count,
+            "bash_correlation" => counts.bash_correlation = count,
+            "mcp_correlation" => counts.mcp_correlation = count,
+            "permission_denial" => counts.permission_denial = count,
+            "missing_final_state" => counts.missing_final_state = count,
             _ => {}
         }
     }

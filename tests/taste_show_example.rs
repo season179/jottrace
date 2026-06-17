@@ -3,7 +3,7 @@ mod common;
 use common::taste_fixture;
 use jottrace::taste::{
     EvidenceKind, PreferenceOutcome, TasteExtractOptions, TasteShowExampleOptions,
-    run_taste_extract, show_example_for_data_dir,
+    show_example_for_data_dir, taste_extract_for_data_dir,
 };
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -92,15 +92,15 @@ fn run_ingest_with_home(home: &Path, data_dir: &Path) {
     );
 }
 
-fn run_extract_with_home(home: &Path, data_dir: &Path) {
-    unsafe {
-        std::env::set_var("HOME", home);
-        std::env::set_var("JOTTRACE_HOME", data_dir);
-    }
-    run_taste_extract(TasteExtractOptions {
-        source_session_id: Some(TASTE_SESSION_ID.to_string()),
-        ..TasteExtractOptions::default()
-    })
+fn run_extract(root: &Path, data_dir: &Path) {
+    taste_extract_for_data_dir(
+        data_dir,
+        TasteExtractOptions {
+            source_session_id: Some(TASTE_SESSION_ID.to_string()),
+            sidecar_history_root: Some(root.join(".claude/file-history")),
+            ..TasteExtractOptions::default()
+        },
+    )
     .expect("run taste extract");
 }
 
@@ -110,7 +110,7 @@ fn taste_show_example_returns_fixture_row_after_extract() {
     let data_dir = root.join(".jottrace");
     install_taste_claude_fixture(&root);
     run_ingest_with_home(&root, &data_dir);
-    run_extract_with_home(&root, &data_dir);
+    run_extract(&root, &data_dir);
 
     let report = show_example_for_data_dir(
         &data_dir,
@@ -142,7 +142,7 @@ fn taste_show_example_cli_prints_fixture_context() {
     let data_dir = root.join(".jottrace");
     install_taste_claude_fixture(&root);
     run_ingest_with_home(&root, &data_dir);
-    run_extract_with_home(&root, &data_dir);
+    run_extract(&root, &data_dir);
 
     let output = Command::new(binary())
         .args([

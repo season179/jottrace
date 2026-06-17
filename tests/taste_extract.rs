@@ -2,7 +2,7 @@ mod common;
 
 use common::taste_fixture;
 use jottrace::storage::{DB_FILE_NAME, open_database};
-use jottrace::taste::{PreferenceOutcome, TasteExtractOptions, run_taste_extract};
+use jottrace::taste::{PreferenceOutcome, TasteExtractOptions, taste_extract_for_data_dir};
 use rusqlite::params;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -90,13 +90,15 @@ fn run_ingest_with_home(home: &Path, data_dir: &Path) {
     );
 }
 
-fn run_extract_with_home(home: &Path, data_dir: &Path, options: TasteExtractOptions) -> String {
-    // SAFETY: each test owns an isolated temp root and runs single-threaded.
-    unsafe {
-        std::env::set_var("HOME", home);
-        std::env::set_var("JOTTRACE_HOME", data_dir);
-    }
-    let report = run_taste_extract(options).expect("run taste extract");
+fn run_extract(root: &Path, data_dir: &Path, options: TasteExtractOptions) -> String {
+    let report = taste_extract_for_data_dir(
+        data_dir,
+        TasteExtractOptions {
+            sidecar_history_root: Some(root.join(".claude/file-history")),
+            ..options
+        },
+    )
+    .expect("run taste extract");
     format!(
         "sessions_processed={} sessions_skipped={} timeline_rows={} preference_examples={}",
         report.sessions_processed,
@@ -113,7 +115,7 @@ fn taste_extract_materializes_fixture_session_end_to_end() {
     install_taste_claude_fixture(&root);
     run_ingest_with_home(&root, &data_dir);
 
-    let summary = run_extract_with_home(
+    let summary = run_extract(
         &root,
         &data_dir,
         TasteExtractOptions {
@@ -161,7 +163,7 @@ fn taste_extract_skips_sessions_already_at_current_extractor_version() {
     install_taste_claude_fixture(&root);
     run_ingest_with_home(&root, &data_dir);
 
-    let first = run_extract_with_home(
+    let first = run_extract(
         &root,
         &data_dir,
         TasteExtractOptions {
@@ -172,7 +174,7 @@ fn taste_extract_skips_sessions_already_at_current_extractor_version() {
     assert!(first.contains("sessions_processed=1"));
     assert!(first.contains("sessions_skipped=0"));
 
-    let second = run_extract_with_home(
+    let second = run_extract(
         &root,
         &data_dir,
         TasteExtractOptions {

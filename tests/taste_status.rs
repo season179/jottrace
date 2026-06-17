@@ -2,7 +2,8 @@ mod common;
 
 use common::taste_fixture;
 use jottrace::taste::{
-    TasteExtractOptions, TasteOutcomeCounts, run_taste_extract, taste_status_for_data_dir,
+    TasteEvidenceCounts, TasteExtractOptions, TasteOutcomeCounts, taste_extract_for_data_dir,
+    taste_status_for_data_dir,
 };
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -90,16 +91,15 @@ fn run_ingest_with_home(home: &Path, data_dir: &Path) {
     );
 }
 
-fn run_extract_with_home(home: &Path, data_dir: &Path) {
-    // SAFETY: each test owns an isolated temp root and runs single-threaded.
-    unsafe {
-        std::env::set_var("HOME", home);
-        std::env::set_var("JOTTRACE_HOME", data_dir);
-    }
-    run_taste_extract(TasteExtractOptions {
-        source_session_id: Some(TASTE_SESSION_ID.to_string()),
-        ..TasteExtractOptions::default()
-    })
+fn run_extract(root: &Path, data_dir: &Path) {
+    taste_extract_for_data_dir(
+        data_dir,
+        TasteExtractOptions {
+            source_session_id: Some(TASTE_SESSION_ID.to_string()),
+            sidecar_history_root: Some(root.join(".claude/file-history")),
+            ..TasteExtractOptions::default()
+        },
+    )
     .expect("run taste extract");
 }
 
@@ -109,7 +109,7 @@ fn taste_status_reports_fixture_coverage_after_extract() {
     let data_dir = root.join(".jottrace");
     install_taste_claude_fixture(&root);
     run_ingest_with_home(&root, &data_dir);
-    run_extract_with_home(&root, &data_dir);
+    run_extract(&root, &data_dir);
 
     let report = taste_status_for_data_dir(&data_dir).expect("taste status");
     assert_eq!(report.claude_parent_sessions, 1);
@@ -126,6 +126,17 @@ fn taste_status_reports_fixture_coverage_after_extract() {
     );
     assert_eq!(report.high_confidence_proposals, 7);
     assert!((report.coverage_percent - (7.0 / 10.0 * 100.0)).abs() < 1e-9);
+    assert_eq!(
+        report.evidence,
+        TasteEvidenceCounts {
+            direct_edit: 6,
+            direct_write: 1,
+            bash_correlation: 1,
+            mcp_correlation: 1,
+            permission_denial: 1,
+            missing_final_state: 0,
+        }
+    );
 }
 
 #[test]
@@ -134,7 +145,7 @@ fn taste_status_cli_reports_fixture_counts() {
     let data_dir = root.join(".jottrace");
     install_taste_claude_fixture(&root);
     run_ingest_with_home(&root, &data_dir);
-    run_extract_with_home(&root, &data_dir);
+    run_extract(&root, &data_dir);
 
     let output = Command::new(binary())
         .args(["taste", "status"])
@@ -156,6 +167,34 @@ fn taste_status_cli_reports_fixture_counts() {
     assert!(stdout.contains("rejected: 2"));
     assert!(stdout.contains("edited: 1"));
     assert!(stdout.contains("high_confidence_coverage: 70.0%"));
+}
+
+#[test]
+fn taste_status_details_reports_evidence_breakdown() {
+    let root = common::temp_root("taste-status-details");
+    let data_dir = root.join(".jottrace");
+    install_taste_claude_fixture(&root);
+    run_ingest_with_home(&root, &data_dir);
+    run_extract(&root, &data_dir);
+
+    let output = Command::new(binary())
+        .args(["taste", "status", "--details"])
+        .env("HOME", root.as_ref())
+        .env("JOTTRACE_HOME", &data_dir)
+        .output()
+        .expect("run jottrace taste status --details");
+
+    assert!(
+        output.status.success(),
+        "stdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("evidence:"));
+    assert!(stdout.contains("bash_correlation: 1"));
+    assert!(stdout.contains("mcp_correlation: 1"));
+    assert!(stdout.contains("low_confidence_proposals: 3"));
 }
 
 #[test]
