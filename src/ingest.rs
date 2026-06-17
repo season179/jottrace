@@ -667,62 +667,21 @@ fn discover_sqlite_session_files(
         Err(source) => return Err(JottraceError::Io { path, source }),
     }
 
-    let conn = match open_connection(&path) {
-        Ok(conn) => conn,
-        Err(_) => {
-            return Ok(sqlite_discovery_errors(
-                source,
-                error_session_id,
-                source_format,
-                path,
-            ));
-        }
-    };
-    let mut statement = match conn.prepare(session_query) {
-        Ok(statement) => statement,
-        Err(_) => {
-            return Ok(sqlite_discovery_errors(
-                source,
-                error_session_id,
-                source_format,
-                path,
-            ));
-        }
-    };
-    let rows = match statement.query_map([], |row| Ok((row.get(0)?, row.get(1)?))) {
-        Ok(rows) => rows,
-        Err(_) => {
-            return Ok(sqlite_discovery_errors(
-                source,
-                error_session_id,
-                source_format,
-                path,
-            ));
-        }
+    // Any failure reading the store — open, prepare, query, a bad row, or an
+    // empty session id — collapses to a single discovery error so the rest of
+    // ingest can proceed.
+    let Some(sessions) = read_sqlite_session_rows(&path, session_query, open_connection) else {
+        return Ok(sqlite_discovery_errors(
+            source,
+            error_session_id,
+            source_format,
+            path,
+        ));
     };
 
-    let mut source_files = Vec::new();
-    for row in rows {
-        let (source_session_id, parent_source_session_id): (String, Option<String>) = match row {
-            Ok(row) => row,
-            Err(_) => {
-                return Ok(sqlite_discovery_errors(
-                    source,
-                    error_session_id,
-                    source_format,
-                    path,
-                ));
-            }
-        };
-        if source_session_id.trim().is_empty() {
-            return Ok(sqlite_discovery_errors(
-                source,
-                error_session_id,
-                source_format,
-                path,
-            ));
-        }
-        source_files.push(SourceFile {
+    Ok(sessions
+        .into_iter()
+        .map(|(source_session_id, parent_source_session_id)| SourceFile {
             source,
             source_session_id,
             source_session_id_kind: SourceSessionIdKind::Known,
@@ -730,9 +689,34 @@ fn discover_sqlite_session_files(
             metadata_path: None,
             source_format,
             path: path.clone(),
-        });
+        })
+        .collect())
+}
+
+/// Read `(source_session_id, parent_source_session_id)` rows from a source
+/// SQLite store, returning `None` if the store cannot be opened or queried, or
+/// yields a row with an empty session id. Callers translate `None` into a
+/// discovery error placeholder.
+fn read_sqlite_session_rows(
+    path: &Path,
+    session_query: &str,
+    open_connection: fn(&Path) -> Result<Connection>,
+) -> Option<Vec<(String, Option<String>)>> {
+    let conn = open_connection(path).ok()?;
+    let mut statement = conn.prepare(session_query).ok()?;
+    let rows = statement
+        .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
+        .ok()?;
+
+    let mut sessions = Vec::new();
+    for row in rows {
+        let (source_session_id, parent_source_session_id): (String, Option<String>) = row.ok()?;
+        if source_session_id.trim().is_empty() {
+            return None;
+        }
+        sessions.push((source_session_id, parent_source_session_id));
     }
-    Ok(source_files)
+    Some(sessions)
 }
 
 fn sqlite_discovery_errors(
