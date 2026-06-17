@@ -217,21 +217,29 @@ fn parse_snapshot_events(
     Ok(events)
 }
 
+/// Build one event per `message.content` block whose `type` matches `block_type`.
+fn parse_content_blocks(
+    value: &Value,
+    block_type: &str,
+    build: impl Fn(&Value) -> ParsedEvent,
+) -> Vec<ParsedEvent> {
+    let Some(content) = value.pointer("/message/content").and_then(Value::as_array) else {
+        return Vec::new();
+    };
+    content
+        .iter()
+        .filter(|block| block.get("type").and_then(Value::as_str) == Some(block_type))
+        .map(build)
+        .collect()
+}
+
 fn parse_assistant_events(
     seq: usize,
     source_stream: &SourceStream,
     timestamp: Option<String>,
     value: &Value,
 ) -> Result<Vec<ParsedEvent>, serde_json::Error> {
-    let Some(content) = value.pointer("/message/content").and_then(Value::as_array) else {
-        return Ok(Vec::new());
-    };
-
-    let mut events = Vec::new();
-    for block in content {
-        if block.get("type").and_then(Value::as_str) != Some("tool_use") {
-            continue;
-        }
+    Ok(parse_content_blocks(value, "tool_use", |block| {
         let tool_ref = block.get("id").and_then(Value::as_str).map(str::to_string);
         let tool_name = block
             .get("name")
@@ -240,7 +248,7 @@ fn parse_assistant_events(
         let input = block.get("input");
         let file_path = tool_file_path(input);
         let proposal_content = tool_proposal_content(tool_name.as_deref(), input);
-        events.push(ParsedEvent {
+        ParsedEvent {
             seq,
             timestamp: timestamp.clone(),
             kind: ParseKind::ToolProposal,
@@ -249,10 +257,8 @@ fn parse_assistant_events(
             tool_ref,
             tool_name,
             source_stream: source_stream.clone(),
-        });
-    }
-
-    Ok(events)
+        }
+    }))
 }
 
 fn tool_file_path(input: Option<&Value>) -> Option<String> {
@@ -302,15 +308,7 @@ fn parse_user_events(
     timestamp: Option<String>,
     value: &Value,
 ) -> Result<Vec<ParsedEvent>, serde_json::Error> {
-    let Some(content) = value.pointer("/message/content").and_then(Value::as_array) else {
-        return Ok(Vec::new());
-    };
-
-    let mut events = Vec::new();
-    for block in content {
-        if block.get("type").and_then(Value::as_str) != Some("tool_result") {
-            continue;
-        }
+    Ok(parse_content_blocks(value, "tool_result", |block| {
         let tool_ref = block
             .get("tool_use_id")
             .and_then(Value::as_str)
@@ -319,7 +317,7 @@ fn parse_user_events(
         let denied = result_text
             .as_deref()
             .is_some_and(|text| text.contains("new_string was NOT written"));
-        events.push(ParsedEvent {
+        ParsedEvent {
             seq,
             timestamp: timestamp.clone(),
             kind: if denied {
@@ -332,10 +330,8 @@ fn parse_user_events(
             tool_ref,
             tool_name: None,
             source_stream: source_stream.clone(),
-        });
-    }
-
-    Ok(events)
+        }
+    }))
 }
 
 fn tool_result_text(block: &Value) -> Option<String> {
