@@ -478,6 +478,25 @@ enum TasteShowTimelineCommand {
     Help,
 }
 
+/// Consume the value following a single-value flag, rejecting a repeated flag.
+///
+/// The value is always consumed first, so a missing value is reported before a
+/// duplicate — matching the inline order these call sites previously used.
+fn take_single_flag_value(
+    args: &mut impl Iterator<Item = String>,
+    flag: &str,
+    command: &str,
+    already_set: bool,
+) -> std::result::Result<String, String> {
+    let value = args
+        .next()
+        .ok_or_else(|| format!("{flag} requires a value"))?;
+    if already_set {
+        return Err(format!("{command} accepts only one {flag} value"));
+    }
+    Ok(value)
+}
+
 fn parse_taste_show_example_command(
     mut args: impl Iterator<Item = String>,
 ) -> std::result::Result<TasteShowExampleCommand, String> {
@@ -488,13 +507,12 @@ fn parse_taste_show_example_command(
         match arg.as_str() {
             "--help" | "-h" => return Ok(TasteShowExampleCommand::Help),
             "--session" => {
-                let value = args
-                    .next()
-                    .ok_or_else(|| "--session requires a value".to_string())?;
-                if source_session_id.is_some() {
-                    return Err("taste show example accepts only one --session value".to_string());
-                }
-                source_session_id = Some(value);
+                source_session_id = Some(take_single_flag_value(
+                    &mut args,
+                    "--session",
+                    "taste show example",
+                    source_session_id.is_some(),
+                )?);
             }
             value if value.starts_with('-') => {
                 return Err(format!("unknown taste show example option: {value}"));
@@ -531,22 +549,20 @@ fn parse_taste_show_timeline_command(
         match arg.as_str() {
             "--help" | "-h" => return Ok(TasteShowTimelineCommand::Help),
             "--session" => {
-                let value = args
-                    .next()
-                    .ok_or_else(|| "--session requires a value".to_string())?;
-                if source_session_id.is_some() {
-                    return Err("taste show timeline accepts only one --session value".to_string());
-                }
-                source_session_id = Some(value);
+                source_session_id = Some(take_single_flag_value(
+                    &mut args,
+                    "--session",
+                    "taste show timeline",
+                    source_session_id.is_some(),
+                )?);
             }
             "--file" => {
-                let value = args
-                    .next()
-                    .ok_or_else(|| "--file requires a value".to_string())?;
-                if file_path.is_some() {
-                    return Err("taste show timeline accepts only one --file value".to_string());
-                }
-                file_path = Some(value);
+                file_path = Some(take_single_flag_value(
+                    &mut args,
+                    "--file",
+                    "taste show timeline",
+                    file_path.is_some(),
+                )?);
             }
             _ => return Err(format!("unknown taste show timeline option: {arg}")),
         }
@@ -715,24 +731,24 @@ fn parse_taste_export_command(
         match arg.as_str() {
             "--help" | "-h" => return Ok(TasteExportCommand::Help),
             "--format" => {
-                let value = args
-                    .next()
-                    .ok_or_else(|| "--format requires a value".to_string())?;
-                if format.is_some() {
-                    return Err("taste export accepts only one --format value".to_string());
-                }
+                let value = take_single_flag_value(
+                    &mut args,
+                    "--format",
+                    "taste export",
+                    format.is_some(),
+                )?;
                 format = Some(
                     jottrace::TasteExportFormat::from_cli(&value)
                         .ok_or_else(|| format!("unsupported export format: {value}"))?,
                 );
             }
             "--out" => {
-                let value = args
-                    .next()
-                    .ok_or_else(|| "--out requires a value".to_string())?;
-                if output_path.is_some() {
-                    return Err("taste export accepts only one --out value".to_string());
-                }
+                let value = take_single_flag_value(
+                    &mut args,
+                    "--out",
+                    "taste export",
+                    output_path.is_some(),
+                )?;
                 output_path = Some(PathBuf::from(value));
             }
             value if value.starts_with('-') => {
@@ -796,13 +812,12 @@ fn parse_taste_extract_command(
             "--help" | "-h" => return Ok(TasteCommand::Help),
             "--force" => options.force = true,
             "--session" => {
-                let value = args
-                    .next()
-                    .ok_or_else(|| "--session requires a value".to_string())?;
-                if options.source_session_id.is_some() {
-                    return Err("taste extract accepts only one --session value".to_string());
-                }
-                options.source_session_id = Some(value);
+                options.source_session_id = Some(take_single_flag_value(
+                    &mut args,
+                    "--session",
+                    "taste extract",
+                    options.source_session_id.is_some(),
+                )?);
             }
             _ => return Err(format!("unknown taste extract option: {arg}")),
         }
