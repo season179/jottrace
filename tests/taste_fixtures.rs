@@ -828,3 +828,117 @@ fn taste_extraction_scope_complete() {
         );
     }
 }
+
+#[test]
+fn taste_extraction_implementation_sequence_complete() {
+    let plan =
+        fs::read_to_string("notes/taste-extraction-plan.md").expect("read taste extraction plan");
+
+    for required in [
+        "## Implementation sequence",
+        "1. **Capture real fixtures.**",
+        "2. **Shared Claude parse layer.**",
+        "3. **Snapshot sidecar resolver.**",
+        "4. **`file_timelines` materialization.**",
+        "5. **Preference compiler.**",
+        "6. **`preference_examples` materialization + CLI.**",
+        "7. **Coverage report.**",
+        "inline-content snapshots AND",
+        "`backupFileName`-referenced snapshots",
+        "permission denial",
+        "subagent sidechain",
+        "normalized `(seq, kind, file_path, content_or_ref,",
+        "graceful degradation when",
+        "present-at-session-end comparison",
+        "coverage (% of file-modifying events resolved)",
+    ] {
+        assert!(
+            plan.contains(required),
+            "taste extraction plan should document implementation sequence via {required}"
+        );
+    }
+
+    // Step 1 — fixture corpus markers
+    let session = taste_fixture(&format!(
+        "claude-cli/projects/-Users-fixture-Workspace-jottrace/{TASTE_SESSION_ID}.jsonl"
+    ));
+    let session_content = fs::read_to_string(&session).expect("read taste session fixture");
+    for required in [
+        "\"trackedFileBackups\":[{\"filePath\"",
+        "\"backupFileName\"",
+        "new_string was NOT written",
+        "toolu_taste_edit_revert",
+        "taste_subagent.rs",
+    ] {
+        assert!(
+            session_content.contains(required),
+            "step 1 fixture corpus should cover {required}"
+        );
+    }
+
+    // Step 2 — parse layer
+    let parse = fs::read_to_string("src/taste/parse.rs").expect("read parse module");
+    for required in ["ParsedEvent", "ClaudeSessionParser", "merge_streams"] {
+        assert!(
+            parse.contains(required),
+            "step 2 parse layer should implement {required}"
+        );
+    }
+
+    // Step 3 — sidecar resolver
+    let sidecar = fs::read_to_string("src/taste/sidecar.rs").expect("read sidecar module");
+    for required in ["SnapshotSidecarResolver", "backupFileName", "MissingSidecar"] {
+        assert!(
+            sidecar.contains(required),
+            "step 3 sidecar resolver should implement {required}"
+        );
+    }
+
+    // Step 4 — file_timelines
+    assert!(Path::new("src/migrations/010_taste_extraction.sql").exists());
+    let timeline = fs::read_to_string("src/taste/timeline.rs").expect("read timeline module");
+    assert!(
+        timeline.contains("FileTimelineMaterializer"),
+        "step 4 should materialize file_timelines via FileTimelineMaterializer"
+    );
+
+    // Step 5 — preference compiler
+    let compiler = fs::read_to_string("src/taste/compiler.rs").expect("read compiler module");
+    for required in ["PreferenceCompiler", "classify_present_at_session_end", "EvidenceKind"] {
+        assert!(
+            compiler.contains(required),
+            "step 5 compiler should implement {required}"
+        );
+    }
+
+    // Step 6 — preference_examples + CLI
+    assert!(Path::new("src/migrations/011_preference_examples.sql").exists());
+    let extract = fs::read_to_string("src/taste/extract.rs").expect("read extract module");
+    for required in ["run_taste_extract", "replace_session_preference_examples"] {
+        assert!(
+            extract.contains(required),
+            "step 6 extract should implement {required}"
+        );
+    }
+    let show = fs::read_to_string("src/taste/show.rs").expect("read show module");
+    for required in ["run_taste_show_timeline", "run_taste_show_example"] {
+        assert!(
+            show.contains(required),
+            "step 6 show commands should expose {required}"
+        );
+    }
+    let export = fs::read_to_string("src/taste/export.rs").expect("read export module");
+    assert!(
+        export.contains("run_taste_export"),
+        "step 6 export should expose run_taste_export"
+    );
+
+    // Step 7 — coverage report
+    let status = fs::read_to_string("src/taste/status.rs").expect("read status module");
+    for required in ["coverage_percent", "HIGH_CONFIDENCE_THRESHOLD", "run_taste_status"] {
+        assert!(
+            status.contains(required),
+            "step 7 status should report coverage via {required}"
+        );
+    }
+}
