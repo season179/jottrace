@@ -257,8 +257,8 @@ pub(crate) fn status_from_connection(path: &Path, conn: &Connection) -> Result<S
     Ok(StatusReport {
         db_path: path.to_path_buf(),
         schema_version: user_version(path, conn)?,
-        session_count: count(path, conn, "SELECT COUNT(*) FROM sessions")?,
-        event_count: count(path, conn, "SELECT COUNT(*) FROM events")?,
+        session_count: count(path, conn, "SELECT COUNT(*) FROM sessions", [])?,
+        event_count: count(path, conn, "SELECT COUNT(*) FROM events", [])?,
         unresolved_ingest_error_count: unresolved_ingest_error_count_from_connection(path, conn)?,
     })
 }
@@ -267,7 +267,7 @@ pub(crate) fn unresolved_ingest_error_count_from_connection(
     path: &Path,
     conn: &Connection,
 ) -> Result<u64> {
-    count(path, conn, UNRESOLVED_INGEST_ERROR_COUNT_SQL)
+    count(path, conn, UNRESOLVED_INGEST_ERROR_COUNT_SQL, [])
 }
 
 pub(crate) fn unresolved_ingest_errors_from_connection(
@@ -487,8 +487,13 @@ fn ingest_error_summary_from_row(row: &Row<'_>) -> rusqlite::Result<IngestErrorS
     })
 }
 
-fn count(path: &Path, conn: &Connection, sql: &str) -> Result<u64> {
-    let value: i64 = query_one(path, conn, sql, [], |row| row.get(0))?;
+pub(crate) fn count(
+    path: &Path,
+    conn: &Connection,
+    sql: &str,
+    params: impl rusqlite::Params,
+) -> Result<u64> {
+    let value: i64 = query_one(path, conn, sql, params, |row| row.get(0))?;
     Ok(value as u64)
 }
 
