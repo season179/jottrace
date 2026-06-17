@@ -472,15 +472,12 @@ fn ingest_error_summary_from_row(row: &Row<'_>) -> rusqlite::Result<IngestErrorS
 }
 
 fn count(path: &Path, conn: &Connection, sql: &str) -> Result<u64> {
-    let value: i64 = conn
-        .query_row(sql, [], |row| row.get(0))
-        .map_err(|source| sqlite_error(path, source))?;
+    let value: i64 = query_one(path, conn, sql, [], |row| row.get(0))?;
     Ok(value as u64)
 }
 
 fn user_version(path: &Path, conn: &Connection) -> Result<i64> {
-    conn.query_row("PRAGMA user_version", [], |row| row.get(0))
-        .map_err(|source| sqlite_error(path, source))
+    query_one(path, conn, "PRAGMA user_version", [], |row| row.get(0))
 }
 
 pub(crate) fn sqlite_error(path: &Path, source: rusqlite::Error) -> JottraceError {
@@ -528,6 +525,23 @@ where
 {
     conn.query_row(sql, params, mapper)
         .optional()
+        .map_err(|source| sqlite_error(path, source))
+}
+
+/// Run `sql` with `params`, returning the single mapped row and routing query
+/// failures (including no matching row) through [`sqlite_error`] for `path`.
+pub(crate) fn query_one<T, P, F>(
+    path: &Path,
+    conn: &Connection,
+    sql: &str,
+    params: P,
+    mapper: F,
+) -> Result<T>
+where
+    P: rusqlite::Params,
+    F: FnOnce(&Row<'_>) -> rusqlite::Result<T>,
+{
+    conn.query_row(sql, params, mapper)
         .map_err(|source| sqlite_error(path, source))
 }
 

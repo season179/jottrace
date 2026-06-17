@@ -7,7 +7,7 @@ use std::time::Duration;
 
 use crate::storage::{
     IngestErrorSummary, LATEST_SCHEMA_VERSION, RAW_CODEC, ZSTD_CODEC, decode_event_payload,
-    decode_event_payload_prefix, query_collect, query_optional, sqlite_error,
+    decode_event_payload_prefix, query_collect, query_one, query_optional, sqlite_error,
     unresolved_ingest_errors_from_connection,
 };
 use crate::{JottraceError, Result, io_error};
@@ -422,9 +422,7 @@ fn open_web_database(path: &Path) -> Result<Connection> {
         .map_err(|source| sqlite_error(path, source))?;
     conn.busy_timeout(Duration::from_secs(5))
         .map_err(|source| sqlite_error(path, source))?;
-    let schema_version: i64 = conn
-        .query_row("PRAGMA user_version", [], |row| row.get(0))
-        .map_err(|source| sqlite_error(path, source))?;
+    let schema_version: i64 = query_one(path, &conn, "PRAGMA user_version", [], |row| row.get(0))?;
     if schema_version > LATEST_SCHEMA_VERSION {
         return Err(JottraceError::UnsupportedSchemaVersion {
             path: path.to_path_buf(),

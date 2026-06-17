@@ -9,8 +9,8 @@ use std::path::{Path, PathBuf};
 use std::time::UNIX_EPOCH;
 
 use crate::storage::{
-    DB_FILE_NAME, encode_event_payload, execute_sql, open_database, query_optional, sqlite_error,
-    status_from_connection,
+    DB_FILE_NAME, encode_event_payload, execute_sql, open_database, query_one, query_optional,
+    sqlite_error, status_from_connection,
 };
 use crate::{JottraceError, Result, io_error};
 
@@ -2630,12 +2630,13 @@ fn generation_event_count(
     session_id: i64,
     generation: i64,
 ) -> Result<i64> {
-    tx.query_row(
+    query_one(
+        &source_file.path,
+        tx,
         "SELECT COUNT(*) FROM events WHERE session_id = ?1 AND generation = ?2",
         [session_id, generation],
         |row| row.get(0),
     )
-    .map_err(|source| sqlite_error(&source_file.path, source))
 }
 
 fn read_bounded(path: &Path, pass_size: u64) -> Result<Vec<u8>> {

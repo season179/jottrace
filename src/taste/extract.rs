@@ -3,8 +3,8 @@ use std::path::{Path, PathBuf};
 
 use crate::JottraceError;
 use crate::storage::{
-    execute_sql, for_each_decoded_event_payload_for_session, query_collect, query_optional,
-    sqlite_error,
+    execute_sql, for_each_decoded_event_payload_for_session, query_collect, query_one,
+    query_optional, sqlite_error,
 };
 use crate::{Result, data_dir_from_env, open_locked_database};
 
@@ -241,30 +241,30 @@ fn session_needs_extract(
                 != current_event_count);
     }
 
-    let total: i64 = conn
-        .query_row(
-            "SELECT COUNT(*)
+    let total: i64 = query_one(
+        db_path,
+        conn,
+        "SELECT COUNT(*)
              FROM preference_examples
              WHERE source = ?1 AND source_session_id = ?2",
-            params![CLAUDE_SOURCE, source_session_id],
-            |row| row.get(0),
-        )
-        .map_err(|source| sqlite_error(db_path, source))?;
+        params![CLAUDE_SOURCE, source_session_id],
+        |row| row.get(0),
+    )?;
     if total == 0 {
         return Ok(true);
     }
 
-    let stale: i64 = conn
-        .query_row(
-            "SELECT COUNT(*)
+    let stale: i64 = query_one(
+        db_path,
+        conn,
+        "SELECT COUNT(*)
              FROM preference_examples
              WHERE source = ?1
                AND source_session_id = ?2
                AND extractor_version != ?3",
-            params![CLAUDE_SOURCE, source_session_id, EXTRACTOR_VERSION],
-            |row| row.get(0),
-        )
-        .map_err(|source| sqlite_error(db_path, source))?;
+        params![CLAUDE_SOURCE, source_session_id, EXTRACTOR_VERSION],
+        |row| row.get(0),
+    )?;
     Ok(stale > 0)
 }
 
@@ -273,23 +273,23 @@ fn count_merged_session_events(
     conn: &Connection,
     parent_db_id: i64,
 ) -> Result<u64> {
-    let parent_count: i64 = conn
-        .query_row(
-            "SELECT event_count FROM sessions WHERE id = ?1",
-            params![parent_db_id],
-            |row| row.get(0),
-        )
-        .map_err(|source| sqlite_error(db_path, source))?;
+    let parent_count: i64 = query_one(
+        db_path,
+        conn,
+        "SELECT event_count FROM sessions WHERE id = ?1",
+        params![parent_db_id],
+        |row| row.get(0),
+    )?;
 
-    let child_count: i64 = conn
-        .query_row(
-            "SELECT COALESCE(SUM(event_count), 0)
+    let child_count: i64 = query_one(
+        db_path,
+        conn,
+        "SELECT COALESCE(SUM(event_count), 0)
              FROM sessions
              WHERE source = ?1 AND parent_session_id = ?2",
-            params![CLAUDE_SOURCE, parent_db_id],
-            |row| row.get(0),
-        )
-        .map_err(|source| sqlite_error(db_path, source))?;
+        params![CLAUDE_SOURCE, parent_db_id],
+        |row| row.get(0),
+    )?;
 
     let total = parent_count
         .checked_add(child_count)

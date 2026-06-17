@@ -1,7 +1,7 @@
 use rusqlite::{Connection, params};
 use std::path::{Path, PathBuf};
 
-use crate::storage::sqlite_error;
+use crate::storage::{query_one, sqlite_error};
 use crate::{Result, data_dir_from_env, open_locked_database};
 
 use super::compiler::{EXTRACTOR_VERSION, HIGH_CONFIDENCE_THRESHOLD};
@@ -85,15 +85,15 @@ fn taste_status_from_connection(db_path: &Path, conn: &Connection) -> Result<Tas
 }
 
 fn count_claude_parent_sessions(db_path: &Path, conn: &Connection) -> Result<u64> {
-    let count: i64 = conn
-        .query_row(
-            "SELECT COUNT(*)
+    let count: i64 = query_one(
+        db_path,
+        conn,
+        "SELECT COUNT(*)
              FROM sessions
              WHERE source = ?1 AND parent_session_id IS NULL",
-            params![CLAUDE_SOURCE],
-            |row| row.get(0),
-        )
-        .map_err(|source| sqlite_error(db_path, source))?;
+        params![CLAUDE_SOURCE],
+        |row| row.get(0),
+    )?;
     Ok(u64::try_from(count).expect("session count fits in u64"))
 }
 
@@ -126,13 +126,13 @@ fn count_sessions_up_to_date(db_path: &Path, conn: &Connection) -> Result<u64> {
 }
 
 fn count_proposals(db_path: &Path, conn: &Connection) -> Result<u64> {
-    let count: i64 = conn
-        .query_row(
-            "SELECT COUNT(*) FROM preference_examples WHERE source = ?1",
-            params![CLAUDE_SOURCE],
-            |row| row.get(0),
-        )
-        .map_err(|source| sqlite_error(db_path, source))?;
+    let count: i64 = query_one(
+        db_path,
+        conn,
+        "SELECT COUNT(*) FROM preference_examples WHERE source = ?1",
+        params![CLAUDE_SOURCE],
+        |row| row.get(0),
+    )?;
     Ok(u64::try_from(count).expect("proposal count fits in u64"))
 }
 
@@ -202,14 +202,14 @@ fn count_evidence(db_path: &Path, conn: &Connection) -> Result<TasteEvidenceCoun
 }
 
 fn count_high_confidence_proposals(db_path: &Path, conn: &Connection) -> Result<u64> {
-    let count: i64 = conn
-        .query_row(
-            "SELECT COUNT(*)
+    let count: i64 = query_one(
+        db_path,
+        conn,
+        "SELECT COUNT(*)
              FROM preference_examples
              WHERE source = ?1 AND confidence >= ?2",
-            params![CLAUDE_SOURCE, HIGH_CONFIDENCE_THRESHOLD],
-            |row| row.get(0),
-        )
-        .map_err(|source| sqlite_error(db_path, source))?;
+        params![CLAUDE_SOURCE, HIGH_CONFIDENCE_THRESHOLD],
+        |row| row.get(0),
+    )?;
     Ok(u64::try_from(count).expect("high-confidence count fits in u64"))
 }

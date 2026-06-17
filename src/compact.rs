@@ -3,7 +3,7 @@ use std::path::PathBuf;
 
 use crate::storage::{
     DB_FILE_NAME, RAW_CODEC, ZSTD_CODEC, ZSTD_MIN_PAYLOAD_BYTES, decode_event_payload,
-    encode_event_payload, open_database, sqlite_error,
+    encode_event_payload, open_database, query_one, sqlite_error,
     unresolved_ingest_error_count_from_connection,
 };
 use crate::{JottraceError, Result, data_dir_from_env};
@@ -434,22 +434,24 @@ fn raw_event_batch(
 }
 
 fn count_small_raw_events(path: &std::path::Path, conn: &Connection) -> Result<u64> {
-    let count: i64 = conn
-        .query_row(
-            "SELECT COUNT(*)
+    let count: i64 = query_one(
+        path,
+        conn,
+        "SELECT COUNT(*)
              FROM events
              WHERE codec = ?1
                AND payload_size < ?2",
-            params![RAW_CODEC, ZSTD_MIN_PAYLOAD_BYTES as i64],
-            |row| row.get(0),
-        )
-        .map_err(|source| sqlite_error(path, source))?;
+        params![RAW_CODEC, ZSTD_MIN_PAYLOAD_BYTES as i64],
+        |row| row.get(0),
+    )?;
     Ok(count as u64)
 }
 
 fn event_storage_stats(path: &std::path::Path, conn: &Connection) -> Result<EventStorageStats> {
     let (raw_events, zstd_events, unsupported_codec_events, stored_bytes): (i64, i64, i64, i64) =
-        conn.query_row(
+        query_one(
+            path,
+            conn,
             "SELECT
                 COALESCE(SUM(CASE WHEN codec = ?1 THEN 1 ELSE 0 END), 0),
                 COALESCE(SUM(CASE WHEN codec = ?2 THEN 1 ELSE 0 END), 0),
@@ -458,8 +460,7 @@ fn event_storage_stats(path: &std::path::Path, conn: &Connection) -> Result<Even
              FROM events",
             params![RAW_CODEC, ZSTD_CODEC],
             |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
-        )
-        .map_err(|source| sqlite_error(path, source))?;
+        )?;
 
     Ok(EventStorageStats {
         raw_events: raw_events as u64,
@@ -470,11 +471,7 @@ fn event_storage_stats(path: &std::path::Path, conn: &Connection) -> Result<Even
 }
 
 fn sqlite_reclaimable_bytes(path: &std::path::Path, conn: &Connection) -> Result<u64> {
-    let page_size: i64 = conn
-        .query_row("PRAGMA page_size", [], |row| row.get(0))
-        .map_err(|source| sqlite_error(path, source))?;
-    let freelist_count: i64 = conn
-        .query_row("PRAGMA freelist_count", [], |row| row.get(0))
-        .map_err(|source| sqlite_error(path, source))?;
+    let page_size: i64 = query_one(path, conn, "PRAGMA page_size", [], |row| row.get(0))?;
+    let freelist_count: i64 = query_one(path, conn, "PRAGMA freelist_count", [], |row| row.get(0))?;
     Ok((page_size as u64).saturating_mul(freelist_count as u64))
 }
