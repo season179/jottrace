@@ -699,3 +699,70 @@ fn taste_extraction_architecture_complete() {
         "show module should expose inspectable file_timelines via run_taste_show_timeline"
     );
 }
+
+#[test]
+fn taste_extraction_cli_surface_complete() {
+    let plan =
+        fs::read_to_string("notes/taste-extraction-plan.md").expect("read taste extraction plan");
+
+    for required in [
+        "## CLI surface",
+        "`jottrace taste extract [--session <id>]`",
+        "`jottrace taste status`",
+        "`jottrace taste show timeline --session <id> --file <path>`",
+        "`jottrace taste show example <id>`",
+        "`jottrace taste export --format jsonl [--out <path>]`",
+        "(context, chosen, rejected)",
+        "Idempotent",
+        "extractor_version",
+        "coverage (% of file-modifying events resolved)",
+    ] {
+        assert!(
+            plan.contains(required),
+            "taste extraction plan should document CLI surface via {required}"
+        );
+    }
+
+    let main_rs = fs::read_to_string("src/main.rs").expect("read main.rs");
+    for required in [
+        "run_taste_extract_command",
+        "run_taste_status_command",
+        "run_taste_show_timeline_command",
+        "run_taste_show_example_command",
+        "run_taste_export_command",
+        "parse_taste_extract_command",
+        "parse_taste_export_command",
+        "--session",
+        "--force",
+        "--details",
+        "--file",
+        "--format",
+        "--out",
+    ] {
+        assert!(
+            main_rs.contains(required),
+            "main.rs should implement CLI surface via {required}"
+        );
+    }
+
+    let extract = fs::read_to_string("src/taste/extract.rs").expect("read extract module");
+    for required in ["session_needs_extract", "EXTRACTOR_VERSION", "taste_extractions"] {
+        assert!(
+            extract.contains(required),
+            "extract module should implement idempotent CLI semantics via {required}"
+        );
+    }
+
+    let status = fs::read_to_string("src/taste/status.rs").expect("read status module");
+    for required in [
+        "sessions_processed",
+        "coverage_percent",
+        "TasteOutcomeCounts",
+        "HIGH_CONFIDENCE_THRESHOLD",
+    ] {
+        assert!(
+            status.contains(required),
+            "status module should report CLI coverage counts via {required}"
+        );
+    }
+}
