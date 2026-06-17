@@ -1,5 +1,30 @@
 # Changelog
 
+## v26.6.0 - 2026-06-17
+
+### Summary
+
+- Internal refactor only; no behavior change and no new migrations. Deduplicates
+  repeated logic across the `ingest`, CLI, `storage`, and `web` modules so the
+  same operation lives in one place. Changes since `v26.5.13`.
+
+### Changes
+
+- `ingest` pulls copy-pasted transaction and error-resolution sequences into
+  shared helpers (`begin_transaction`, `commit_skipped_session_refresh`,
+  `resolve_*_and_commit`), consolidates the per-source `sort`/`dedup` and
+  known-source-file construction, and adds stored-session match predicates. The
+  OpenCode and Hermes SQLite ingest paths now share one snapshot routine, and
+  the SQLite discovery error returns are collapsed. The bounds used to clear a
+  stale `invalid_json` error after a JSONL pass travel in a named
+  `JsonResolution` struct instead of a bare tuple.
+- `main` extracts the per-command report printers and shared usage/failure
+  message printers; CLI output is unchanged.
+- `storage` merges the two event-codec rejection queries into a single query
+  with a NULL-guarded generation/seq bound.
+- `web` extracts shared `paginate` and `render_pager` helpers used by the
+  session and event listings.
+
 ## v26.5.13 - 2026-05-31
 
 ### Summary
