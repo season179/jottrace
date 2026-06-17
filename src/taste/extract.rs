@@ -218,6 +218,24 @@ fn session_needs_extract(
     parent_db_id: i64,
     source_session_id: &str,
 ) -> Result<bool> {
+    let current_event_count = count_merged_session_events(db_path, conn, parent_db_id)?;
+    let stored = conn
+        .query_row(
+            "SELECT extractor_version, event_count
+             FROM taste_extractions
+             WHERE source = ?1 AND source_session_id = ?2",
+            params![CLAUDE_SOURCE, source_session_id],
+            |row| Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?)),
+        )
+        .optional()
+        .map_err(|source| sqlite_error(db_path, source))?;
+
+    if let Some((version, event_count)) = stored {
+        return Ok(version != EXTRACTOR_VERSION
+            || u64::try_from(event_count).expect("event_count fits in u64")
+                != current_event_count);
+    }
+
     let total: i64 = conn
         .query_row(
             "SELECT COUNT(*)
@@ -242,30 +260,7 @@ fn session_needs_extract(
             |row| row.get(0),
         )
         .map_err(|source| sqlite_error(db_path, source))?;
-    if stale > 0 {
-        return Ok(true);
-    }
-
-    let current_event_count = count_merged_session_events(db_path, conn, parent_db_id)?;
-    let stored = conn
-        .query_row(
-            "SELECT extractor_version, event_count
-             FROM taste_extractions
-             WHERE source = ?1 AND source_session_id = ?2",
-            params![CLAUDE_SOURCE, source_session_id],
-            |row| Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?)),
-        )
-        .optional()
-        .map_err(|source| sqlite_error(db_path, source))?;
-
-    Ok(match stored {
-        None => true,
-        Some((version, event_count)) => {
-            version != EXTRACTOR_VERSION
-                || u64::try_from(event_count).expect("event_count fits in u64")
-                    != current_event_count
-        }
-    })
+    Ok(stale > 0)
 }
 
 fn count_merged_session_events(

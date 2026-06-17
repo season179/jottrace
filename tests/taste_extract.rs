@@ -233,6 +233,46 @@ fn taste_extract_reprocesses_session_when_merged_event_count_changes() {
 }
 
 #[test]
+fn taste_extract_skips_session_with_taste_extractions_row_and_no_preference_examples() {
+    let root = common::temp_root("taste-extract-zero-proposals");
+    let data_dir = root.join(".jottrace");
+    install_taste_claude_fixture(&root);
+    run_ingest_with_home(&root, &data_dir);
+
+    run_extract(
+        &root,
+        &data_dir,
+        TasteExtractOptions {
+            source_session_id: Some(TASTE_SESSION_ID.to_string()),
+            sidecar_history_root: Some(root.join(".claude/file-history")),
+            ..TasteExtractOptions::default()
+        },
+    );
+
+    let conn = open_database(&data_dir.join(DB_FILE_NAME)).expect("open db");
+    conn.execute(
+        "DELETE FROM preference_examples WHERE source = 'claude_cli' AND source_session_id = ?1",
+        params![TASTE_SESSION_ID],
+    )
+    .expect("clear preference examples");
+
+    let second = run_extract(
+        &root,
+        &data_dir,
+        TasteExtractOptions {
+            source_session_id: Some(TASTE_SESSION_ID.to_string()),
+            sidecar_history_root: Some(root.join(".claude/file-history")),
+            ..TasteExtractOptions::default()
+        },
+    );
+    assert!(
+        second.contains("sessions_skipped=1"),
+        "expected skip when taste_extractions exists without preference rows, got: {second}"
+    );
+    assert!(second.contains("sessions_processed=0"));
+}
+
+#[test]
 fn taste_extract_cli_reports_counts_for_fixture_session() {
     let root = common::temp_root("taste-extract-cli");
     let data_dir = root.join(".jottrace");

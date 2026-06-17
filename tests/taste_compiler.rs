@@ -122,6 +122,15 @@ fn compiler_labels_fixture_proposals_with_present_at_session_end_outcomes() {
     let reject = example_by_tool(&examples, "toolu_taste_edit_reject");
     assert_eq!(reject.outcome, PreferenceOutcome::Rejected);
     assert_eq!(reject.evidence_kind, EvidenceKind::PermissionDenial);
+    assert!(
+        reject
+            .context
+            .as_deref()
+            .is_some_and(|content| content.contains("--- prior events ---"))
+    );
+    assert!(reject.context.as_deref().is_some_and(|content| {
+        content.contains("[seq=") && content.contains("toolu_taste_edit_accept")
+    }));
 
     let revert = example_by_tool(&examples, "toolu_taste_edit_revert");
     assert_eq!(revert.outcome, PreferenceOutcome::Accepted);

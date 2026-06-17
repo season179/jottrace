@@ -651,8 +651,13 @@ fn print_taste_status_report(report: &jottrace::TasteStatusReport, details: bool
         println!("  bash_correlation: {}", report.evidence.bash_correlation);
         println!("  mcp_correlation: {}", report.evidence.mcp_correlation);
         println!("  permission_denial: {}", report.evidence.permission_denial);
-        println!("  missing_final_state: {}", report.evidence.missing_final_state);
-        let low_confidence = report.proposals.saturating_sub(report.high_confidence_proposals);
+        println!(
+            "  missing_final_state: {}",
+            report.evidence.missing_final_state
+        );
+        let low_confidence = report
+            .proposals
+            .saturating_sub(report.high_confidence_proposals);
         println!("low_confidence_proposals: {low_confidence}");
     }
     println!("claude_parent_sessions: {}", report.claude_parent_sessions);

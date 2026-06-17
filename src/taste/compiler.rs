@@ -10,10 +10,13 @@ use super::parse::{ContentRef, ParseKind, ParsedEvent};
 use super::timeline::{FileTimelineRow, normalize_file_path};
 
 /// Version tag stored on compiled preference rows for idempotent re-extraction.
-pub const EXTRACTOR_VERSION: &str = "0.1.6";
+pub const EXTRACTOR_VERSION: &str = "0.1.7";
 
 /// Minimum confidence for a proposal to count toward high-confidence coverage.
 pub const HIGH_CONFIDENCE_THRESHOLD: f64 = 1.0;
+
+/// Maximum number of prior tool events included in proposal context.
+pub const PRIOR_EVENT_CONTEXT_LIMIT: usize = 5;
 
 /// Labeled outcome for a detected tool proposal.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -156,7 +159,7 @@ impl PreferenceCompiler {
 
             let context = file_path
                 .as_deref()
-                .and_then(|path| before_state_content(path, event.seq, &timelines));
+                .and_then(|path| build_proposal_context(path, event.seq, events, &timelines));
 
             examples.push(PreferenceExample {
                 source: source.to_string(),
@@ -298,6 +301,59 @@ fn before_state_content(
         .filter(|row| row.event_seq < proposal_seq)
         .max_by_key(|row| row.seq)
         .and_then(|row| row.content.clone())
+}
+
+fn build_proposal_context(
+    file_path: &str,
+    proposal_seq: usize,
+    events: &[ParsedEvent],
+    timelines: &HashMap<String, FileTimelineIndex>,
+) -> Option<String> {
+    let file_before = before_state_content(file_path, proposal_seq, timelines)?;
+    let prior = prior_event_lines(events, proposal_seq);
+    if prior.is_empty() {
+        return Some(file_before);
+    }
+    Some(format!(
+        "--- prior events ---\n{}\n\n--- file before ---\n{}",
+        prior.join("\n"),
+        file_before
+    ))
+}
+
+fn prior_event_lines(events: &[ParsedEvent], proposal_seq: usize) -> Vec<String> {
+    let mut lines: Vec<String> = events
+        .iter()
+        .filter(|event| event.seq < proposal_seq)
+        .filter_map(format_prior_event_line)
+        .collect();
+    if lines.len() > PRIOR_EVENT_CONTEXT_LIMIT {
+        lines.drain(..lines.len() - PRIOR_EVENT_CONTEXT_LIMIT);
+    }
+    lines
+}
+
+fn format_prior_event_line(event: &ParsedEvent) -> Option<String> {
+    match event.kind {
+        ParseKind::ToolProposal => {
+            let tool = event.tool_name.as_deref().unwrap_or("unknown");
+            let path = event
+                .file_path
+                .as_deref()
+                .map(|path| format!(" {path}"))
+                .unwrap_or_default();
+            Some(format!("[seq={} tool_proposal {tool}{path}]", event.seq))
+        }
+        ParseKind::ToolResult => {
+            let tool_ref = event.tool_ref.as_deref().unwrap_or("unknown");
+            Some(format!("[seq={} tool_result {tool_ref}]", event.seq))
+        }
+        ParseKind::PermissionDenial => {
+            let tool_ref = event.tool_ref.as_deref().unwrap_or("unknown");
+            Some(format!("[seq={} permission_denial {tool_ref}]", event.seq))
+        }
+        ParseKind::FileSnapshot => None,
+    }
 }
 
 fn classify_present_at_session_end(
@@ -502,6 +558,36 @@ mod tests {
             tool_name: Some(tool_name.to_string()),
             source_stream: SourceStream::Parent,
         }
+    }
+
+    #[test]
+    fn build_proposal_context_includes_prior_tool_events_and_file_excerpt() {
+        let events = vec![
+            proposal(1, "toolu_first", "Edit", Some("src/a.rs"), Some("first")),
+            ParsedEvent {
+                seq: 2,
+                timestamp: None,
+                kind: ParseKind::ToolResult,
+                file_path: None,
+                content_or_ref: None,
+                tool_ref: Some("toolu_first".to_string()),
+                tool_name: None,
+                source_stream: SourceStream::Parent,
+            },
+            proposal(3, "toolu_second", "Edit", Some("src/a.rs"), Some("second")),
+        ];
+        let rows = vec![
+            timeline_row("src/a.rs", 0, 0, "base\n", None),
+            timeline_row("src/a.rs", 1, 2, "base\nfirst\n", Some("toolu_first")),
+        ];
+        let timelines = index_timelines(&rows);
+
+        let context = build_proposal_context("src/a.rs", 3, &events, &timelines).expect("context");
+        assert!(context.contains("--- prior events ---"));
+        assert!(context.contains("[seq=1 tool_proposal Edit src/a.rs]"));
+        assert!(context.contains("[seq=2 tool_result toolu_first]"));
+        assert!(context.contains("--- file before ---"));
+        assert!(context.contains("base\nfirst\n"));
     }
 
     #[test]
