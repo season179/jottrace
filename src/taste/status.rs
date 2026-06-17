@@ -132,17 +132,17 @@ fn count_proposals(db_path: &Path, conn: &Connection) -> Result<u64> {
     )
 }
 
-fn count_outcomes(db_path: &Path, conn: &Connection) -> Result<TasteOutcomeCounts> {
+/// Run a `(key, COUNT(*))` GROUP BY query over `CLAUDE_SOURCE` preference rows and hand
+/// each `(key, count)` pair to `record`, routing every fallible step through [`sqlite_error`].
+fn for_each_grouped_count<F: FnMut(&str, u64)>(
+    db_path: &Path,
+    conn: &Connection,
+    sql: &str,
+    mut record: F,
+) -> Result<()> {
     let mut statement = conn
-        .prepare(
-            "SELECT outcome, COUNT(*)
-             FROM preference_examples
-             WHERE source = ?1
-             GROUP BY outcome",
-        )
+        .prepare(sql)
         .map_err(|source| sqlite_error(db_path, source))?;
-
-    let mut counts = TasteOutcomeCounts::default();
     let rows = statement
         .query_map(params![CLAUDE_SOURCE], |row| {
             Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
@@ -150,40 +150,44 @@ fn count_outcomes(db_path: &Path, conn: &Connection) -> Result<TasteOutcomeCount
         .map_err(|source| sqlite_error(db_path, source))?;
 
     for row in rows {
-        let (outcome, count) = row.map_err(|source| sqlite_error(db_path, source))?;
-        let count = u64::try_from(count).expect("outcome count fits in u64");
-        match outcome.as_str() {
+        let (key, count) = row.map_err(|source| sqlite_error(db_path, source))?;
+        let count = u64::try_from(count).expect("grouped count fits in u64");
+        record(&key, count);
+    }
+
+    Ok(())
+}
+
+fn count_outcomes(db_path: &Path, conn: &Connection) -> Result<TasteOutcomeCounts> {
+    let mut counts = TasteOutcomeCounts::default();
+    for_each_grouped_count(
+        db_path,
+        conn,
+        "SELECT outcome, COUNT(*)
+             FROM preference_examples
+             WHERE source = ?1
+             GROUP BY outcome",
+        |outcome, count| match outcome {
             "accepted" => counts.accepted = count,
             "rejected" => counts.rejected = count,
             "edited" => counts.edited = count,
             _ => {}
-        }
-    }
+        },
+    )?;
 
     Ok(counts)
 }
 
 fn count_evidence(db_path: &Path, conn: &Connection) -> Result<TasteEvidenceCounts> {
-    let mut statement = conn
-        .prepare(
-            "SELECT evidence_kind, COUNT(*)
+    let mut counts = TasteEvidenceCounts::default();
+    for_each_grouped_count(
+        db_path,
+        conn,
+        "SELECT evidence_kind, COUNT(*)
              FROM preference_examples
              WHERE source = ?1
              GROUP BY evidence_kind",
-        )
-        .map_err(|source| sqlite_error(db_path, source))?;
-
-    let mut counts = TasteEvidenceCounts::default();
-    let rows = statement
-        .query_map(params![CLAUDE_SOURCE], |row| {
-            Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
-        })
-        .map_err(|source| sqlite_error(db_path, source))?;
-
-    for row in rows {
-        let (evidence_kind, count) = row.map_err(|source| sqlite_error(db_path, source))?;
-        let count = u64::try_from(count).expect("evidence count fits in u64");
-        match evidence_kind.as_str() {
+        |evidence_kind, count| match evidence_kind {
             "direct_edit" => counts.direct_edit = count,
             "direct_write" => counts.direct_write = count,
             "bash_correlation" => counts.bash_correlation = count,
@@ -191,8 +195,8 @@ fn count_evidence(db_path: &Path, conn: &Connection) -> Result<TasteEvidenceCoun
             "permission_denial" => counts.permission_denial = count,
             "missing_final_state" => counts.missing_final_state = count,
             _ => {}
-        }
-    }
+        },
+    )?;
 
     Ok(counts)
 }
