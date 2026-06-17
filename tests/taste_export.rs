@@ -81,6 +81,10 @@ fn install_taste_claude_fixture(root: &Path) {
             &history_dir.join(format!("fixture-manual1@{version}")),
         );
     }
+    copy_fixture_file(
+        &format!("claude-cli/file-history/{TASTE_SESSION_ID}/fixture-missingfinal1@v1"),
+        &history_dir.join("fixture-missingfinal1@v1"),
+    );
 }
 
 fn run_ingest_with_home(home: &Path, data_dir: &Path) {
@@ -136,10 +140,10 @@ fn taste_export_writes_fixture_rows_to_file() {
     )
     .expect("export preferences");
 
-    assert_eq!(report.rows_exported, 11);
+    assert_eq!(report.rows_exported, 12);
     let content = fs::read_to_string(&out_path).expect("read export file");
     let rows = parse_jsonl(&content);
-    assert_eq!(rows.len(), 11);
+    assert_eq!(rows.len(), 12);
 
     let rejected = rows
         .iter()
@@ -192,10 +196,10 @@ fn taste_export_cli_writes_jsonl_to_stdout() {
 
     let stdout = String::from_utf8_lossy(&output.stdout);
     let rows = parse_jsonl(&stdout);
-    assert_eq!(rows.len(), 11);
+    assert_eq!(rows.len(), 12);
 
     let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(stderr.contains("rows_exported: 11"));
+    assert!(stderr.contains("rows_exported: 12"));
 
     let bash = rows
         .iter()
@@ -203,6 +207,14 @@ fn taste_export_cli_writes_jsonl_to_stdout() {
         .expect("bash row");
     assert_eq!(bash["outcome"], PreferenceOutcome::Accepted.as_str());
     assert_eq!(bash["evidence_kind"], "bash_correlation");
+
+    let missing_final = rows
+        .iter()
+        .find(|row| row["tool_use_id"] == "toolu_taste_edit_missing_final")
+        .expect("missing final sidecar row");
+    assert_eq!(missing_final["outcome"], "rejected");
+    assert_eq!(missing_final["evidence_kind"], "missing_final_state");
+    assert_eq!(missing_final["confidence"], 0.3);
 }
 
 #[test]

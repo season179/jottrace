@@ -1,0 +1,3 @@
+// missing-final fixture baseline
+
+pub fn missing_final_marker() -> bool { true }

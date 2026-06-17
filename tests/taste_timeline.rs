@@ -189,6 +189,29 @@ fn timeline_materializer_builds_per_file_snapshot_sequence_from_fixture() {
 }
 
 #[test]
+fn timeline_materializer_flags_missing_final_sidecar_on_session_end() {
+    let rows = FileTimelineMaterializer::materialize(
+        "claude_cli",
+        TASTE_SESSION_ID,
+        Some(TASTE_CWD),
+        &fixture_resolver(),
+        &merged_fixture_events(),
+    )
+    .expect("materialize");
+
+    let missing_final_rows: Vec<_> = rows
+        .iter()
+        .filter(|row| row.file_path == "src/taste_missing_final.rs")
+        .collect();
+    assert_eq!(missing_final_rows.len(), 3);
+    assert_eq!(
+        missing_final_rows[2].source_kind,
+        TimelineSourceKind::MissingSidecar
+    );
+    assert_eq!(missing_final_rows[2].content, None);
+}
+
+#[test]
 fn timeline_materializer_flags_missing_sidecar_without_content() {
     let resolver = fixture_resolver();
     let mut events = merged_fixture_events();

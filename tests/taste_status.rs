@@ -82,6 +82,10 @@ fn install_taste_claude_fixture(root: &Path) {
             &history_dir.join(format!("fixture-manual1@{version}")),
         );
     }
+    copy_fixture_file(
+        &format!("claude-cli/file-history/{TASTE_SESSION_ID}/fixture-missingfinal1@v1"),
+        &history_dir.join("fixture-missingfinal1@v1"),
+    );
 }
 
 fn run_ingest_with_home(home: &Path, data_dir: &Path) {
@@ -123,17 +127,17 @@ fn taste_status_reports_fixture_coverage_after_extract() {
     assert_eq!(report.claude_parent_sessions, 1);
     assert_eq!(report.sessions_processed, 1);
     assert_eq!(report.sessions_pending, 0);
-    assert_eq!(report.proposals, 11);
+    assert_eq!(report.proposals, 12);
     assert_eq!(
         report.outcomes,
         TasteOutcomeCounts {
             accepted: 8,
-            rejected: 2,
+            rejected: 3,
             edited: 1,
         }
     );
     assert_eq!(report.high_confidence_proposals, 8);
-    assert!((report.coverage_percent - (8.0 / 11.0 * 100.0)).abs() < 1e-9);
+    assert!((report.coverage_percent - (8.0 / 12.0 * 100.0)).abs() < 1e-9);
     assert_eq!(
         report.evidence,
         TasteEvidenceCounts {
@@ -142,7 +146,7 @@ fn taste_status_reports_fixture_coverage_after_extract() {
             bash_correlation: 1,
             mcp_correlation: 1,
             permission_denial: 1,
-            missing_final_state: 0,
+            missing_final_state: 1,
         }
     );
 }
@@ -170,11 +174,11 @@ fn taste_status_cli_reports_fixture_counts() {
     );
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(stdout.contains("sessions_processed: 1"));
-    assert!(stdout.contains("proposals: 11"));
+    assert!(stdout.contains("proposals: 12"));
     assert!(stdout.contains("accepted: 8"));
-    assert!(stdout.contains("rejected: 2"));
+    assert!(stdout.contains("rejected: 3"));
     assert!(stdout.contains("edited: 1"));
-    assert!(stdout.contains("high_confidence_coverage: 72.7%"));
+    assert!(stdout.contains("high_confidence_coverage: 66.7%"));
 }
 
 #[test]
@@ -202,7 +206,8 @@ fn taste_status_details_reports_evidence_breakdown() {
     assert!(stdout.contains("evidence:"));
     assert!(stdout.contains("bash_correlation: 1"));
     assert!(stdout.contains("mcp_correlation: 1"));
-    assert!(stdout.contains("low_confidence_proposals: 3"));
+    assert!(stdout.contains("missing_final_state: 1"));
+    assert!(stdout.contains("low_confidence_proposals: 4"));
 }
 
 #[test]

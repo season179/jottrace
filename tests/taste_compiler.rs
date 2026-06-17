@@ -102,6 +102,7 @@ fn compiler_labels_fixture_proposals_with_present_at_session_end_outcomes() {
         "toolu_taste_edit_partial",
         "toolu_taste_edit_partial_fix",
         "toolu_taste_edit_manual",
+        "toolu_taste_edit_missing_final",
     ] {
         assert!(
             by_tool.contains_key(required),
@@ -229,6 +230,21 @@ fn compiler_labels_fixture_proposals_with_present_at_session_end_outcomes() {
             .proposal_content
             .as_deref()
             .is_some_and(|content| content.contains("agent_fn"))
+    );
+
+    let missing_final = example_by_tool(&examples, "toolu_taste_edit_missing_final");
+    assert_eq!(
+        missing_final.file_path.as_deref(),
+        Some("src/taste_missing_final.rs")
+    );
+    assert_eq!(missing_final.outcome, PreferenceOutcome::Rejected);
+    assert_eq!(missing_final.evidence_kind, EvidenceKind::MissingFinalState);
+    assert_eq!(missing_final.confidence, 0.3);
+    assert!(
+        missing_final
+            .proposal_content
+            .as_deref()
+            .is_some_and(|content| content.contains("missing_final_marker"))
     );
 }
 

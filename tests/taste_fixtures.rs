@@ -32,6 +32,8 @@ fn taste_fixture_corpus_has_required_session_shapes() {
         "partial_drop",
         "human_edited_marker",
         "toolu_taste_edit_manual",
+        "toolu_taste_edit_missing_final",
+        "missing_final_marker",
         "notebook_marker",
     ] {
         assert!(
@@ -95,6 +97,30 @@ fn taste_fixture_corpus_has_manual_edit_sidecar_blob() {
     assert!(
         body.contains("human_edited_marker"),
         "manual sidecar should contain human IDE edit marker"
+    );
+}
+
+#[test]
+fn taste_fixture_corpus_has_missing_final_sidecar_blob_only_for_intermediate_snapshot() {
+    let intermediate = taste_fixture(&format!(
+        "claude-cli/file-history/{TASTE_SESSION_ID}/fixture-missingfinal1@v1"
+    ));
+    assert!(
+        intermediate.exists(),
+        "missing sidecar fixture-missingfinal1@v1"
+    );
+    let body = fs::read_to_string(intermediate).expect("read missing-final sidecar");
+    assert!(
+        body.contains("missing_final_marker"),
+        "intermediate sidecar should contain missing-final marker"
+    );
+
+    let final_sidecar = taste_fixture(&format!(
+        "claude-cli/file-history/{TASTE_SESSION_ID}/fixture-missingfinal1@v2"
+    ));
+    assert!(
+        !final_sidecar.exists(),
+        "final sidecar fixture-missingfinal1@v2 should be absent to simulate R1 degradation"
     );
 }
 

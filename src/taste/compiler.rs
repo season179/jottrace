@@ -10,7 +10,7 @@ use super::parse::{ContentRef, ParseKind, ParsedEvent};
 use super::timeline::{FileTimelineRow, normalize_file_path};
 
 /// Version tag stored on compiled preference rows for idempotent re-extraction.
-pub const EXTRACTOR_VERSION: &str = "0.1.9";
+pub const EXTRACTOR_VERSION: &str = "0.1.10";
 
 /// Minimum confidence for a proposal to count toward high-confidence coverage.
 pub const HIGH_CONFIDENCE_THRESHOLD: f64 = 1.0;
@@ -394,6 +394,14 @@ fn classify_present_at_session_end(
     let post_apply = post_apply_content(tool_name, tool_use_id, proposal_seq, index, events);
     let final_content = final_state_content(index);
 
+    if final_content.is_none() {
+        return (
+            PreferenceOutcome::Rejected,
+            0.3,
+            EvidenceKind::MissingFinalState,
+        );
+    }
+
     match (post_apply.as_deref(), final_content) {
         (None, _) => (PreferenceOutcome::Rejected, base_confidence, evidence_kind),
         (Some(post), Some(final_content)) => {
@@ -410,11 +418,7 @@ fn classify_present_at_session_end(
                 (PreferenceOutcome::Rejected, base_confidence, evidence_kind)
             }
         }
-        (Some(_), None) => (
-            PreferenceOutcome::Rejected,
-            0.3,
-            EvidenceKind::MissingFinalState,
-        ),
+        (Some(_), None) => unreachable!("final_content checked above"),
     }
 }
 
@@ -693,6 +697,28 @@ mod tests {
             timeline_row("src/a.rs", 0, 0, "base\n", None),
             timeline_row("src/a.rs", 1, 2, "base\nadded\n", Some("toolu_edit")),
             timeline_row_missing_sidecar("src/a.rs", 2, 4, None),
+        ];
+
+        let examples = PreferenceCompiler::compile("claude_cli", "sess", None, &events, &rows);
+        assert_eq!(examples.len(), 1);
+        assert_eq!(examples[0].outcome, PreferenceOutcome::Rejected);
+        assert_eq!(examples[0].evidence_kind, EvidenceKind::MissingFinalState);
+        assert_eq!(examples[0].confidence, 0.3);
+    }
+
+    #[test]
+    fn compiler_rejects_when_latest_snapshot_sidecar_missing_and_trigger_maps_to_it() {
+        let events = vec![proposal(
+            1,
+            "toolu_edit",
+            "Edit",
+            Some("src/a.rs"),
+            Some("added\n"),
+        )];
+        let rows = vec![
+            timeline_row("src/a.rs", 0, 0, "base\n", None),
+            timeline_row("src/a.rs", 1, 2, "base\nadded\n", Some("toolu_edit")),
+            timeline_row_missing_sidecar("src/a.rs", 2, 4, Some("toolu_edit")),
         ];
 
         let examples = PreferenceCompiler::compile("claude_cli", "sess", None, &events, &rows);
