@@ -103,6 +103,7 @@ fn compiler_labels_fixture_proposals_with_present_at_session_end_outcomes() {
         "toolu_taste_edit_partial_fix",
         "toolu_taste_edit_manual",
         "toolu_taste_edit_missing_final",
+        "toolu_taste_edit_untracked",
     ] {
         assert!(
             by_tool.contains_key(required),
@@ -245,6 +246,21 @@ fn compiler_labels_fixture_proposals_with_present_at_session_end_outcomes() {
             .proposal_content
             .as_deref()
             .is_some_and(|content| content.contains("missing_final_marker"))
+    );
+
+    let untracked = example_by_tool(&examples, "toolu_taste_edit_untracked");
+    assert_eq!(
+        untracked.file_path.as_deref(),
+        Some("src/taste_untracked.rs")
+    );
+    assert_eq!(untracked.outcome, PreferenceOutcome::Rejected);
+    assert_eq!(untracked.evidence_kind, EvidenceKind::MissingFinalState);
+    assert_eq!(untracked.confidence, 0.3);
+    assert!(
+        untracked
+            .proposal_content
+            .as_deref()
+            .is_some_and(|content| content.contains("untracked_marker"))
     );
 }
 

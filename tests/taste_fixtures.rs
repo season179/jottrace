@@ -34,6 +34,8 @@ fn taste_fixture_corpus_has_required_session_shapes() {
         "toolu_taste_edit_manual",
         "toolu_taste_edit_missing_final",
         "missing_final_marker",
+        "toolu_taste_edit_untracked",
+        "untracked_marker",
         "notebook_marker",
     ] {
         assert!(

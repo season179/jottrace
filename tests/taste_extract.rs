@@ -134,7 +134,7 @@ fn taste_extract_materializes_fixture_session_end_to_end() {
         },
     );
     assert!(summary.contains("sessions_processed=1"));
-    assert!(summary.contains("preference_examples=12"));
+    assert!(summary.contains("preference_examples=13"));
 
     let conn = open_database(&data_dir.join(DB_FILE_NAME)).expect("open db");
     let timeline_count: i64 = conn
@@ -153,7 +153,7 @@ fn taste_extract_materializes_fixture_session_end_to_end() {
             |row| row.get(0),
         )
         .expect("count examples");
-    assert_eq!(example_count, 12);
+    assert_eq!(example_count, 13);
 
     let reverted_outcome: String = conn
         .query_row(
@@ -304,5 +304,5 @@ fn taste_extract_cli_reports_counts_for_fixture_session() {
     );
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(stdout.contains("sessions_processed: 1"));
-    assert!(stdout.contains("preference_examples: 12"));
+    assert!(stdout.contains("preference_examples: 13"));
 }
