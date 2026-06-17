@@ -468,3 +468,61 @@ fn taste_extraction_risk_coverage_complete() {
         );
     }
 }
+
+#[test]
+fn taste_extraction_plan_corrections_complete() {
+    let plan =
+        fs::read_to_string("notes/taste-extraction-plan.md").expect("read taste extraction plan");
+
+    for required in [
+        "**C1 — Snapshots are not always inline.**",
+        "**C2 — `edited` is not a peer outcome.**",
+        "**C3 — `tool_result` success ≠ accept.**",
+        "**C4 — Bash/MCP attribution is structurally lossy.**",
+    ] {
+        assert!(
+            plan.contains(required),
+            "taste extraction plan should document correction via {required}"
+        );
+    }
+
+    let sidecar = fs::read_to_string("src/taste/sidecar.rs").expect("read sidecar module");
+    for required in ["backupFileName", "MissingSidecar"] {
+        assert!(
+            sidecar.contains(required),
+            "sidecar resolver should implement C1 via {required}"
+        );
+    }
+
+    let compiler = fs::read_to_string("src/taste/compiler.rs").expect("read compiler module");
+    for required in [
+        "classify_present_at_session_end",
+        "PreferenceOutcome::Edited",
+        "BashCorrelation",
+        "McpCorrelation",
+    ] {
+        assert!(
+            compiler.contains(required),
+            "preference compiler should implement corrections via {required}"
+        );
+    }
+
+    let session = taste_fixture(&format!(
+        "claude-cli/projects/-Users-fixture-Workspace-jottrace/{TASTE_SESSION_ID}.jsonl"
+    ));
+    let content = fs::read_to_string(&session).expect("read taste session fixture");
+
+    for required in [
+        "backupFileName",
+        "toolu_taste_edit_partial",
+        "toolu_taste_edit_accept",
+        "toolu_taste_edit_revert",
+        "toolu_taste_bash",
+        "toolu_taste_mcp_edit",
+    ] {
+        assert!(
+            content.contains(required),
+            "taste fixture should cover plan corrections via {required}"
+        );
+    }
+}
