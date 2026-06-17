@@ -1,4 +1,4 @@
-use rusqlite::{Connection, OpenFlags, OptionalExtension, Transaction, named_params, params};
+use rusqlite::{Connection, OptionalExtension, Transaction, named_params, params};
 use serde::Deserialize;
 use serde_json::value::RawValue;
 use std::collections::HashSet;
@@ -9,9 +9,10 @@ use std::path::{Path, PathBuf};
 use std::time::UNIX_EPOCH;
 
 use crate::storage::{
-    DB_FILE_NAME, encode_event_payload, open_database, sqlite_error, status_from_connection,
+    DB_FILE_NAME, encode_event_payload, execute_sql, map_sqlite_error, open_database,
+    open_readonly_database, query_one, query_optional, status_from_connection,
 };
-use crate::{JottraceError, Result};
+use crate::{JottraceError, Result, io_error, map_io_error};
 
 const CLAUDE_SOURCE: &str = "claude_cli";
 const CLAUDE_LOCAL_AGENT_SOURCE: &str = "claude_local_agent";
@@ -119,6 +120,29 @@ struct StoredSession {
     /// Lets append resumes verify the prefix is unchanged before trusting the
     /// stored offset; a mismatch means the file was rewritten, not appended.
     prefix_fingerprint: Option<String>,
+}
+
+impl StoredSession {
+    /// Build a session from a `sessions` row whose columns are, in order: id,
+    /// source_session_id, file_path, parent_session_id, current_generation,
+    /// file_size, file_mtime, content_fingerprint, source_metadata,
+    /// next_read_offset, event_count, prefix_fingerprint.
+    fn from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Self> {
+        Ok(StoredSession {
+            id: row.get(0)?,
+            source_session_id: row.get(1)?,
+            file_path: row.get(2)?,
+            parent_session_id: row.get(3)?,
+            current_generation: row.get(4)?,
+            file_size: row.get(5)?,
+            file_mtime: row.get(6)?,
+            content_fingerprint: row.get(7)?,
+            source_metadata: row.get(8)?,
+            next_read_offset: row.get(9)?,
+            event_count: row.get(10)?,
+            prefix_fingerprint: row.get(11)?,
+        })
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -423,6 +447,44 @@ fn discover_session_files() -> Result<Vec<SourceFile>> {
     Ok(source_files)
 }
 
+/// Build [`SourceFile`]s for a JSONL source whose session id derives purely from
+/// the file path and which never carries a parent session (Codex, Gemini, Factory).
+fn jsonl_source_files_from_paths(
+    paths: Vec<PathBuf>,
+    source: &'static str,
+    source_session_id_kind: SourceSessionIdKind,
+    source_format: SourceFormat,
+) -> Result<Vec<SourceFile>> {
+    paths
+        .into_iter()
+        .map(|path| {
+            let (source_session_id, _) = source_session_ids_from_path(&path)?;
+            Ok(SourceFile {
+                source,
+                source_session_id,
+                source_session_id_kind,
+                parent_source_session_id: None,
+                metadata_path: None,
+                source_format,
+                path,
+            })
+        })
+        .collect()
+}
+
+/// Build [`SourceFile`]s for a JSONL source whose entries may carry a parent
+/// session (Claude, Pi Agent), ordering the result so files with parents sort
+/// last. `build` derives each path's per-source identity; the shared collect and
+/// parents-last sort live here.
+fn jsonl_source_files_with_parents(
+    paths: Vec<PathBuf>,
+    build: impl FnMut(PathBuf) -> Result<SourceFile>,
+) -> Result<Vec<SourceFile>> {
+    let mut source_files = paths.into_iter().map(build).collect::<Result<Vec<_>>>()?;
+    sort_source_files_with_parents_last(&mut source_files);
+    Ok(source_files)
+}
+
 fn discover_claude_session_files() -> Result<Vec<SourceFile>> {
     let home = home_dir()?;
     let mut paths = Vec::new();
@@ -435,24 +497,18 @@ fn discover_claude_session_files() -> Result<Vec<SourceFile>> {
 
     sort_dedup_paths(&mut paths);
 
-    let mut source_files = paths
-        .into_iter()
-        .map(|path| {
-            let (source_session_id, parent_source_session_id) =
-                source_session_ids_from_path(&path)?;
-            Ok(SourceFile {
-                source: CLAUDE_SOURCE,
-                source_session_id,
-                source_session_id_kind: SourceSessionIdKind::Known,
-                parent_source_session_id,
-                metadata_path: None,
-                source_format: SourceFormat::Jsonl,
-                path,
-            })
+    jsonl_source_files_with_parents(paths, |path| {
+        let (source_session_id, parent_source_session_id) = source_session_ids_from_path(&path)?;
+        Ok(SourceFile {
+            source: CLAUDE_SOURCE,
+            source_session_id,
+            source_session_id_kind: SourceSessionIdKind::Known,
+            parent_source_session_id,
+            metadata_path: None,
+            source_format: SourceFormat::Jsonl,
+            path,
         })
-        .collect::<Result<Vec<_>>>()?;
-    sort_source_files_with_parents_last(&mut source_files);
-    Ok(source_files)
+    })
 }
 
 fn discover_claude_local_agent_session_files() -> Result<Vec<SourceFile>> {
@@ -489,66 +545,33 @@ fn discover_codex_session_files() -> Result<Vec<SourceFile>> {
 
     sort_dedup_paths(&mut paths);
 
-    paths
-        .into_iter()
-        .map(|path| {
-            let (source_session_id, _) = source_session_ids_from_path(&path)?;
-            Ok(SourceFile {
-                source: CODEX_SOURCE,
-                source_session_id,
-                source_session_id_kind: SourceSessionIdKind::CodexSessionMeta,
-                parent_source_session_id: None,
-                metadata_path: None,
-                source_format: SourceFormat::Jsonl,
-                path,
-            })
-        })
-        .collect()
+    jsonl_source_files_from_paths(
+        paths,
+        CODEX_SOURCE,
+        SourceSessionIdKind::CodexSessionMeta,
+        SourceFormat::Jsonl,
+    )
 }
 
 fn discover_gemini_session_files() -> Result<Vec<SourceFile>> {
     let root = home_dir()?.join(GEMINI_TMP_DIR);
-    let entries = match fs::read_dir(&root) {
-        Ok(entries) => entries,
-        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(Vec::new()),
-        Err(source) => {
-            return Err(JottraceError::Io { path: root, source });
-        }
-    };
 
     let mut paths = Vec::new();
-    for entry in entries {
-        let entry = entry.map_err(|source| JottraceError::Io {
-            path: root.clone(),
-            source,
-        })?;
-        let path = entry.path();
-        let file_type = entry.file_type().map_err(|source| JottraceError::Io {
-            path: path.clone(),
-            source,
-        })?;
+    for_each_dir_entry(&root, |path, file_type| {
         if file_type.is_dir() {
             collect_json_files(&path.join("chats"), false, &mut paths)?;
         }
-    }
+        Ok(())
+    })?;
 
     sort_dedup_paths(&mut paths);
 
-    paths
-        .into_iter()
-        .map(|path| {
-            let (source_session_id, _) = source_session_ids_from_path(&path)?;
-            Ok(SourceFile {
-                source: GEMINI_SOURCE,
-                source_session_id,
-                source_session_id_kind: SourceSessionIdKind::GeminiChatJson,
-                parent_source_session_id: None,
-                metadata_path: None,
-                source_format: SourceFormat::GeminiChatJson,
-                path,
-            })
-        })
-        .collect()
+    jsonl_source_files_from_paths(
+        paths,
+        GEMINI_SOURCE,
+        SourceSessionIdKind::GeminiChatJson,
+        SourceFormat::GeminiChatJson,
+    )
 }
 
 fn discover_pi_agent_session_files() -> Result<Vec<SourceFile>> {
@@ -559,36 +582,31 @@ fn discover_pi_agent_session_files() -> Result<Vec<SourceFile>> {
 
     sort_dedup_paths(&mut paths);
 
-    let mut source_files = paths
-        .into_iter()
-        .map(|path| {
-            let (source_session_id, source_session_id_kind, parent_source_session_id) =
-                if let Some(nested) = pi_agent_nested_run_info(&path) {
-                    (
-                        nested.placeholder_source_session_id,
-                        SourceSessionIdKind::PiAgentSessionHeader,
-                        Some(nested.parent_source_session_id),
-                    )
-                } else {
-                    (
-                        pi_source_session_id_from_path(&path)?,
-                        SourceSessionIdKind::Known,
-                        None,
-                    )
-                };
-            Ok(SourceFile {
-                source: PI_AGENT_SOURCE,
-                source_session_id,
-                source_session_id_kind,
-                parent_source_session_id,
-                metadata_path: None,
-                source_format: SourceFormat::Jsonl,
-                path,
-            })
+    jsonl_source_files_with_parents(paths, |path| {
+        let (source_session_id, source_session_id_kind, parent_source_session_id) =
+            if let Some(nested) = pi_agent_nested_run_info(&path) {
+                (
+                    nested.placeholder_source_session_id,
+                    SourceSessionIdKind::PiAgentSessionHeader,
+                    Some(nested.parent_source_session_id),
+                )
+            } else {
+                (
+                    pi_source_session_id_from_path(&path)?,
+                    SourceSessionIdKind::Known,
+                    None,
+                )
+            };
+        Ok(SourceFile {
+            source: PI_AGENT_SOURCE,
+            source_session_id,
+            source_session_id_kind,
+            parent_source_session_id,
+            metadata_path: None,
+            source_format: SourceFormat::Jsonl,
+            path,
         })
-        .collect::<Result<Vec<_>>>()?;
-    sort_source_files_with_parents_last(&mut source_files);
-    Ok(source_files)
+    })
 }
 
 fn discover_factory_session_files() -> Result<Vec<SourceFile>> {
@@ -601,21 +619,12 @@ fn discover_factory_session_files() -> Result<Vec<SourceFile>> {
 
     sort_dedup_paths(&mut paths);
 
-    paths
-        .into_iter()
-        .map(|path| {
-            let (source_session_id, _) = source_session_ids_from_path(&path)?;
-            Ok(SourceFile {
-                source: FACTORY_SOURCE,
-                source_session_id,
-                source_session_id_kind: SourceSessionIdKind::FactorySessionStart,
-                parent_source_session_id: None,
-                metadata_path: None,
-                source_format: SourceFormat::Jsonl,
-                path,
-            })
-        })
-        .collect()
+    jsonl_source_files_from_paths(
+        paths,
+        FACTORY_SOURCE,
+        SourceSessionIdKind::FactorySessionStart,
+        SourceFormat::Jsonl,
+    )
 }
 
 fn discover_opencode_session_files() -> Result<Vec<SourceFile>> {
@@ -653,76 +662,30 @@ fn discover_sqlite_session_files(
     open_connection: fn(&Path) -> Result<Connection>,
 ) -> Result<Vec<SourceFile>> {
     let path = home_dir()?.join(db_relative_path);
-    match fs::metadata(&path) {
-        Ok(metadata) if metadata.is_file() => {}
-        Ok(_) => {
-            return Ok(sqlite_discovery_errors(
-                source,
-                error_session_id,
-                source_format,
-                path,
-            ));
-        }
-        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(Vec::new()),
-        Err(source) => return Err(JottraceError::Io { path, source }),
-    }
-
-    let conn = match open_connection(&path) {
-        Ok(conn) => conn,
-        Err(_) => {
-            return Ok(sqlite_discovery_errors(
-                source,
-                error_session_id,
-                source_format,
-                path,
-            ));
-        }
-    };
-    let mut statement = match conn.prepare(session_query) {
-        Ok(statement) => statement,
-        Err(_) => {
-            return Ok(sqlite_discovery_errors(
-                source,
-                error_session_id,
-                source_format,
-                path,
-            ));
-        }
-    };
-    let rows = match statement.query_map([], |row| Ok((row.get(0)?, row.get(1)?))) {
-        Ok(rows) => rows,
-        Err(_) => {
-            return Ok(sqlite_discovery_errors(
-                source,
-                error_session_id,
-                source_format,
-                path,
-            ));
-        }
+    let Some(metadata) = metadata_optional(&path)? else {
+        return Ok(Vec::new());
     };
 
-    let mut source_files = Vec::new();
-    for row in rows {
-        let (source_session_id, parent_source_session_id): (String, Option<String>) = match row {
-            Ok(row) => row,
-            Err(_) => {
-                return Ok(sqlite_discovery_errors(
-                    source,
-                    error_session_id,
-                    source_format,
-                    path,
-                ));
-            }
-        };
-        if source_session_id.trim().is_empty() {
-            return Ok(sqlite_discovery_errors(
-                source,
-                error_session_id,
-                source_format,
-                path,
-            ));
-        }
-        source_files.push(SourceFile {
+    // A non-file path, or any failure reading the store — open, prepare, query,
+    // a bad row, or an empty session id — collapses to a single discovery error
+    // so the rest of ingest can proceed.
+    let sessions = if metadata.is_file() {
+        read_sqlite_session_rows(&path, session_query, open_connection)
+    } else {
+        None
+    };
+    let Some(sessions) = sessions else {
+        return Ok(sqlite_discovery_errors(
+            source,
+            error_session_id,
+            source_format,
+            path,
+        ));
+    };
+
+    Ok(sessions
+        .into_iter()
+        .map(|(source_session_id, parent_source_session_id)| SourceFile {
             source,
             source_session_id,
             source_session_id_kind: SourceSessionIdKind::Known,
@@ -730,9 +693,34 @@ fn discover_sqlite_session_files(
             metadata_path: None,
             source_format,
             path: path.clone(),
-        });
+        })
+        .collect())
+}
+
+/// Read `(source_session_id, parent_source_session_id)` rows from a source
+/// SQLite store, returning `None` if the store cannot be opened or queried, or
+/// yields a row with an empty session id. Callers translate `None` into a
+/// discovery error placeholder.
+fn read_sqlite_session_rows(
+    path: &Path,
+    session_query: &str,
+    open_connection: fn(&Path) -> Result<Connection>,
+) -> Option<Vec<(String, Option<String>)>> {
+    let conn = open_connection(path).ok()?;
+    let mut statement = conn.prepare(session_query).ok()?;
+    let rows = statement
+        .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
+        .ok()?;
+
+    let mut sessions = Vec::new();
+    for row in rows {
+        let (source_session_id, parent_source_session_id): (String, Option<String>) = row.ok()?;
+        if source_session_id.trim().is_empty() {
+            return None;
+        }
+        sessions.push((source_session_id, parent_source_session_id));
     }
-    Ok(source_files)
+    Some(sessions)
 }
 
 fn sqlite_discovery_errors(
@@ -786,30 +774,38 @@ fn home_dir() -> Result<PathBuf> {
         .ok_or(JottraceError::MissingHome)
 }
 
-fn collect_claude_local_agent_audit_files(root: &Path, paths: &mut Vec<PathBuf>) -> Result<()> {
+/// Iterate the entries of `root`, invoking `handle` with each entry's path and
+/// file type. A missing directory is treated as empty (returns `Ok(())`),
+/// matching the discovery callers that tolerate absent source roots; any other
+/// `read_dir`/`file_type` failure becomes an [`io_error`]. Entries are read and
+/// handled lazily so the first failure short-circuits exactly as an inline loop
+/// would.
+fn for_each_dir_entry(
+    root: &Path,
+    mut handle: impl FnMut(PathBuf, fs::FileType) -> Result<()>,
+) -> Result<()> {
     let entries = match fs::read_dir(root) {
         Ok(entries) => entries,
         Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
         Err(source) => {
-            return Err(JottraceError::Io {
-                path: root.to_path_buf(),
-                source,
-            });
+            return Err(io_error(root, source));
         }
     };
 
     for entry in entries {
-        let entry = entry.map_err(|source| JottraceError::Io {
-            path: root.to_path_buf(),
-            source,
-        })?;
+        let entry = entry.map_err(map_io_error(root))?;
         let path = entry.path();
-        let file_type = entry.file_type().map_err(|source| JottraceError::Io {
-            path: path.clone(),
-            source,
-        })?;
+        let file_type = entry.file_type().map_err(map_io_error(&path))?;
+        handle(path, file_type)?;
+    }
+
+    Ok(())
+}
+
+fn collect_claude_local_agent_audit_files(root: &Path, paths: &mut Vec<PathBuf>) -> Result<()> {
+    for_each_dir_entry(root, |path, file_type| {
         if !file_type.is_dir() {
-            continue;
+            return Ok(());
         }
 
         if is_claude_local_agent_session_dir(&path) {
@@ -817,9 +813,8 @@ fn collect_claude_local_agent_audit_files(root: &Path, paths: &mut Vec<PathBuf>)
         } else {
             collect_claude_local_agent_audit_files(&path, paths)?;
         }
-    }
-
-    Ok(())
+        Ok(())
+    })
 }
 
 fn is_claude_local_agent_session_dir(path: &Path) -> bool {
@@ -830,16 +825,10 @@ fn is_claude_local_agent_session_dir(path: &Path) -> bool {
 
 fn push_claude_local_agent_audit_file(session_dir: &Path, paths: &mut Vec<PathBuf>) -> Result<()> {
     let audit_path = session_dir.join(CLAUDE_LOCAL_AGENT_AUDIT_FILE_NAME);
-    match fs::metadata(&audit_path) {
-        Ok(metadata) if metadata.is_file() => paths.push(audit_path),
-        Ok(_) => {}
-        Err(error) if error.kind() == io::ErrorKind::NotFound => {}
-        Err(source) => {
-            return Err(JottraceError::Io {
-                path: audit_path,
-                source,
-            });
-        }
+    if let Some(metadata) = metadata_optional(&audit_path)?
+        && metadata.is_file()
+    {
+        paths.push(audit_path);
     }
     Ok(())
 }
@@ -858,27 +847,7 @@ fn collect_files_with_extension(
     recursive: bool,
     paths: &mut Vec<PathBuf>,
 ) -> Result<()> {
-    let entries = match fs::read_dir(root) {
-        Ok(entries) => entries,
-        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
-        Err(source) => {
-            return Err(JottraceError::Io {
-                path: root.to_path_buf(),
-                source,
-            });
-        }
-    };
-
-    for entry in entries {
-        let entry = entry.map_err(|source| JottraceError::Io {
-            path: root.to_path_buf(),
-            source,
-        })?;
-        let path = entry.path();
-        let file_type = entry.file_type().map_err(|source| JottraceError::Io {
-            path: path.clone(),
-            source,
-        })?;
+    for_each_dir_entry(root, |path, file_type| {
         if file_type.is_dir() {
             if recursive {
                 collect_files_with_extension(&path, extension, true, paths)?;
@@ -890,9 +859,8 @@ fn collect_files_with_extension(
         {
             paths.push(path);
         }
-    }
-
-    Ok(())
+        Ok(())
+    })
 }
 
 fn collect_flat_session_files(root: &Path, paths: &mut Vec<PathBuf>) -> Result<()> {
@@ -911,10 +879,7 @@ fn ingest_source_file(
     ingest_state: &mut IngestState,
     source_file: &SourceFile,
 ) -> Result<u64> {
-    let metadata = fs::metadata(&source_file.path).map_err(|source| JottraceError::Io {
-        path: source_file.path.clone(),
-        source,
-    })?;
+    let metadata = fs::metadata(&source_file.path).map_err(map_io_error(&source_file.path))?;
     if !metadata.is_file() {
         return Err(JottraceError::NotFile(source_file.path.clone()));
     }
@@ -1185,7 +1150,7 @@ fn ingest_sqlite_session_snapshot(
     {
         let mut event_insert = tx
             .prepare(INSERT_EVENT_SQL)
-            .map_err(|source| sqlite_error(&source_file.path, source))?;
+            .map_err(map_sqlite_error(&source_file.path))?;
         for (seq, event) in snapshot.events.iter().enumerate() {
             inserted_event_count += insert_event_payload(
                 &mut event_insert,
@@ -1327,7 +1292,7 @@ fn import_committed_lines(
     let mut seq = line_number_at(buffer, start_offset);
     let mut event_insert = tx
         .prepare(INSERT_EVENT_SQL)
-        .map_err(|source| sqlite_error(&source_file.path, source))?;
+        .map_err(map_sqlite_error(&source_file.path))?;
 
     while byte_offset < committed_len {
         let line_end = next_line_end(buffer, byte_offset, committed_len);
@@ -1396,7 +1361,7 @@ fn insert_event_payload(
             encoded.codec,
             i64_from_usize(encoded.payload_size, &source_file.path)?,
         ])
-        .map_err(|source| sqlite_error(&source_file.path, source))?;
+        .map_err(map_sqlite_error(&source_file.path))?;
     Ok(inserted as u64)
 }
 
@@ -1422,7 +1387,7 @@ fn import_gemini_chat_json(
     let mut inserted_event_count = 0;
     let mut event_insert = tx
         .prepare(INSERT_EVENT_SQL)
-        .map_err(|source| sqlite_error(&source_file.path, source))?;
+        .map_err(map_sqlite_error(&source_file.path))?;
 
     for (index, message) in chat.messages.iter().enumerate() {
         let header = serde_json::from_str::<GeminiMessageHeader<'_>>(message.get())
@@ -1475,13 +1440,11 @@ fn opencode_session_snapshot(source_file: &SourceFile) -> Result<SqliteSessionSn
 }
 
 fn opencode_source_connection(path: &Path) -> Result<Connection> {
-    Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_ONLY)
-        .map_err(|source| opencode_sqlite_error(path, source))
+    open_readonly_database(path, opencode_sqlite_error)
 }
 
 fn hermes_source_connection(path: &Path) -> Result<Connection> {
-    Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_ONLY)
-        .map_err(|source| hermes_sqlite_error(path, source))
+    open_readonly_database(path, hermes_sqlite_error)
 }
 
 fn opencode_session_event(
@@ -1592,7 +1555,7 @@ fn opencode_session_event(
                         rank: 0,
                         id: event_id,
                         ts: event_ts,
-                        payload: serde_json::to_vec(&payload).expect("serialize OpenCode payload"),
+                        payload: serialize_payload(&payload),
                     },
                     metadata,
                     source_metadata,
@@ -1656,7 +1619,7 @@ fn opencode_row_events(
                 rank: table.rank(),
                 id: event_id,
                 ts: event_ts,
-                payload: serde_json::to_vec(&payload).expect("serialize OpenCode payload"),
+                payload: serialize_payload(&payload),
             })
         })
         .map_err(|source| opencode_sqlite_error(&source_file.path, source))?;
@@ -1769,7 +1732,7 @@ fn hermes_session_event(
                         rank: 0,
                         id: source_file.source_session_id.clone(),
                         ts: metadata.started_at.clone(),
-                        payload: serde_json::to_vec(&payload).expect("serialize Hermes payload"),
+                        payload: serialize_payload(&payload),
                     },
                     metadata,
                     source_metadata,
@@ -1838,7 +1801,7 @@ fn hermes_message_events(conn: &Connection, source_file: &SourceFile) -> Result<
                 rank: 1,
                 id: format!("{id:020}"),
                 ts: event_ts,
-                payload: serde_json::to_vec(&payload).expect("serialize Hermes payload"),
+                payload: serialize_payload(&payload),
             })
         })
         .map_err(|source| hermes_sqlite_error(&source_file.path, source))?;
@@ -1851,6 +1814,10 @@ fn json_text_column(value: Option<String>) -> serde_json::Value {
     value.map_or(serde_json::Value::Null, |value| {
         serde_json::from_str(&value).unwrap_or(serde_json::Value::String(value))
     })
+}
+
+fn serialize_payload(payload: &serde_json::Value) -> Vec<u8> {
+    serde_json::to_vec(payload).expect("serialize source payload")
 }
 
 fn source_events_fingerprint(events: &[SourceEvent]) -> String {
@@ -1962,7 +1929,9 @@ fn source_file_error_kind(error: &JottraceError) -> &'static str {
 }
 
 fn insert_session_if_missing(tx: &Transaction<'_>, source_file: &SourceFile) -> Result<()> {
-    tx.execute(
+    execute_sql(
+        &source_file.path,
+        tx,
         "INSERT OR IGNORE INTO sessions (source, source_session_id, file_path)
          VALUES (?1, ?2, ?3)",
         params![
@@ -1970,8 +1939,7 @@ fn insert_session_if_missing(tx: &Transaction<'_>, source_file: &SourceFile) -> 
             source_file.source_session_id.as_str(),
             source_file.path.to_string_lossy(),
         ],
-    )
-    .map_err(|source| sqlite_error(&source_file.path, source))?;
+    )?;
     Ok(())
 }
 
@@ -1990,38 +1958,25 @@ fn load_session_by_source_session_id(
     source: &str,
     source_session_id: &str,
 ) -> Result<Option<StoredSession>> {
-    conn.query_row(
+    query_optional(
+        error_path,
+        conn,
         "SELECT id, source_session_id, file_path, parent_session_id, current_generation, file_size, file_mtime,
                 content_fingerprint, source_metadata, next_read_offset, event_count, prefix_fingerprint
          FROM sessions
          WHERE source = ?1 AND source_session_id = ?2",
         params![source, source_session_id],
-        |row| {
-            Ok(StoredSession {
-                id: row.get(0)?,
-                source_session_id: row.get(1)?,
-                file_path: row.get(2)?,
-                parent_session_id: row.get(3)?,
-                current_generation: row.get(4)?,
-                file_size: row.get(5)?,
-                file_mtime: row.get(6)?,
-                content_fingerprint: row.get(7)?,
-                source_metadata: row.get(8)?,
-                next_read_offset: row.get(9)?,
-                event_count: row.get(10)?,
-                prefix_fingerprint: row.get(11)?,
-            })
-        },
+        StoredSession::from_row,
     )
-    .optional()
-    .map_err(|source| sqlite_error(error_path, source))
 }
 
 fn load_session_by_source_file_path(
     conn: &Connection,
     source_file: &SourceFile,
 ) -> Result<Option<StoredSession>> {
-    conn.query_row(
+    query_optional(
+        &source_file.path,
+        conn,
         "SELECT id, source_session_id, file_path, parent_session_id, current_generation, file_size, file_mtime,
                 content_fingerprint, source_metadata, next_read_offset, event_count, prefix_fingerprint
          FROM sessions
@@ -2030,25 +1985,8 @@ fn load_session_by_source_file_path(
             source_file.source,
             source_file.path.to_string_lossy().as_ref(),
         ],
-        |row| {
-            Ok(StoredSession {
-                id: row.get(0)?,
-                source_session_id: row.get(1)?,
-                file_path: row.get(2)?,
-                parent_session_id: row.get(3)?,
-                current_generation: row.get(4)?,
-                file_size: row.get(5)?,
-                file_mtime: row.get(6)?,
-                content_fingerprint: row.get(7)?,
-                source_metadata: row.get(8)?,
-                next_read_offset: row.get(9)?,
-                event_count: row.get(10)?,
-                prefix_fingerprint: row.get(11)?,
-            })
-        },
+        StoredSession::from_row,
     )
-    .optional()
-    .map_err(|source| sqlite_error(&source_file.path, source))
 }
 
 fn stored_session_path_matches(stored: &StoredSession, source_file: &SourceFile) -> bool {
@@ -2163,12 +2101,11 @@ fn invalid_json_resolution_boundary(
 }
 
 fn begin_transaction<'a>(conn: &'a mut Connection, path: &Path) -> Result<Transaction<'a>> {
-    conn.transaction()
-        .map_err(|source| sqlite_error(path, source))
+    conn.transaction().map_err(map_sqlite_error(path))
 }
 
 fn commit_ingest_transaction(tx: Transaction<'_>, path: &Path) -> Result<()> {
-    tx.commit().map_err(|source| sqlite_error(path, source))
+    tx.commit().map_err(map_sqlite_error(path))
 }
 
 /// Bounds for resolving a stale `invalid_json` ingest error after a JSONL pass:
@@ -2238,7 +2175,9 @@ fn update_skipped_session(tx: &Transaction<'_>, update: &SkippedSessionUpdate<'_
     let file_path = update.source_file.path.to_string_lossy();
     let has_parent_source = update.source_file.parent_source_session_id.is_some();
 
-    tx.execute(
+    execute_sql(
+        &update.source_file.path,
+        tx,
         "UPDATE sessions
          SET file_path = :file_path,
              parent_session_id = CASE
@@ -2266,8 +2205,7 @@ fn update_skipped_session(tx: &Transaction<'_>, update: &SkippedSessionUpdate<'_
             ":content_fingerprint": content_fingerprint,
             ":session_id": update.session_id,
         },
-    )
-    .map_err(|source| sqlite_error(&update.source_file.path, source))?;
+    )?;
     Ok(())
 }
 
@@ -2275,7 +2213,9 @@ fn update_session_after_import(tx: &Transaction<'_>, update: SessionUpdate<'_>) 
     let file_path = update.source_file.path.to_string_lossy();
     let has_parent_source = update.source_file.parent_source_session_id.is_some();
 
-    tx.execute(
+    execute_sql(
+        &update.source_file.path,
+        tx,
         "UPDATE sessions
          SET file_path = :file_path,
              parent_session_id = CASE
@@ -2323,8 +2263,7 @@ fn update_session_after_import(tx: &Transaction<'_>, update: SessionUpdate<'_>) 
             ":event_count": update.event_count,
             ":session_id": update.session_id,
         },
-    )
-    .map_err(|source| sqlite_error(&update.source_file.path, source))?;
+    )?;
     Ok(())
 }
 
@@ -2354,14 +2293,15 @@ fn reuse_source_file_session_identity(
         return Ok(());
     }
 
-    conn.execute(
+    execute_sql(
+        &source_file.path,
+        conn,
         "UPDATE sessions
          SET source_session_id = ?1,
              updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
          WHERE id = ?2",
         params![source_session_id, stored.id],
-    )
-    .map_err(|source| sqlite_error(&source_file.path, source))?;
+    )?;
     Ok(())
 }
 
@@ -2395,15 +2335,8 @@ fn source_metadata_for_source_file(
     }
 
     let settings_path = source_file.path.with_extension("settings.json");
-    let metadata = match fs::metadata(&settings_path) {
-        Ok(metadata) => metadata,
-        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
-        Err(source) => {
-            return Err(JottraceError::Io {
-                path: settings_path,
-                source,
-            });
-        }
+    let Some(metadata) = metadata_optional(&settings_path)? else {
+        return Ok(None);
     };
     if !metadata.is_file() {
         return Err(JottraceError::NotFile(settings_path));
@@ -2479,13 +2412,13 @@ fn unresolved_source_file_error_paths(
              WHERE error_kind = ?1
                AND resolved_at IS NULL",
         )
-        .map_err(|source| sqlite_error(db_path, source))?;
+        .map_err(map_sqlite_error(db_path))?;
     let rows = statement
         .query_map([error_kind], |row| Ok((row.get(0)?, row.get(1)?)))
-        .map_err(|source| sqlite_error(db_path, source))?;
+        .map_err(map_sqlite_error(db_path))?;
     let mut paths = HashSet::new();
     for row in rows {
-        paths.insert(row.map_err(|source| sqlite_error(db_path, source))?);
+        paths.insert(row.map_err(map_sqlite_error(db_path))?);
     }
     Ok(paths)
 }
@@ -2568,7 +2501,9 @@ fn resolve_source_file_error(
         return Ok(());
     }
 
-    conn.execute(
+    execute_sql(
+        &source_file.path,
+        conn,
         "UPDATE ingest_errors
          SET resolved_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now'),
              resolution_note = ?1
@@ -2582,8 +2517,7 @@ fn resolve_source_file_error(
             source_file.path.to_string_lossy(),
             error_kind,
         ],
-    )
-    .map_err(|source| sqlite_error(&source_file.path, source))?;
+    )?;
     Ok(())
 }
 
@@ -2606,15 +2540,20 @@ fn remove_empty_source_file_placeholder(
         return Ok(());
     }
 
-    conn.execute("DELETE FROM sessions WHERE id = ?1", [stored.id])
-        .map_err(|source| sqlite_error(&source_file.path, source))?;
+    execute_sql(
+        &source_file.path,
+        conn,
+        "DELETE FROM sessions WHERE id = ?1",
+        [stored.id],
+    )?;
     Ok(())
 }
 
 fn record_ingest_error(tx: &Transaction<'_>, record: IngestErrorRecord<'_>) -> Result<()> {
-    let updated = tx
-        .execute(
-            "UPDATE ingest_errors
+    let updated = execute_sql(
+        &record.source_file.path,
+        tx,
+        "UPDATE ingest_errors
              SET session_id = ?1,
                  message = ?2,
                  last_seen_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now'),
@@ -2627,25 +2566,26 @@ fn record_ingest_error(tx: &Transaction<'_>, record: IngestErrorRecord<'_>) -> R
                AND line_number IS ?8
                AND error_kind = ?9
                AND resolved_at IS NULL",
-            params![
-                record.session_id,
-                record.message,
-                record.source_file.source,
-                record.source_file.source_session_id.as_str(),
-                record.source_file.path.to_string_lossy(),
-                record.generation,
-                record.byte_offset,
-                record.line_number,
-                record.error_kind,
-            ],
-        )
-        .map_err(|source| sqlite_error(&record.source_file.path, source))?;
+        params![
+            record.session_id,
+            record.message,
+            record.source_file.source,
+            record.source_file.source_session_id.as_str(),
+            record.source_file.path.to_string_lossy(),
+            record.generation,
+            record.byte_offset,
+            record.line_number,
+            record.error_kind,
+        ],
+    )?;
 
     if updated > 0 {
         return Ok(());
     }
 
-    tx.execute(
+    execute_sql(
+        &record.source_file.path,
+        tx,
         "INSERT INTO ingest_errors
             (source, source_session_id, session_id, file_path, generation, byte_offset,
              line_number, error_kind, message)
@@ -2661,8 +2601,7 @@ fn record_ingest_error(tx: &Transaction<'_>, record: IngestErrorRecord<'_>) -> R
             record.error_kind,
             record.message,
         ],
-    )
-    .map_err(|source| sqlite_error(&record.source_file.path, source))?;
+    )?;
     Ok(())
 }
 
@@ -2672,27 +2611,22 @@ fn generation_event_count(
     session_id: i64,
     generation: i64,
 ) -> Result<i64> {
-    tx.query_row(
+    query_one(
+        &source_file.path,
+        tx,
         "SELECT COUNT(*) FROM events WHERE session_id = ?1 AND generation = ?2",
         [session_id, generation],
         |row| row.get(0),
     )
-    .map_err(|source| sqlite_error(&source_file.path, source))
 }
 
 fn read_bounded(path: &Path, pass_size: u64) -> Result<Vec<u8>> {
-    let file = File::open(path).map_err(|source| JottraceError::Io {
-        path: path.to_path_buf(),
-        source,
-    })?;
+    let file = File::open(path).map_err(map_io_error(path))?;
     let mut reader = file.take(pass_size);
     let mut buffer = Vec::with_capacity(pass_size.min(1024 * 1024) as usize);
     reader
         .read_to_end(&mut buffer)
-        .map_err(|source| JottraceError::Io {
-            path: path.to_path_buf(),
-            source,
-        })?;
+        .map_err(map_io_error(path))?;
     Ok(buffer)
 }
 
@@ -2800,14 +2734,10 @@ fn claude_local_agent_metadata(metadata_path: Option<&Path>) -> Result<ParsedMet
             return Ok(ParsedMetadata::default());
         }
         Err(source) => {
-            return Err(JottraceError::Io {
-                path: path.to_path_buf(),
-                source,
-            });
+            return Err(io_error(path, source));
         }
     };
-    let metadata = serde_json::from_slice::<ClaudeLocalAgentMetadata<'_>>(&bytes)
-        .map_err(|source| invalid_session_meta(path, source.to_string()))?;
+    let metadata = parse_session_json::<ClaudeLocalAgentMetadata<'_>>(path, &bytes)?;
     let started_at = claude_local_agent_metadata_timestamp(path, "createdAt", metadata.started_at)?;
     let ended_at =
         claude_local_agent_metadata_timestamp(path, "lastActivityAt", metadata.ended_at)?;
@@ -2937,8 +2867,7 @@ fn claude_local_agent_source_session_id_from_file(path: &Path) -> Result<String>
     else {
         return claude_local_agent_fallback_source_session_id(path);
     };
-    let header = serde_json::from_slice::<ClaudeLocalAgentAuditHeader<'_>>(&first_line)
-        .map_err(|source| invalid_session_meta(path, source.to_string()))?;
+    let header = parse_session_json::<ClaudeLocalAgentAuditHeader<'_>>(path, &first_line)?;
 
     header
         .session_id
@@ -2960,8 +2889,7 @@ fn codex_source_session_id_from_file(path: &Path) -> Result<String> {
         )
     })?;
 
-    let header = serde_json::from_slice::<EventHeader<'_>>(&first_line)
-        .map_err(|source| invalid_session_meta(path, source.to_string()))?;
+    let header = parse_session_json::<EventHeader<'_>>(path, &first_line)?;
     if header.event_type != Some("session_meta") {
         if header.event_type.is_none()
             && let Ok(legacy_header) = serde_json::from_slice::<LegacyCodexHeader<'_>>(&first_line)
@@ -2990,8 +2918,7 @@ fn factory_source_session_id_from_file(path: &Path) -> Result<String> {
         FACTORY_SESSION_START_MISSING_MESSAGE,
     )?
     .ok_or_else(|| invalid_session_meta(path, FACTORY_SESSION_START_MISSING_MESSAGE))?;
-    let header = serde_json::from_slice::<EventHeader<'_>>(&first_line)
-        .map_err(|source| invalid_session_meta(path, source.to_string()))?;
+    let header = parse_session_json::<EventHeader<'_>>(path, &first_line)?;
     if header.event_type != Some("session_start") {
         return Err(invalid_session_meta(
             path,
@@ -3010,18 +2937,12 @@ fn first_committed_line(
     byte_limit: u64,
     missing_line_message: &str,
 ) -> Result<Option<Vec<u8>>> {
-    let file = File::open(path).map_err(|source| JottraceError::Io {
-        path: path.to_path_buf(),
-        source,
-    })?;
+    let file = File::open(path).map_err(map_io_error(path))?;
     let mut reader = BufReader::new(file).take(byte_limit);
     let mut first_line = Vec::new();
     let read = reader
         .read_until(b'\n', &mut first_line)
-        .map_err(|source| JottraceError::Io {
-            path: path.to_path_buf(),
-            source,
-        })?;
+        .map_err(map_io_error(path))?;
     if read == 0 || !first_line.ends_with(b"\n") {
         if read as u64 == byte_limit {
             return Ok(None);
@@ -3067,8 +2988,7 @@ fn claude_local_agent_metadata_path(path: &Path) -> Option<PathBuf> {
 }
 
 fn gemini_source_session_id_from_buffer(path: &Path, buffer: &[u8]) -> Result<String> {
-    let identity = serde_json::from_slice::<GeminiChatIdentity<'_>>(buffer)
-        .map_err(|source| invalid_session_meta(path, source.to_string()))?;
+    let identity = parse_session_json::<GeminiChatIdentity<'_>>(path, buffer)?;
     if identity.session_id.trim().is_empty() {
         return Err(invalid_session_meta(
             path,
@@ -3079,8 +2999,7 @@ fn gemini_source_session_id_from_buffer(path: &Path, buffer: &[u8]) -> Result<St
 }
 
 fn gemini_chat_from_buffer<'a>(path: &Path, buffer: &'a [u8]) -> Result<GeminiChatFile<'a>> {
-    let chat = serde_json::from_slice::<GeminiChatFile<'a>>(buffer)
-        .map_err(|source| invalid_session_meta(path, source.to_string()))?;
+    let chat = parse_session_json::<GeminiChatFile<'a>>(path, buffer)?;
     if chat.session_id.trim().is_empty() {
         return Err(invalid_session_meta(
             path,
@@ -3169,8 +3088,7 @@ fn pi_agent_source_session_id_from_file(path: &Path) -> Result<String> {
         PI_AGENT_SESSION_HEADER_MISSING_MESSAGE,
     )?
     .ok_or_else(|| invalid_session_meta(path, PI_AGENT_SESSION_HEADER_MISSING_MESSAGE))?;
-    let header = serde_json::from_slice::<EventHeader<'_>>(&first_line)
-        .map_err(|source| invalid_session_meta(path, source.to_string()))?;
+    let header = parse_session_json::<EventHeader<'_>>(path, &first_line)?;
     if header.event_type != Some("session") {
         return Err(invalid_session_meta(
             path,
@@ -3270,9 +3188,17 @@ fn i64_from_usize(value: usize, path: &Path) -> Result<i64> {
 }
 
 fn invalid_path(path: &Path, message: &str) -> JottraceError {
-    JottraceError::Io {
-        path: path.to_path_buf(),
-        source: io::Error::new(io::ErrorKind::InvalidData, message),
+    io_error(path, io::Error::new(io::ErrorKind::InvalidData, message))
+}
+
+/// Read filesystem metadata for `path`, mapping a missing path to `Ok(None)`
+/// and any other read failure to a [`JottraceError::Io`]. Callers inspect the
+/// returned [`Metadata`] (e.g. `is_file`) to handle the present-path case.
+fn metadata_optional(path: &Path) -> Result<Option<Metadata>> {
+    match fs::metadata(path) {
+        Ok(metadata) => Ok(Some(metadata)),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(None),
+        Err(source) => Err(io_error(path, source)),
     }
 }
 
@@ -3281,6 +3207,14 @@ fn invalid_session_meta(path: &Path, message: impl Into<String>) -> JottraceErro
         path: path.to_path_buf(),
         message: message.into(),
     }
+}
+
+fn parse_session_json<'a, T>(path: &Path, bytes: &'a [u8]) -> Result<T>
+where
+    T: Deserialize<'a>,
+{
+    serde_json::from_slice::<T>(bytes)
+        .map_err(|source| invalid_session_meta(path, source.to_string()))
 }
 
 #[cfg(test)]

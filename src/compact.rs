@@ -2,8 +2,8 @@ use rusqlite::{Connection, params};
 use std::path::PathBuf;
 
 use crate::storage::{
-    DB_FILE_NAME, RAW_CODEC, ZSTD_CODEC, ZSTD_MIN_PAYLOAD_BYTES, decode_event_payload,
-    encode_event_payload, open_database, sqlite_error,
+    DB_FILE_NAME, RAW_CODEC, ZSTD_CODEC, ZSTD_MIN_PAYLOAD_BYTES, count, decode_event_payload,
+    encode_event_payload, map_sqlite_error, open_database, query_one, row_value,
     unresolved_ingest_error_count_from_connection,
 };
 use crate::{JottraceError, Result, data_dir_from_env};
@@ -145,7 +145,7 @@ pub fn run_compact_with_diagnostics(
         }
         CompactMode::Vacuum => {
             conn.execute_batch("VACUUM;")
-                .map_err(|source| sqlite_error(&db_path, source))?;
+                .map_err(map_sqlite_error(&db_path))?;
             (RawPayloadAnalysis::default(), before)
         }
     };
@@ -281,9 +281,7 @@ fn apply_update_batch(
         return Ok(AppliedBatch::default());
     }
 
-    let tx = conn
-        .transaction()
-        .map_err(|source| sqlite_error(path, source))?;
+    let tx = conn.transaction().map_err(map_sqlite_error(path))?;
     let mut converted_events = 0;
     let mut saved_bytes = 0;
     {
@@ -298,7 +296,7 @@ fn apply_update_batch(
                    AND seq = ?6
                    AND codec = ?7",
             )
-            .map_err(|source| sqlite_error(path, source))?;
+            .map_err(map_sqlite_error(path))?;
         for update in updates {
             let updated = statement
                 .execute(params![
@@ -310,14 +308,14 @@ fn apply_update_batch(
                     update.key.seq,
                     RAW_CODEC,
                 ])
-                .map_err(|source| sqlite_error(path, source))?;
+                .map_err(map_sqlite_error(path))?;
             if updated > 0 {
                 converted_events += updated as u64;
                 saved_bytes += update.saved_bytes;
             }
         }
     }
-    tx.commit().map_err(|source| sqlite_error(path, source))?;
+    tx.commit().map_err(map_sqlite_error(path))?;
     Ok(AppliedBatch {
         converted_events,
         saved_bytes,
@@ -397,9 +395,7 @@ fn raw_event_batch(
              LIMIT ?3"
         }
     };
-    let mut statement = conn
-        .prepare(sql)
-        .map_err(|source| sqlite_error(path, source))?;
+    let mut statement = conn.prepare(sql).map_err(map_sqlite_error(path))?;
     let mut rows = match cursor {
         Some(cursor) => statement
             .query(params![
@@ -410,46 +406,46 @@ fn raw_event_batch(
                 cursor.seq,
                 batch_size
             ])
-            .map_err(|source| sqlite_error(path, source))?,
+            .map_err(map_sqlite_error(path))?,
         None => statement
             .query(params![
                 RAW_CODEC,
                 ZSTD_MIN_PAYLOAD_BYTES as i64,
                 batch_size
             ])
-            .map_err(|source| sqlite_error(path, source))?,
+            .map_err(map_sqlite_error(path))?,
     };
     let mut events = Vec::new();
-    while let Some(row) = rows.next().map_err(|source| sqlite_error(path, source))? {
+    while let Some(row) = rows.next().map_err(map_sqlite_error(path))? {
         events.push(RawEvent {
             key: EventKey {
-                session_id: row.get(0).map_err(|source| sqlite_error(path, source))?,
-                generation: row.get(1).map_err(|source| sqlite_error(path, source))?,
-                seq: row.get(2).map_err(|source| sqlite_error(path, source))?,
+                session_id: row_value(path, row, 0)?,
+                generation: row_value(path, row, 1)?,
+                seq: row_value(path, row, 2)?,
             },
-            payload: row.get(3).map_err(|source| sqlite_error(path, source))?,
+            payload: row_value(path, row, 3)?,
         });
     }
     Ok(events)
 }
 
 fn count_small_raw_events(path: &std::path::Path, conn: &Connection) -> Result<u64> {
-    let count: i64 = conn
-        .query_row(
-            "SELECT COUNT(*)
+    count(
+        path,
+        conn,
+        "SELECT COUNT(*)
              FROM events
              WHERE codec = ?1
                AND payload_size < ?2",
-            params![RAW_CODEC, ZSTD_MIN_PAYLOAD_BYTES as i64],
-            |row| row.get(0),
-        )
-        .map_err(|source| sqlite_error(path, source))?;
-    Ok(count as u64)
+        params![RAW_CODEC, ZSTD_MIN_PAYLOAD_BYTES as i64],
+    )
 }
 
 fn event_storage_stats(path: &std::path::Path, conn: &Connection) -> Result<EventStorageStats> {
     let (raw_events, zstd_events, unsupported_codec_events, stored_bytes): (i64, i64, i64, i64) =
-        conn.query_row(
+        query_one(
+            path,
+            conn,
             "SELECT
                 COALESCE(SUM(CASE WHEN codec = ?1 THEN 1 ELSE 0 END), 0),
                 COALESCE(SUM(CASE WHEN codec = ?2 THEN 1 ELSE 0 END), 0),
@@ -458,8 +454,7 @@ fn event_storage_stats(path: &std::path::Path, conn: &Connection) -> Result<Even
              FROM events",
             params![RAW_CODEC, ZSTD_CODEC],
             |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
-        )
-        .map_err(|source| sqlite_error(path, source))?;
+        )?;
 
     Ok(EventStorageStats {
         raw_events: raw_events as u64,
@@ -470,11 +465,7 @@ fn event_storage_stats(path: &std::path::Path, conn: &Connection) -> Result<Even
 }
 
 fn sqlite_reclaimable_bytes(path: &std::path::Path, conn: &Connection) -> Result<u64> {
-    let page_size: i64 = conn
-        .query_row("PRAGMA page_size", [], |row| row.get(0))
-        .map_err(|source| sqlite_error(path, source))?;
-    let freelist_count: i64 = conn
-        .query_row("PRAGMA freelist_count", [], |row| row.get(0))
-        .map_err(|source| sqlite_error(path, source))?;
+    let page_size: i64 = query_one(path, conn, "PRAGMA page_size", [], |row| row.get(0))?;
+    let freelist_count: i64 = query_one(path, conn, "PRAGMA freelist_count", [], |row| row.get(0))?;
     Ok((page_size as u64).saturating_mul(freelist_count as u64))
 }

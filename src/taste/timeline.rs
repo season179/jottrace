@@ -4,35 +4,18 @@ use std::path::Path;
 use rusqlite::{Connection, params};
 
 use crate::JottraceError;
-use crate::storage::sqlite_error;
+use crate::storage::execute_sql;
 
+use super::db_string_enum;
 use super::parse::{ParseKind, ParsedEvent};
 use super::sidecar::{ResolvedContent, SnapshotSidecarResolver};
 
-/// Where a timeline row's content was resolved from.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum TimelineSourceKind {
-    InlineSnapshot,
-    SidecarSnapshot,
-    MissingSidecar,
-}
-
-impl TimelineSourceKind {
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Self::InlineSnapshot => "inline_snapshot",
-            Self::SidecarSnapshot => "sidecar_snapshot",
-            Self::MissingSidecar => "missing_sidecar",
-        }
-    }
-
-    pub fn from_db_str(value: &str) -> Option<Self> {
-        match value {
-            "inline_snapshot" => Some(Self::InlineSnapshot),
-            "sidecar_snapshot" => Some(Self::SidecarSnapshot),
-            "missing_sidecar" => Some(Self::MissingSidecar),
-            _ => None,
-        }
+db_string_enum! {
+    /// Where a timeline row's content was resolved from.
+    pub enum TimelineSourceKind {
+        InlineSnapshot => "inline_snapshot",
+        SidecarSnapshot => "sidecar_snapshot",
+        MissingSidecar => "missing_sidecar",
     }
 }
 
@@ -140,15 +123,18 @@ pub fn replace_session_file_timelines(
     source_session_id: &str,
     rows: &[FileTimelineRow],
 ) -> Result<usize, JottraceError> {
-    conn.execute(
+    execute_sql(
+        db_path,
+        conn,
         "DELETE FROM file_timelines WHERE source = ?1 AND source_session_id = ?2",
         params![source, source_session_id],
-    )
-    .map_err(|source| sqlite_error(db_path, source))?;
+    )?;
 
     let mut inserted = 0usize;
     for row in rows {
-        conn.execute(
+        execute_sql(
+            db_path,
+            conn,
             "INSERT INTO file_timelines (
                 source,
                 source_session_id,
@@ -169,8 +155,7 @@ pub fn replace_session_file_timelines(
                 row.trigger_event_ref,
                 row.source_kind.as_str(),
             ],
-        )
-        .map_err(|source| sqlite_error(db_path, source))?;
+        )?;
         inserted += 1;
     }
 

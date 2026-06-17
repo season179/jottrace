@@ -1,4 +1,4 @@
-use rusqlite::{Connection, OpenFlags, OptionalExtension, Row, params};
+use rusqlite::{Connection, Row, params};
 use std::fmt::Write as _;
 use std::io::{self, Read, Write as IoWrite};
 use std::net::{Ipv4Addr, SocketAddr, TcpListener, TcpStream};
@@ -7,9 +7,10 @@ use std::time::Duration;
 
 use crate::storage::{
     IngestErrorSummary, LATEST_SCHEMA_VERSION, RAW_CODEC, ZSTD_CODEC, decode_event_payload,
-    decode_event_payload_prefix, sqlite_error, unresolved_ingest_errors_from_connection,
+    decode_event_payload_prefix, map_sqlite_error, open_readonly_database, query_collect,
+    query_one, query_optional, row_value, sqlite_error, unresolved_ingest_errors_from_connection,
 };
-use crate::{JottraceError, Result};
+use crate::{JottraceError, Result, io_error, map_io_error, unsupported_schema_version};
 
 const SESSION_PAGE_SIZE: usize = 50;
 const EVENT_PAGE_SIZE: usize = 25;
@@ -19,6 +20,8 @@ const MIN_PAYLOAD_SEARCH_CHARS: usize = 3;
 const PAYLOAD_PREVIEW_BYTES: usize = 4096;
 const PAYLOAD_PREVIEW_CHARS: usize = 280;
 const READ_LIMIT_BYTES: usize = 8192;
+const TEXT_PLAIN: &str = "text/plain; charset=utf-8";
+const TEXT_HTML: &str = "text/html; charset=utf-8";
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct JournalQuery {
@@ -118,10 +121,7 @@ impl WebServer {
     pub fn bind(db_path: PathBuf, port: u16) -> Result<Self> {
         drop(open_web_database(&db_path)?);
         let listener =
-            TcpListener::bind((Ipv4Addr::LOCALHOST, port)).map_err(|source| JottraceError::Io {
-                path: db_path.clone(),
-                source,
-            })?;
+            TcpListener::bind((Ipv4Addr::LOCALHOST, port)).map_err(map_io_error(&db_path))?;
         Ok(Self { db_path, listener })
     }
 
@@ -154,10 +154,7 @@ impl WebServer {
         self.listener
             .accept()
             .map(|(stream, _)| stream)
-            .map_err(|source| JottraceError::Io {
-                path: self.db_path.clone(),
-                source,
-            })
+            .map_err(map_io_error(&self.db_path))
     }
 
     fn handle_stream(&self, stream: &mut TcpStream) -> Result<()> {
@@ -166,19 +163,14 @@ impl WebServer {
             .map_err(|source| self.io_error(source))?;
         let request = self.read_request(stream)?;
         let Some((method, target)) = request_line(&request) else {
-            return self.write_response(
-                stream,
-                "400 Bad Request",
-                "text/plain; charset=utf-8",
-                "bad request",
-            );
+            return self.write_response(stream, "400 Bad Request", TEXT_PLAIN, "bad request");
         };
 
         if method != "GET" {
             return self.write_response(
                 stream,
                 "405 Method Not Allowed",
-                "text/plain; charset=utf-8",
+                TEXT_PLAIN,
                 "method not allowed",
             );
         }
@@ -190,26 +182,14 @@ impl WebServer {
                     Ok(view) => render_home_page(&view, &query),
                     Err(error) => render_error_page(&self.db_path, &error),
                 };
-                ("200 OK", "text/html; charset=utf-8", body)
+                ("200 OK", TEXT_HTML, body)
             }
             "/payload" => match event_payload_text_for_path(&self.db_path, target) {
-                Ok(Some(payload)) => ("200 OK", "text/plain; charset=utf-8", payload),
-                Ok(None) => (
-                    "404 Not Found",
-                    "text/plain; charset=utf-8",
-                    "payload not found".to_string(),
-                ),
-                Err(error) => (
-                    "500 Internal Server Error",
-                    "text/plain; charset=utf-8",
-                    error.to_string(),
-                ),
+                Ok(Some(payload)) => ("200 OK", TEXT_PLAIN, payload),
+                Ok(None) => ("404 Not Found", TEXT_PLAIN, "payload not found".to_string()),
+                Err(error) => ("500 Internal Server Error", TEXT_PLAIN, error.to_string()),
             },
-            _ => (
-                "404 Not Found",
-                "text/plain; charset=utf-8",
-                "not found".to_string(),
-            ),
+            _ => ("404 Not Found", TEXT_PLAIN, "not found".to_string()),
         };
         self.write_response(stream, status, content_type, &body)
     }
@@ -232,10 +212,7 @@ impl WebServer {
     }
 
     fn io_error(&self, source: io::Error) -> JottraceError {
-        JottraceError::Io {
-            path: self.db_path.clone(),
-            source,
-        }
+        io_error(&self.db_path, source)
     }
 
     fn read_request(&self, stream: &mut TcpStream) -> Result<String> {
@@ -426,19 +403,16 @@ pub fn render_home_page(view: &JournalView, query: &JournalQuery) -> String {
 }
 
 fn open_web_database(path: &Path) -> Result<Connection> {
-    let conn = Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_ONLY)
-        .map_err(|source| sqlite_error(path, source))?;
+    let conn = open_readonly_database(path, sqlite_error)?;
     conn.busy_timeout(Duration::from_secs(5))
-        .map_err(|source| sqlite_error(path, source))?;
-    let schema_version: i64 = conn
-        .query_row("PRAGMA user_version", [], |row| row.get(0))
-        .map_err(|source| sqlite_error(path, source))?;
+        .map_err(map_sqlite_error(path))?;
+    let schema_version: i64 = query_one(path, &conn, "PRAGMA user_version", [], |row| row.get(0))?;
     if schema_version > LATEST_SCHEMA_VERSION {
-        return Err(JottraceError::UnsupportedSchemaVersion {
-            path: path.to_path_buf(),
-            actual: schema_version,
-            supported: LATEST_SCHEMA_VERSION,
-        });
+        return Err(unsupported_schema_version(
+            path,
+            schema_version,
+            LATEST_SCHEMA_VERSION,
+        ));
     }
     Ok(conn)
 }
@@ -502,18 +476,13 @@ fn load_sessions(
           LIMIT ?2 OFFSET ?3",
     );
 
-    let mut statement = conn
-        .prepare(&sql)
-        .map_err(|source| sqlite_error(path, source))?;
-
-    let sessions = statement
-        .query_map(
-            params![search.like.as_deref(), (limit + 1) as i64, offset as i64],
-            loaded_session_from_row,
-        )
-        .map_err(|source| sqlite_error(path, source))?
-        .collect::<std::result::Result<Vec<_>, _>>()
-        .map_err(|source| sqlite_error(path, source))?;
+    let sessions = query_collect(
+        path,
+        conn,
+        &sql,
+        params![search.like.as_deref(), (limit + 1) as i64, offset as i64],
+        loaded_session_from_row,
+    )?;
     Ok(paginate(sessions, offset, limit))
 }
 
@@ -523,19 +492,18 @@ fn load_event_payload_text(
     session_id: i64,
     key: EventKey,
 ) -> Result<Option<String>> {
-    let row = conn
-        .query_row(
-            "SELECT payload, codec
+    let row = query_optional(
+        path,
+        conn,
+        "SELECT payload, codec
              FROM events
              WHERE session_id = ?1
                AND generation = ?2
                AND seq = ?3
              LIMIT 1",
-            params![session_id, key.generation, key.seq],
-            |row| Ok((row.get::<_, Vec<u8>>(0)?, row.get::<_, String>(1)?)),
-        )
-        .optional()
-        .map_err(|source| sqlite_error(path, source))?;
+        params![session_id, key.generation, key.seq],
+        |row| Ok((row.get::<_, Vec<u8>>(0)?, row.get::<_, String>(1)?)),
+    )?;
 
     row.map(|(payload, codec)| {
         decode_event_payload(&payload, &codec)
@@ -571,7 +539,9 @@ fn load_session_by_source_session_id(
     source: Option<&str>,
     source_session_id: &str,
 ) -> Result<Option<LoadedSession>> {
-    conn.query_row(
+    query_optional(
+        path,
+        conn,
         "SELECT sessions.id, sessions.source, sessions.source_session_id,
                 sessions.file_path, sessions.cwd, parent.source_session_id,
                 sessions.started_at, sessions.ended_at, sessions.event_count
@@ -584,8 +554,6 @@ fn load_session_by_source_session_id(
         params![source, source_session_id],
         loaded_session_from_row,
     )
-    .optional()
-    .map_err(|source| sqlite_error(path, source))
 }
 
 fn session_matches(
@@ -604,24 +572,17 @@ fn load_events(
     offset: usize,
 ) -> Result<(Vec<JournalEvent>, PageInfo)> {
     let limit = EVENT_PAGE_SIZE;
-    let mut statement = conn
-        .prepare(
-            "SELECT generation, seq, ts, codec, payload_size
-             FROM events
-             WHERE session_id = ?1
-             ORDER BY generation, seq
-             LIMIT ?2 OFFSET ?3",
-        )
-        .map_err(|source| sqlite_error(path, source))?;
-
-    let events = statement
-        .query_map(
-            params![session_id, (limit + 1) as i64, offset as i64],
-            journal_event_metadata_from_row,
-        )
-        .map_err(|source| sqlite_error(path, source))?
-        .collect::<std::result::Result<Vec<_>, _>>()
-        .map_err(|source| sqlite_error(path, source))?;
+    let events = query_collect(
+        path,
+        conn,
+        "SELECT generation, seq, ts, codec, payload_size
+         FROM events
+         WHERE session_id = ?1
+         ORDER BY generation, seq
+         LIMIT ?2 OFFSET ?3",
+        params![session_id, (limit + 1) as i64, offset as i64],
+        journal_event_metadata_from_row,
+    )?;
     Ok(paginate(events, offset, limit))
 }
 
@@ -631,9 +592,10 @@ fn load_event_payload(
     session_id: i64,
     key: EventKey,
 ) -> Result<Option<JournalEvent>> {
-    let row = conn
-        .query_row(
-            "SELECT generation, seq, ts, codec, payload_size,
+    let row = query_optional(
+        path,
+        conn,
+        "SELECT generation, seq, ts, codec, payload_size,
                 CASE
                     WHEN codec = ?4 THEN substr(payload, 1, ?5)
                     ELSE payload
@@ -643,27 +605,25 @@ fn load_event_payload(
            AND generation = ?2
            AND seq = ?3
          LIMIT 1",
-            params![
-                session_id,
-                key.generation,
-                key.seq,
-                RAW_CODEC,
-                PAYLOAD_PREVIEW_BYTES as i64,
-            ],
-            |row| {
-                let payload_size: i64 = row.get("payload_size")?;
-                Ok((
-                    row.get("generation")?,
-                    row.get("seq")?,
-                    row.get("ts")?,
-                    row.get("codec")?,
-                    payload_size as u64,
-                    row.get("payload_preview")?,
-                ))
-            },
-        )
-        .optional()
-        .map_err(|source| sqlite_error(path, source))?;
+        params![
+            session_id,
+            key.generation,
+            key.seq,
+            RAW_CODEC,
+            PAYLOAD_PREVIEW_BYTES as i64,
+        ],
+        |row| {
+            let payload_size: i64 = row.get("payload_size")?;
+            Ok((
+                row.get("generation")?,
+                row.get("seq")?,
+                row.get("ts")?,
+                row.get("codec")?,
+                payload_size as u64,
+                row.get("payload_preview")?,
+            ))
+        },
+    )?;
 
     row.map(
         |(generation, seq, ts, codec, payload_size, payload_preview)| {
@@ -720,30 +680,23 @@ fn journal_event_with_payload(
     payload_size: u64,
     payload: Vec<u8>,
 ) -> Result<JournalEvent> {
-    let payload_preview = match decode_event_payload_prefix(&payload, &codec, PAYLOAD_PREVIEW_BYTES)
-    {
-        Ok(decoded) => String::from_utf8_lossy(&decoded)
-            .chars()
-            .take(PAYLOAD_PREVIEW_CHARS)
-            .collect(),
-        Err(error) => {
-            return Ok(JournalEvent {
-                generation,
-                seq,
-                ts,
-                payload_preview: String::new(),
-                payload_error: Some(error.to_string()),
-                codec,
-                payload_size,
-            });
-        }
-    };
+    let (payload_preview, payload_error) =
+        match decode_event_payload_prefix(&payload, &codec, PAYLOAD_PREVIEW_BYTES) {
+            Ok(decoded) => (
+                String::from_utf8_lossy(&decoded)
+                    .chars()
+                    .take(PAYLOAD_PREVIEW_CHARS)
+                    .collect(),
+                None,
+            ),
+            Err(error) => (String::new(), Some(error.to_string())),
+        };
     Ok(JournalEvent {
         generation,
         seq,
         ts,
         payload_preview,
-        payload_error: None,
+        payload_error,
         codec,
         payload_size,
     })
@@ -810,19 +763,19 @@ fn decoded_payload_matching_session_ids(
              WHERE codec IN (?1, ?2)
              ORDER BY session_id, generation, seq",
         )
-        .map_err(|source| sqlite_error(path, source))?;
+        .map_err(map_sqlite_error(path))?;
     let mut rows = statement
         .query(params![RAW_CODEC, ZSTD_CODEC, PAYLOAD_PREVIEW_BYTES as i64])
-        .map_err(|source| sqlite_error(path, source))?;
+        .map_err(map_sqlite_error(path))?;
     let mut session_ids = Vec::new();
     let mut matched_session_id = None;
-    while let Some(row) = rows.next().map_err(|source| sqlite_error(path, source))? {
-        let session_id: i64 = row.get(0).map_err(|source| sqlite_error(path, source))?;
+    while let Some(row) = rows.next().map_err(map_sqlite_error(path))? {
+        let session_id: i64 = row_value(path, row, 0)?;
         if matched_session_id == Some(session_id) {
             continue;
         }
-        let payload: Vec<u8> = row.get(1).map_err(|source| sqlite_error(path, source))?;
-        let codec: String = row.get(2).map_err(|source| sqlite_error(path, source))?;
+        let payload: Vec<u8> = row_value(path, row, 1)?;
+        let codec: String = row_value(path, row, 2)?;
         let Ok(decoded) = decode_event_payload_prefix(&payload, &codec, PAYLOAD_PREVIEW_BYTES)
         else {
             continue;

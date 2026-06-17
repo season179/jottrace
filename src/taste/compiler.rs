@@ -4,8 +4,9 @@ use std::path::Path;
 use rusqlite::{Connection, params};
 
 use crate::JottraceError;
-use crate::storage::sqlite_error;
+use crate::storage::execute_sql;
 
+use super::db_string_enum;
 use super::parse::{ContentRef, ParseKind, ParsedEvent};
 use super::timeline::{FileTimelineRow, normalize_file_path};
 
@@ -18,66 +19,24 @@ pub const HIGH_CONFIDENCE_THRESHOLD: f64 = 1.0;
 /// Maximum number of prior tool events included in proposal context.
 pub const PRIOR_EVENT_CONTEXT_LIMIT: usize = 5;
 
-/// Labeled outcome for a detected tool proposal.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum PreferenceOutcome {
-    Accepted,
-    Rejected,
-    Edited,
-}
-
-impl PreferenceOutcome {
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Self::Accepted => "accepted",
-            Self::Rejected => "rejected",
-            Self::Edited => "edited",
-        }
-    }
-
-    pub fn from_db_str(value: &str) -> Option<Self> {
-        match value {
-            "accepted" => Some(Self::Accepted),
-            "rejected" => Some(Self::Rejected),
-            "edited" => Some(Self::Edited),
-            _ => None,
-        }
+db_string_enum! {
+    /// Labeled outcome for a detected tool proposal.
+    pub enum PreferenceOutcome {
+        Accepted => "accepted",
+        Rejected => "rejected",
+        Edited => "edited",
     }
 }
 
-/// How a proposal was linked to file state for outcome detection.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum EvidenceKind {
-    DirectEdit,
-    DirectWrite,
-    BashCorrelation,
-    McpCorrelation,
-    PermissionDenial,
-    MissingFinalState,
-}
-
-impl EvidenceKind {
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Self::DirectEdit => "direct_edit",
-            Self::DirectWrite => "direct_write",
-            Self::BashCorrelation => "bash_correlation",
-            Self::McpCorrelation => "mcp_correlation",
-            Self::PermissionDenial => "permission_denial",
-            Self::MissingFinalState => "missing_final_state",
-        }
-    }
-
-    pub fn from_db_str(value: &str) -> Option<Self> {
-        match value {
-            "direct_edit" => Some(Self::DirectEdit),
-            "direct_write" => Some(Self::DirectWrite),
-            "bash_correlation" => Some(Self::BashCorrelation),
-            "mcp_correlation" => Some(Self::McpCorrelation),
-            "permission_denial" => Some(Self::PermissionDenial),
-            "missing_final_state" => Some(Self::MissingFinalState),
-            _ => None,
-        }
+db_string_enum! {
+    /// How a proposal was linked to file state for outcome detection.
+    pub enum EvidenceKind {
+        DirectEdit => "direct_edit",
+        DirectWrite => "direct_write",
+        BashCorrelation => "bash_correlation",
+        McpCorrelation => "mcp_correlation",
+        PermissionDenial => "permission_denial",
+        MissingFinalState => "missing_final_state",
     }
 }
 
@@ -97,6 +56,35 @@ pub struct PreferenceExample {
     pub confidence: f64,
     pub evidence_kind: EvidenceKind,
     pub extractor_version: String,
+}
+
+impl PreferenceExample {
+    /// Build an example from a `preference_examples` row whose columns are, in
+    /// order: source, source_session_id, generation, proposal_event_seq,
+    /// tool_use_id, file_path, tool_name, proposal_content, context, outcome,
+    /// confidence, evidence_kind, extractor_version.
+    pub(crate) fn from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Self> {
+        let generation: i64 = row.get(2)?;
+        let proposal_event_seq: i64 = row.get(3)?;
+        let outcome: String = row.get(9)?;
+        let evidence_kind: String = row.get(11)?;
+        Ok(Self {
+            source: row.get(0)?,
+            source_session_id: row.get(1)?,
+            generation: usize::try_from(generation).expect("generation fits in usize"),
+            proposal_event_seq: usize::try_from(proposal_event_seq)
+                .expect("proposal_event_seq fits in usize"),
+            tool_use_id: row.get(4)?,
+            file_path: row.get(5)?,
+            tool_name: row.get(6)?,
+            proposal_content: row.get(7)?,
+            context: row.get(8)?,
+            outcome: PreferenceOutcome::from_db_str(&outcome).expect("valid outcome"),
+            confidence: row.get(10)?,
+            evidence_kind: EvidenceKind::from_db_str(&evidence_kind).expect("valid evidence_kind"),
+            extractor_version: row.get(12)?,
+        })
+    }
 }
 
 /// Joins parsed proposals with materialized timelines and labels outcomes.
@@ -191,15 +179,18 @@ pub fn replace_session_preference_examples(
     source_session_id: &str,
     examples: &[PreferenceExample],
 ) -> Result<usize, JottraceError> {
-    conn.execute(
+    execute_sql(
+        db_path,
+        conn,
         "DELETE FROM preference_examples WHERE source = ?1 AND source_session_id = ?2",
         params![source, source_session_id],
-    )
-    .map_err(|source| sqlite_error(db_path, source))?;
+    )?;
 
     let mut inserted = 0usize;
     for example in examples {
-        conn.execute(
+        execute_sql(
+            db_path,
+            conn,
             "INSERT INTO preference_examples (
                 source,
                 source_session_id,
@@ -230,8 +221,7 @@ pub fn replace_session_preference_examples(
                 example.evidence_kind.as_str(),
                 example.extractor_version,
             ],
-        )
-        .map_err(|source| sqlite_error(db_path, source))?;
+        )?;
         inserted += 1;
     }
 
@@ -475,19 +465,20 @@ fn post_apply_content(
         .and_then(|row| row.content.clone())
 }
 
+fn content_has_line(content: &str, line: &str) -> bool {
+    content.lines().any(|content_line| content_line == line)
+}
+
 fn effect_present(before: &str, after: &str, final_content: &str) -> bool {
     let added = line_delta(before, after);
     let removed = line_delta(after, before);
 
-    added.iter().all(|line| {
-        final_content
-            .lines()
-            .any(|final_line| final_line == line.as_str())
-    }) && removed.iter().all(|line| {
-        !final_content
-            .lines()
-            .any(|final_line| final_line == line.as_str())
-    })
+    added
+        .iter()
+        .all(|line| content_has_line(final_content, line))
+        && removed
+            .iter()
+            .all(|line| !content_has_line(final_content, line))
 }
 
 fn partial_effect_present(before: &str, after: &str, final_content: &str) -> bool {
@@ -497,11 +488,7 @@ fn partial_effect_present(before: &str, after: &str, final_content: &str) -> boo
     }
     let preserved = added
         .iter()
-        .filter(|line| {
-            final_content
-                .lines()
-                .any(|final_line| final_line == line.as_str())
-        })
+        .filter(|line| content_has_line(final_content, line))
         .count();
     preserved > 0 && preserved < added.len()
 }

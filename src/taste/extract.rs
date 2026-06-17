@@ -1,11 +1,12 @@
-use rusqlite::{Connection, OptionalExtension, Transaction, params};
+use rusqlite::{Connection, Transaction, params};
 use std::path::{Path, PathBuf};
 
 use crate::JottraceError;
 use crate::storage::{
-    DB_FILE_NAME, for_each_decoded_event_payload_for_session, open_database, sqlite_error,
+    execute_sql, for_each_decoded_event_payload_for_session, map_sqlite_error, query_collect,
+    query_one, query_optional,
 };
-use crate::{Result, acquire_data_lock, data_dir_from_env};
+use crate::{Result, data_dir_from_env, open_locked_database, session_not_found};
 
 use super::compiler::{EXTRACTOR_VERSION, PreferenceCompiler, replace_session_preference_examples};
 use super::parse::{SourceStream, merge_streams, parse_jsonl};
@@ -56,9 +57,7 @@ pub fn taste_extract_for_data_dir(
     data_dir: &Path,
     options: TasteExtractOptions,
 ) -> Result<TasteExtractReport> {
-    let db_path = data_dir.join(DB_FILE_NAME);
-    let _lock = acquire_data_lock(data_dir)?;
-    let mut conn = open_database(&db_path)?;
+    let (db_path, _lock, mut conn) = open_locked_database(data_dir)?;
 
     let resolver = match &options.sidecar_history_root {
         Some(root) => SnapshotSidecarResolver::with_history_root(root),
@@ -107,9 +106,7 @@ pub fn taste_extract_for_data_dir(
         let timeline_count;
         let example_count;
         {
-            let tx = conn
-                .transaction()
-                .map_err(|source| sqlite_error(&db_path, source))?;
+            let tx = conn.transaction().map_err(map_sqlite_error(&db_path))?;
             timeline_count = replace_session_file_timelines(
                 &db_path,
                 &tx,
@@ -143,7 +140,7 @@ pub fn taste_extract_for_data_dir(
 }
 
 fn commit_transaction(db_path: &Path, tx: Transaction<'_>) -> Result<()> {
-    tx.commit().map_err(|source| sqlite_error(db_path, source))
+    tx.commit().map_err(map_sqlite_error(db_path))
 }
 
 fn list_parent_claude_sessions(
@@ -151,36 +148,29 @@ fn list_parent_claude_sessions(
     conn: &Connection,
     source_session_id: Option<&str>,
 ) -> Result<Vec<SessionTarget>> {
-    let mut statement = conn
-        .prepare(
-            "SELECT id, source_session_id, cwd
-             FROM sessions
-             WHERE source = ?1
-               AND parent_session_id IS NULL
-               AND (?2 IS NULL OR source_session_id = ?2)
-             ORDER BY id",
-        )
-        .map_err(|source| sqlite_error(db_path, source))?;
-
-    let rows = statement
-        .query_map(params![CLAUDE_SOURCE, source_session_id], |row| {
+    let rows = query_collect(
+        db_path,
+        conn,
+        "SELECT id, source_session_id, cwd
+         FROM sessions
+         WHERE source = ?1
+           AND parent_session_id IS NULL
+           AND (?2 IS NULL OR source_session_id = ?2)
+         ORDER BY id",
+        params![CLAUDE_SOURCE, source_session_id],
+        |row| {
             Ok(SessionTarget {
                 db_id: row.get(0)?,
                 source_session_id: row.get(1)?,
                 cwd: row.get(2)?,
             })
-        })
-        .map_err(|source| sqlite_error(db_path, source))?
-        .collect::<std::result::Result<Vec<_>, _>>()
-        .map_err(|source| sqlite_error(db_path, source))?;
+        },
+    )?;
 
     if let Some(requested) = source_session_id
         && rows.is_empty()
     {
-        return Err(JottraceError::SessionNotFound {
-            source: CLAUDE_SOURCE.to_string(),
-            source_session_id: requested.to_string(),
-        });
+        return Err(session_not_found(CLAUDE_SOURCE, requested));
     }
 
     Ok(rows)
@@ -191,25 +181,21 @@ fn list_child_sessions(
     conn: &Connection,
     parent_db_id: i64,
 ) -> Result<Vec<ChildSession>> {
-    let mut statement = conn
-        .prepare(
-            "SELECT source_session_id
-             FROM sessions
-             WHERE source = ?1
-               AND parent_session_id = ?2
-             ORDER BY id",
-        )
-        .map_err(|source| sqlite_error(db_path, source))?;
-
-    statement
-        .query_map(params![CLAUDE_SOURCE, parent_db_id], |row| {
+    query_collect(
+        db_path,
+        conn,
+        "SELECT source_session_id
+         FROM sessions
+         WHERE source = ?1
+           AND parent_session_id = ?2
+         ORDER BY id",
+        params![CLAUDE_SOURCE, parent_db_id],
+        |row| {
             Ok(ChildSession {
                 source_session_id: row.get(0)?,
             })
-        })
-        .map_err(|source| sqlite_error(db_path, source))?
-        .collect::<std::result::Result<Vec<_>, _>>()
-        .map_err(|source| sqlite_error(db_path, source))
+        },
+    )
 }
 
 /// Whether a parent session's stored extraction matches the current extractor and event stream.
@@ -234,16 +220,15 @@ fn session_needs_extract(
     source_session_id: &str,
 ) -> Result<bool> {
     let current_event_count = count_merged_session_events(db_path, conn, parent_db_id)?;
-    let stored = conn
-        .query_row(
-            "SELECT extractor_version, event_count
+    let stored = query_optional(
+        db_path,
+        conn,
+        "SELECT extractor_version, event_count
              FROM taste_extractions
              WHERE source = ?1 AND source_session_id = ?2",
-            params![CLAUDE_SOURCE, source_session_id],
-            |row| Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?)),
-        )
-        .optional()
-        .map_err(|source| sqlite_error(db_path, source))?;
+        params![CLAUDE_SOURCE, source_session_id],
+        |row| Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?)),
+    )?;
 
     if let Some((version, event_count)) = stored {
         return Ok(version != EXTRACTOR_VERSION
@@ -251,30 +236,30 @@ fn session_needs_extract(
                 != current_event_count);
     }
 
-    let total: i64 = conn
-        .query_row(
-            "SELECT COUNT(*)
+    let total: i64 = query_one(
+        db_path,
+        conn,
+        "SELECT COUNT(*)
              FROM preference_examples
              WHERE source = ?1 AND source_session_id = ?2",
-            params![CLAUDE_SOURCE, source_session_id],
-            |row| row.get(0),
-        )
-        .map_err(|source| sqlite_error(db_path, source))?;
+        params![CLAUDE_SOURCE, source_session_id],
+        |row| row.get(0),
+    )?;
     if total == 0 {
         return Ok(true);
     }
 
-    let stale: i64 = conn
-        .query_row(
-            "SELECT COUNT(*)
+    let stale: i64 = query_one(
+        db_path,
+        conn,
+        "SELECT COUNT(*)
              FROM preference_examples
              WHERE source = ?1
                AND source_session_id = ?2
                AND extractor_version != ?3",
-            params![CLAUDE_SOURCE, source_session_id, EXTRACTOR_VERSION],
-            |row| row.get(0),
-        )
-        .map_err(|source| sqlite_error(db_path, source))?;
+        params![CLAUDE_SOURCE, source_session_id, EXTRACTOR_VERSION],
+        |row| row.get(0),
+    )?;
     Ok(stale > 0)
 }
 
@@ -283,23 +268,23 @@ fn count_merged_session_events(
     conn: &Connection,
     parent_db_id: i64,
 ) -> Result<u64> {
-    let parent_count: i64 = conn
-        .query_row(
-            "SELECT event_count FROM sessions WHERE id = ?1",
-            params![parent_db_id],
-            |row| row.get(0),
-        )
-        .map_err(|source| sqlite_error(db_path, source))?;
+    let parent_count: i64 = query_one(
+        db_path,
+        conn,
+        "SELECT event_count FROM sessions WHERE id = ?1",
+        params![parent_db_id],
+        |row| row.get(0),
+    )?;
 
-    let child_count: i64 = conn
-        .query_row(
-            "SELECT COALESCE(SUM(event_count), 0)
+    let child_count: i64 = query_one(
+        db_path,
+        conn,
+        "SELECT COALESCE(SUM(event_count), 0)
              FROM sessions
              WHERE source = ?1 AND parent_session_id = ?2",
-            params![CLAUDE_SOURCE, parent_db_id],
-            |row| row.get(0),
-        )
-        .map_err(|source| sqlite_error(db_path, source))?;
+        params![CLAUDE_SOURCE, parent_db_id],
+        |row| row.get(0),
+    )?;
 
     let total = parent_count
         .checked_add(child_count)
@@ -314,7 +299,9 @@ fn replace_taste_extraction_meta(
     source_session_id: &str,
     event_count: u64,
 ) -> Result<()> {
-    conn.execute(
+    execute_sql(
+        db_path,
+        conn,
         "INSERT INTO taste_extractions (source, source_session_id, extractor_version, event_count)
          VALUES (?1, ?2, ?3, ?4)
          ON CONFLICT (source, source_session_id) DO UPDATE SET
@@ -326,8 +313,7 @@ fn replace_taste_extraction_meta(
             EXTRACTOR_VERSION,
             i64::try_from(event_count).expect("event_count fits in i64"),
         ],
-    )
-    .map_err(|source| sqlite_error(db_path, source))?;
+    )?;
     Ok(())
 }
 

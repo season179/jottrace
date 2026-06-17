@@ -2,10 +2,10 @@ use rusqlite::{Connection, params};
 use std::path::{Path, PathBuf};
 
 use crate::JottraceError;
-use crate::storage::{DB_FILE_NAME, open_database, sqlite_error};
-use crate::{Result, acquire_data_lock, data_dir_from_env};
+use crate::storage::{query_collect, sqlite_error};
+use crate::{Result, data_dir_from_env, open_locked_database, session_not_found};
 
-use super::compiler::{EvidenceKind, PreferenceExample, PreferenceOutcome};
+use super::compiler::PreferenceExample;
 use super::timeline::{FileTimelineRow, TimelineSourceKind, normalize_file_path};
 
 const CLAUDE_SOURCE: &str = "claude_cli";
@@ -51,9 +51,7 @@ pub fn show_example_for_data_dir(
     data_dir: &Path,
     options: TasteShowExampleOptions,
 ) -> Result<TasteExampleShowReport> {
-    let db_path = data_dir.join(DB_FILE_NAME);
-    let _lock = acquire_data_lock(data_dir)?;
-    let conn = open_database(&db_path)?;
+    let (db_path, _lock, conn) = open_locked_database(data_dir)?;
     load_example(&db_path, &conn, options)
 }
 
@@ -70,9 +68,7 @@ pub fn show_timeline_for_data_dir(
     data_dir: &Path,
     options: TasteShowTimelineOptions,
 ) -> Result<TasteTimelineShowReport> {
-    let db_path = data_dir.join(DB_FILE_NAME);
-    let _lock = acquire_data_lock(data_dir)?;
-    let conn = open_database(&db_path)?;
+    let (db_path, _lock, conn) = open_locked_database(data_dir)?;
     load_timeline(&db_path, &conn, options)
 }
 
@@ -138,10 +134,7 @@ fn lookup_session_cwd(
         |row| row.get(0),
     )
     .map_err(|source| match source {
-        rusqlite::Error::QueryReturnedNoRows => JottraceError::SessionNotFound {
-            source: CLAUDE_SOURCE.to_string(),
-            source_session_id: source_session_id.to_string(),
-        },
+        rusqlite::Error::QueryReturnedNoRows => session_not_found(CLAUDE_SOURCE, source_session_id),
         source => sqlite_error(db_path, source),
     })
 }
@@ -154,41 +147,29 @@ fn query_preference_example(
     source_session_id: Option<&str>,
 ) -> Result<PreferenceExample> {
     let rows = match source_session_id {
-        Some(source_session_id) => {
-            let mut statement = conn
-                .prepare(
-                    "SELECT source_session_id, generation, proposal_event_seq, file_path, tool_name,
-                            proposal_content, context, outcome, confidence, evidence_kind, extractor_version
-                     FROM preference_examples
-                     WHERE source = ?1 AND source_session_id = ?2 AND tool_use_id = ?3",
-                )
-                .map_err(|source| sqlite_error(db_path, source))?;
-            statement
-                .query_map(params![source, source_session_id, tool_use_id], |row| {
-                    map_preference_row(source, tool_use_id, row)
-                })
-                .map_err(|source| sqlite_error(db_path, source))?
-                .collect::<std::result::Result<Vec<_>, _>>()
-                .map_err(|source| sqlite_error(db_path, source))?
-        }
-        None => {
-            let mut statement = conn
-                .prepare(
-                    "SELECT source_session_id, generation, proposal_event_seq, file_path, tool_name,
-                            proposal_content, context, outcome, confidence, evidence_kind, extractor_version
-                     FROM preference_examples
-                     WHERE source = ?1 AND tool_use_id = ?2
-                     ORDER BY source_session_id ASC",
-                )
-                .map_err(|source| sqlite_error(db_path, source))?;
-            statement
-                .query_map(params![source, tool_use_id], |row| {
-                    map_preference_row(source, tool_use_id, row)
-                })
-                .map_err(|source| sqlite_error(db_path, source))?
-                .collect::<std::result::Result<Vec<_>, _>>()
-                .map_err(|source| sqlite_error(db_path, source))?
-        }
+        Some(source_session_id) => query_collect(
+            db_path,
+            conn,
+            "SELECT source, source_session_id, generation, proposal_event_seq, tool_use_id,
+                    file_path, tool_name, proposal_content, context, outcome, confidence,
+                    evidence_kind, extractor_version
+             FROM preference_examples
+             WHERE source = ?1 AND source_session_id = ?2 AND tool_use_id = ?3",
+            params![source, source_session_id, tool_use_id],
+            PreferenceExample::from_row,
+        )?,
+        None => query_collect(
+            db_path,
+            conn,
+            "SELECT source, source_session_id, generation, proposal_event_seq, tool_use_id,
+                    file_path, tool_name, proposal_content, context, outcome, confidence,
+                    evidence_kind, extractor_version
+             FROM preference_examples
+             WHERE source = ?1 AND tool_use_id = ?2
+             ORDER BY source_session_id ASC",
+            params![source, tool_use_id],
+            PreferenceExample::from_row,
+        )?,
     };
 
     match rows.len() {
@@ -203,34 +184,6 @@ fn query_preference_example(
     }
 }
 
-fn map_preference_row(
-    source: &str,
-    tool_use_id: &str,
-    row: &rusqlite::Row<'_>,
-) -> rusqlite::Result<PreferenceExample> {
-    let source_session_id: String = row.get(0)?;
-    let generation: i64 = row.get(1)?;
-    let proposal_event_seq: i64 = row.get(2)?;
-    let outcome: String = row.get(7)?;
-    let evidence_kind: String = row.get(9)?;
-    Ok(PreferenceExample {
-        source: source.to_string(),
-        source_session_id,
-        generation: usize::try_from(generation).expect("generation fits in usize"),
-        proposal_event_seq: usize::try_from(proposal_event_seq)
-            .expect("proposal_event_seq fits in usize"),
-        tool_use_id: tool_use_id.to_string(),
-        file_path: row.get(3)?,
-        tool_name: row.get(4)?,
-        proposal_content: row.get(5)?,
-        context: row.get(6)?,
-        outcome: PreferenceOutcome::from_db_str(&outcome).expect("valid outcome"),
-        confidence: row.get(8)?,
-        evidence_kind: EvidenceKind::from_db_str(&evidence_kind).expect("valid evidence_kind"),
-        extractor_version: row.get(10)?,
-    })
-}
-
 fn query_timeline_rows(
     db_path: &Path,
     conn: &Connection,
@@ -238,17 +191,15 @@ fn query_timeline_rows(
     source_session_id: &str,
     file_path: &str,
 ) -> Result<Vec<FileTimelineRow>> {
-    let mut statement = conn
-        .prepare(
-            "SELECT seq, event_seq, content, trigger_event_ref, source_kind
-             FROM file_timelines
-             WHERE source = ?1 AND source_session_id = ?2 AND file_path = ?3
-             ORDER BY seq ASC",
-        )
-        .map_err(|source| sqlite_error(db_path, source))?;
-
-    let rows = statement
-        .query_map(params![source, source_session_id, file_path], |row| {
+    query_collect(
+        db_path,
+        conn,
+        "SELECT seq, event_seq, content, trigger_event_ref, source_kind
+         FROM file_timelines
+         WHERE source = ?1 AND source_session_id = ?2 AND file_path = ?3
+         ORDER BY seq ASC",
+        params![source, source_session_id, file_path],
+        |row| {
             let seq: i64 = row.get(0)?;
             let event_seq: i64 = row.get(1)?;
             let source_kind: String = row.get(4)?;
@@ -263,10 +214,6 @@ fn query_timeline_rows(
                 source_kind: TimelineSourceKind::from_db_str(&source_kind)
                     .expect("valid source_kind"),
             })
-        })
-        .map_err(|source| sqlite_error(db_path, source))?
-        .collect::<std::result::Result<Vec<_>, _>>()
-        .map_err(|source| sqlite_error(db_path, source))?;
-
-    Ok(rows)
+        },
+    )
 }

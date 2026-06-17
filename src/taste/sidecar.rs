@@ -3,7 +3,7 @@ use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
 
-use crate::JottraceError;
+use crate::{JottraceError, io_error};
 
 use super::parse::{ContentRef, ParseKind, ParsedEvent};
 
@@ -120,7 +120,7 @@ impl SnapshotSidecarResolver {
                     path,
                 })
             }
-            Err(source) => Err(JottraceError::Io { path, source }),
+            Err(source) => Err(io_error(&path, source)),
         }
     }
 }

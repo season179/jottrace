@@ -1,9 +1,12 @@
-use rusqlite::{Connection, OptionalExtension, Row, params};
+use rusqlite::{Connection, OpenFlags, OptionalExtension, Row, params};
 use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use crate::{JottraceError, Result, data_dir_from_env, ensure_private_file};
+use crate::{
+    JottraceError, Result, data_dir_from_env, ensure_private_file, session_not_found,
+    unsupported_schema_version,
+};
 
 pub const DB_FILE_NAME: &str = "db.sqlite";
 pub const LATEST_SCHEMA_VERSION: i64 = 13;
@@ -134,12 +137,7 @@ pub fn decode_event_payload(payload: &[u8], codec: &str) -> Result<Vec<u8>> {
         return Ok(payload.to_vec());
     }
     if codec == ZSTD_CODEC {
-        return zstd::stream::decode_all(payload).map_err(|source| {
-            JottraceError::EventPayloadCodec {
-                codec: ZSTD_CODEC.to_string(),
-                source,
-            }
-        });
+        return zstd::stream::decode_all(payload).map_err(zstd_codec_error);
     }
 
     Err(unsupported_event_payload_codec(codec))
@@ -154,20 +152,12 @@ pub(crate) fn decode_event_payload_prefix(
         return Ok(payload[..payload.len().min(byte_limit)].to_vec());
     }
     if codec == ZSTD_CODEC {
-        let decoder = zstd::stream::read::Decoder::new(payload).map_err(|source| {
-            JottraceError::EventPayloadCodec {
-                codec: ZSTD_CODEC.to_string(),
-                source,
-            }
-        })?;
+        let decoder = zstd::stream::read::Decoder::new(payload).map_err(zstd_codec_error)?;
         let mut decoder = decoder.take(byte_limit as u64);
         let mut decoded = Vec::with_capacity(byte_limit);
         decoder
             .read_to_end(&mut decoded)
-            .map_err(|source| JottraceError::EventPayloadCodec {
-                codec: ZSTD_CODEC.to_string(),
-                source,
-            })?;
+            .map_err(zstd_codec_error)?;
         return Ok(decoded);
     }
 
@@ -179,12 +169,7 @@ pub(crate) fn encode_event_payload(payload: &[u8]) -> Result<EncodedEventPayload
         return Ok(raw_event_payload(payload));
     }
 
-    let compressed = zstd::stream::encode_all(payload, 0).map_err(|source| {
-        JottraceError::EventPayloadCodec {
-            codec: ZSTD_CODEC.to_string(),
-            source,
-        }
-    })?;
+    let compressed = zstd::stream::encode_all(payload, 0).map_err(zstd_codec_error)?;
     if compressed.len() < payload.len() {
         return Ok(EncodedEventPayload {
             payload: compressed,
@@ -207,60 +192,74 @@ fn raw_event_payload(payload: &[u8]) -> EncodedEventPayload {
 pub fn open_database(path: &Path) -> Result<Connection> {
     ensure_private_file(path)?;
 
-    let mut conn = Connection::open(path).map_err(|source| sqlite_error(path, source))?;
+    let mut conn = Connection::open(path).map_err(map_sqlite_error(path))?;
     configure_connection(path, &conn)?;
     run_migrations(path, &mut conn)?;
     Ok(conn)
 }
 
+/// Open a SQLite database read-only, reporting a failed open through
+/// `make_error`.
+///
+/// Foreign session stores (and jottrace's own journal in the web server) are
+/// only ever read, so they are opened with `SQLITE_OPEN_READ_ONLY` rather than
+/// through [`open_database`], which migrates and writes. Callers pass a
+/// source-specific error constructor because the same open failure is labelled
+/// differently per store.
+pub(crate) fn open_readonly_database(
+    path: &Path,
+    make_error: fn(&Path, rusqlite::Error) -> JottraceError,
+) -> Result<Connection> {
+    Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_ONLY)
+        .map_err(|source| make_error(path, source))
+}
+
 fn configure_connection(path: &Path, conn: &Connection) -> Result<()> {
     conn.busy_timeout(Duration::from_secs(5))
-        .map_err(|source| sqlite_error(path, source))?;
+        .map_err(map_sqlite_error(path))?;
     conn.execute_batch(
         "PRAGMA foreign_keys = ON;
          PRAGMA journal_mode = WAL;",
     )
-    .map_err(|source| sqlite_error(path, source))
+    .map_err(map_sqlite_error(path))
 }
 
 fn run_migrations(path: &Path, conn: &mut Connection) -> Result<()> {
     let current = user_version(path, conn)?;
 
     if current > LATEST_SCHEMA_VERSION {
-        return Err(JottraceError::UnsupportedSchemaVersion {
-            path: path.to_path_buf(),
-            actual: current,
-            supported: LATEST_SCHEMA_VERSION,
-        });
+        return Err(unsupported_schema_version(
+            path,
+            current,
+            LATEST_SCHEMA_VERSION,
+        ));
     }
 
     if current == LATEST_SCHEMA_VERSION {
         return Ok(());
     }
 
-    let tx = conn
-        .transaction()
-        .map_err(|source| sqlite_error(path, source))?;
+    let tx = conn.transaction().map_err(map_sqlite_error(path))?;
 
     for migration in MIGRATIONS
         .iter()
         .filter(|migration| migration.version > current)
     {
         tx.execute_batch(migration.sql)
-            .map_err(|source| sqlite_error(path, source))?;
+            .map_err(map_sqlite_error(path))?;
         tx.pragma_update(None, "user_version", migration.version)
-            .map_err(|source| sqlite_error(path, source))?;
+            .map_err(map_sqlite_error(path))?;
     }
 
-    tx.commit().map_err(|source| sqlite_error(path, source))
+    tx.commit().map_err(map_sqlite_error(path))
 }
 
 pub(crate) fn status_from_connection(path: &Path, conn: &Connection) -> Result<StatusReport> {
     Ok(StatusReport {
         db_path: path.to_path_buf(),
         schema_version: user_version(path, conn)?,
-        session_count: count(path, conn, "SELECT COUNT(*) FROM sessions")?,
-        event_count: count(path, conn, "SELECT COUNT(*) FROM events")?,
+        session_count: count(path, conn, "SELECT COUNT(*) FROM sessions", [])?,
+        event_count: count(path, conn, "SELECT COUNT(*) FROM events", [])?,
         unresolved_ingest_error_count: unresolved_ingest_error_count_from_connection(path, conn)?,
     })
 }
@@ -269,7 +268,7 @@ pub(crate) fn unresolved_ingest_error_count_from_connection(
     path: &Path,
     conn: &Connection,
 ) -> Result<u64> {
-    count(path, conn, UNRESOLVED_INGEST_ERROR_COUNT_SQL)
+    count(path, conn, UNRESOLVED_INGEST_ERROR_COUNT_SQL, [])
 }
 
 pub(crate) fn unresolved_ingest_errors_from_connection(
@@ -277,23 +276,19 @@ pub(crate) fn unresolved_ingest_errors_from_connection(
     conn: &Connection,
     limit: usize,
 ) -> Result<Vec<IngestErrorSummary>> {
-    let mut statement = conn
-        .prepare(
-            "SELECT source, source_session_id, file_path, generation, byte_offset,
-                    line_number, error_kind, message, first_seen_at, last_seen_at,
-                    occurrence_count
-             FROM ingest_errors
-             WHERE resolved_at IS NULL
-             ORDER BY last_seen_at DESC, id DESC
-             LIMIT ?1",
-        )
-        .map_err(|source| sqlite_error(path, source))?;
-
-    statement
-        .query_map(params![limit as i64], ingest_error_summary_from_row)
-        .map_err(|source| sqlite_error(path, source))?
-        .collect::<std::result::Result<Vec<_>, _>>()
-        .map_err(|source| sqlite_error(path, source))
+    query_collect(
+        path,
+        conn,
+        "SELECT source, source_session_id, file_path, generation, byte_offset,
+                line_number, error_kind, message, first_seen_at, last_seen_at,
+                occurrence_count
+         FROM ingest_errors
+         WHERE resolved_at IS NULL
+         ORDER BY last_seen_at DESC, id DESC
+         LIMIT ?1",
+        params![limit as i64],
+        ingest_error_summary_from_row,
+    )
 }
 
 pub fn for_each_decoded_event_payload_for_session(
@@ -304,13 +299,8 @@ pub fn for_each_decoded_event_payload_for_session(
     visit: impl FnMut(&[u8]) -> Result<()>,
 ) -> Result<()> {
     let conn = open_database(path)?;
-    let session_id =
-        event_session_id(path, &conn, source, source_session_id)?.ok_or_else(|| {
-            JottraceError::SessionNotFound {
-                source: source.to_string(),
-                source_session_id: source_session_id.to_string(),
-            }
-        })?;
+    let session_id = event_session_id(path, &conn, source, source_session_id)?
+        .ok_or_else(|| session_not_found(source, source_session_id))?;
     for_each_decoded_event_payload_from_connection(path, &conn, session_id, limit, visit)
 }
 
@@ -320,7 +310,9 @@ fn event_session_id(
     source: &str,
     source_session_id: &str,
 ) -> Result<Option<i64>> {
-    conn.query_row(
+    query_optional(
+        path,
+        conn,
         "SELECT id
          FROM sessions
          WHERE source = ?1
@@ -328,8 +320,6 @@ fn event_session_id(
         params![source, source_session_id],
         |row| row.get(0),
     )
-    .optional()
-    .map_err(|source| sqlite_error(path, source))
 }
 
 fn for_each_decoded_event_payload_from_connection(
@@ -364,21 +354,19 @@ fn for_each_decoded_event_payload_from_connection(
              ORDER BY events.generation, events.seq"
         }
     };
-    let mut statement = conn
-        .prepare(sql)
-        .map_err(|source| sqlite_error(path, source))?;
+    let mut statement = conn.prepare(sql).map_err(map_sqlite_error(path))?;
     let mut rows = match limit {
         Some(limit) => statement
             .query(params![session_id, limit])
-            .map_err(|source| sqlite_error(path, source))?,
+            .map_err(map_sqlite_error(path))?,
         None => statement
             .query(params![session_id])
-            .map_err(|source| sqlite_error(path, source))?,
+            .map_err(map_sqlite_error(path))?,
     };
 
-    while let Some(row) = rows.next().map_err(|source| sqlite_error(path, source))? {
-        let payload: Vec<u8> = row.get(0).map_err(|source| sqlite_error(path, source))?;
-        let codec: String = row.get(1).map_err(|source| sqlite_error(path, source))?;
+    while let Some(row) = rows.next().map_err(map_sqlite_error(path))? {
+        let payload: Vec<u8> = row_value(path, row, 0)?;
+        let codec: String = row_value(path, row, 1)?;
         if codec == RAW_CODEC {
             visit(&payload)?;
         } else {
@@ -400,9 +388,10 @@ fn reject_unsupported_event_codecs(
         Some((generation, seq)) => (Some(generation), Some(seq)),
         None => (None, None),
     };
-    let codec: Option<String> = conn
-        .query_row(
-            "SELECT events.codec
+    let codec: Option<String> = query_optional(
+        path,
+        conn,
+        "SELECT events.codec
              FROM events
              WHERE events.session_id = ?1
                AND events.codec NOT IN (?2, ?3)
@@ -413,17 +402,15 @@ fn reject_unsupported_event_codecs(
                )
              ORDER BY events.generation, events.seq
              LIMIT 1",
-            params![
-                session_id,
-                RAW_CODEC,
-                ZSTD_CODEC,
-                bound_generation,
-                bound_seq
-            ],
-            |row| row.get(0),
-        )
-        .optional()
-        .map_err(|source| sqlite_error(path, source))?;
+        params![
+            session_id,
+            RAW_CODEC,
+            ZSTD_CODEC,
+            bound_generation,
+            bound_seq
+        ],
+        |row| row.get(0),
+    )?;
 
     match codec {
         Some(codec) => Err(unsupported_event_payload_codec(&codec)),
@@ -442,7 +429,9 @@ fn selected_event_upper_bound(
     };
 
     let offset = limit - 1;
-    conn.query_row(
+    query_optional(
+        path,
+        conn,
         "SELECT generation, seq
          FROM events
          WHERE session_id = ?1
@@ -451,13 +440,18 @@ fn selected_event_upper_bound(
         params![session_id, offset],
         |row| Ok((row.get(0)?, row.get(1)?)),
     )
-    .optional()
-    .map_err(|source| sqlite_error(path, source))
 }
 
 fn unsupported_event_payload_codec(codec: &str) -> JottraceError {
     JottraceError::UnsupportedEventPayloadCodec {
         codec: codec.to_string(),
+    }
+}
+
+fn zstd_codec_error(source: std::io::Error) -> JottraceError {
+    JottraceError::EventPayloadCodec {
+        codec: ZSTD_CODEC.to_string(),
+        source,
     }
 }
 
@@ -487,16 +481,18 @@ fn ingest_error_summary_from_row(row: &Row<'_>) -> rusqlite::Result<IngestErrorS
     })
 }
 
-fn count(path: &Path, conn: &Connection, sql: &str) -> Result<u64> {
-    let value: i64 = conn
-        .query_row(sql, [], |row| row.get(0))
-        .map_err(|source| sqlite_error(path, source))?;
-    Ok(value as u64)
+pub(crate) fn count(
+    path: &Path,
+    conn: &Connection,
+    sql: &str,
+    params: impl rusqlite::Params,
+) -> Result<u64> {
+    let value: i64 = query_one(path, conn, sql, params, |row| row.get(0))?;
+    Ok(u64::try_from(value).expect("count fits in u64"))
 }
 
 fn user_version(path: &Path, conn: &Connection) -> Result<i64> {
-    conn.query_row("PRAGMA user_version", [], |row| row.get(0))
-        .map_err(|source| sqlite_error(path, source))
+    query_one(path, conn, "PRAGMA user_version", [], |row| row.get(0))
 }
 
 pub(crate) fn sqlite_error(path: &Path, source: rusqlite::Error) -> JottraceError {
@@ -504,6 +500,90 @@ pub(crate) fn sqlite_error(path: &Path, source: rusqlite::Error) -> JottraceErro
         path: path.to_path_buf(),
         source,
     }
+}
+
+/// Build a `map_err` adapter that routes a `rusqlite::Error` through [`sqlite_error`]
+/// for `path`, so the per-operation `|source| sqlite_error(path, source)` closure is
+/// written once. Used by the open/transaction/prepare/commit calls and manual
+/// row-streaming loops that fall outside the row-mapping query helpers.
+pub(crate) fn map_sqlite_error(path: &Path) -> impl Fn(rusqlite::Error) -> JottraceError {
+    move |source| sqlite_error(path, source)
+}
+
+/// Prepare `sql`, run it with `params`, and collect every mapped row into a `Vec`,
+/// routing each fallible step's failure through [`sqlite_error`] for `path`.
+pub(crate) fn query_collect<T, P, F>(
+    path: &Path,
+    conn: &Connection,
+    sql: &str,
+    params: P,
+    mapper: F,
+) -> Result<Vec<T>>
+where
+    P: rusqlite::Params,
+    F: FnMut(&Row<'_>) -> rusqlite::Result<T>,
+{
+    let mut statement = conn.prepare(sql).map_err(map_sqlite_error(path))?;
+    statement
+        .query_map(params, mapper)
+        .map_err(map_sqlite_error(path))?
+        .collect::<std::result::Result<Vec<_>, _>>()
+        .map_err(map_sqlite_error(path))
+}
+
+/// Run `sql` with `params`, returning the single mapped row if present (`Ok(None)` when
+/// no row matches), routing query failures through [`sqlite_error`] for `path`.
+pub(crate) fn query_optional<T, P, F>(
+    path: &Path,
+    conn: &Connection,
+    sql: &str,
+    params: P,
+    mapper: F,
+) -> Result<Option<T>>
+where
+    P: rusqlite::Params,
+    F: FnOnce(&Row<'_>) -> rusqlite::Result<T>,
+{
+    conn.query_row(sql, params, mapper)
+        .optional()
+        .map_err(map_sqlite_error(path))
+}
+
+/// Run `sql` with `params`, returning the single mapped row and routing query
+/// failures (including no matching row) through [`sqlite_error`] for `path`.
+pub(crate) fn query_one<T, P, F>(
+    path: &Path,
+    conn: &Connection,
+    sql: &str,
+    params: P,
+    mapper: F,
+) -> Result<T>
+where
+    P: rusqlite::Params,
+    F: FnOnce(&Row<'_>) -> rusqlite::Result<T>,
+{
+    conn.query_row(sql, params, mapper)
+        .map_err(map_sqlite_error(path))
+}
+
+/// Execute `sql` with `params`, returning the number of affected rows and
+/// routing failures through [`sqlite_error`] for `path`.
+pub(crate) fn execute_sql<P>(path: &Path, conn: &Connection, sql: &str, params: P) -> Result<usize>
+where
+    P: rusqlite::Params,
+{
+    conn.execute(sql, params).map_err(map_sqlite_error(path))
+}
+
+/// Read column `idx` from `row`, routing an access/decode failure through
+/// [`sqlite_error`] for `path`. The manual row-streaming loops (whose bodies run
+/// in the crate `Result` rather than a `rusqlite::Result` mapper closure) use
+/// this to map each column read without repeating the `sqlite_error` closure.
+pub(crate) fn row_value<T>(path: &Path, row: &Row<'_>, idx: usize) -> Result<T>
+where
+    T: rusqlite::types::FromSql,
+{
+    row.get(idx).map_err(map_sqlite_error(path))
 }
 
 #[cfg(test)]

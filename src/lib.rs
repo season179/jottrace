@@ -435,6 +435,21 @@ pub(crate) fn acquire_data_lock(data_dir: &Path) -> Result<DataLock> {
     })
 }
 
+/// Acquire the data lock and open the journal database under `data_dir`.
+///
+/// Returns the database path, the held [`DataLock`] (bind it to a live name so
+/// the lock is released only when the caller's scope ends), and an open
+/// connection, bundling the `join(DB_FILE_NAME)` + [`acquire_data_lock`] +
+/// [`storage::open_database`] prologue shared by the locked journal commands.
+pub(crate) fn open_locked_database(
+    data_dir: &Path,
+) -> Result<(PathBuf, DataLock, rusqlite::Connection)> {
+    let db_path = data_dir.join(storage::DB_FILE_NAME);
+    let lock = acquire_data_lock(data_dir)?;
+    let conn = storage::open_database(&db_path)?;
+    Ok((db_path, lock, conn))
+}
+
 fn acquire_process_data_lock(path: &Path) -> Result<ProcessDataLock> {
     // `flock` behavior for duplicate locks inside one process varies by
     // platform and kernel. Track the path in-process too, preserving the old
@@ -471,10 +486,7 @@ fn acquire_data_lock_file(path: &Path, token: &str) -> Result<File> {
         .write(true)
         .create(true)
         .open(path)
-        .map_err(|source| JottraceError::Io {
-            path: path.to_path_buf(),
-            source,
-        })?;
+        .map_err(map_io_error(path))?;
 
     acquire_os_file_lock(&file, path)?;
     write_data_lock_metadata(&mut file, path, token)?;
@@ -511,10 +523,7 @@ fn write_data_lock_metadata(file: &mut File, path: &Path, token: &str) -> Result
 
     result.map_err(|source| {
         let _ = fs::remove_file(path);
-        JottraceError::Io {
-            path: path.to_path_buf(),
-            source,
-        }
+        io_error(path, source)
     })
 }
 
@@ -529,10 +538,7 @@ fn acquire_os_file_lock(file: &File, path: &Path) -> Result<()> {
     if source.kind() == io::ErrorKind::WouldBlock {
         return Err(JottraceError::LockHeld(path.to_path_buf()));
     }
-    Err(JottraceError::Io {
-        path: path.to_path_buf(),
-        source,
-    })
+    Err(io_error(path, source))
 }
 
 fn remove_data_lock_file_if_owned(path: &Path, token: &str) {
@@ -567,10 +573,7 @@ pub fn ensure_private_dir(path: &Path) -> Result<()> {
             create_private_dir(path)?;
             ensure_dir_mode(path)
         }
-        Err(source) => Err(JottraceError::Io {
-            path: path.to_path_buf(),
-            source,
-        }),
+        Err(source) => Err(io_error(path, source)),
     }
 }
 
@@ -586,10 +589,7 @@ pub fn create_private_file(path: &Path) -> Result<File> {
         .write(true)
         .create_new(true)
         .open(path)
-        .map_err(|source| JottraceError::Io {
-            path: path.to_path_buf(),
-            source,
-        })?;
+        .map_err(map_io_error(path))?;
 
     #[cfg(unix)]
     // The open mode is the first line of defense, but chmod after creation
@@ -619,10 +619,7 @@ pub fn ensure_private_file(path: &Path) -> Result<()> {
             drop(create_private_file(path)?);
             Ok(())
         }
-        Err(source) => Err(JottraceError::Io {
-            path: path.to_path_buf(),
-            source,
-        }),
+        Err(source) => Err(io_error(path, source)),
     }
 }
 
@@ -631,10 +628,7 @@ fn create_private_dir(path: &Path) -> Result<()> {
     let mut builder = fs::DirBuilder::new();
     builder.recursive(true);
     builder.mode(PRIVATE_DIR_MODE);
-    builder.create(path).map_err(|source| JottraceError::Io {
-        path: path.to_path_buf(),
-        source,
-    })?;
+    builder.create(path).map_err(map_io_error(path))?;
     // DirBuilder's mode is affected by the process umask, so enforce the final
     // permission after the directory exists.
     set_mode(path, PRIVATE_DIR_MODE)
@@ -642,10 +636,7 @@ fn create_private_dir(path: &Path) -> Result<()> {
 
 #[cfg(not(unix))]
 fn create_private_dir(path: &Path) -> Result<()> {
-    fs::create_dir_all(path).map_err(|source| JottraceError::Io {
-        path: path.to_path_buf(),
-        source,
-    })
+    fs::create_dir_all(path).map_err(map_io_error(path))
 }
 
 #[cfg(unix)]
@@ -689,26 +680,17 @@ fn ensure_file_mode(_path: &Path) -> Result<()> {
 #[cfg(unix)]
 fn set_mode(path: &Path, expected: u32) -> Result<()> {
     let mut permissions = fs::metadata(path)
-        .map_err(|source| JottraceError::Io {
-            path: path.to_path_buf(),
-            source,
-        })?
+        .map_err(map_io_error(path))?
         .permissions();
     permissions.set_mode(expected);
-    fs::set_permissions(path, permissions).map_err(|source| JottraceError::Io {
-        path: path.to_path_buf(),
-        source,
-    })
+    fs::set_permissions(path, permissions).map_err(map_io_error(path))
 }
 
 #[cfg(unix)]
 fn mode(path: &Path) -> Result<u32> {
     // Mask out file-type bits so callers compare only the familiar chmod mode.
     Ok(fs::metadata(path)
-        .map_err(|source| JottraceError::Io {
-            path: path.to_path_buf(),
-            source,
-        })?
+        .map_err(map_io_error(path))?
         .permissions()
         .mode()
         & 0o777)
@@ -721,6 +703,52 @@ pub(crate) fn private_open_options() -> OpenOptions {
     // afterwards would leave a small window with process-default permissions.
     options.mode(PRIVATE_FILE_MODE);
     options
+}
+
+/// Build a `JottraceError::Io` for a filesystem operation that failed at `path`.
+/// Mirrors `storage::sqlite_error` so the pervasive
+/// `.map_err(|source| io_error(path, source))` idiom stays uniform across the
+/// crate instead of repeating the struct literal at every call site.
+pub(crate) fn io_error(path: &Path, source: io::Error) -> JottraceError {
+    JottraceError::Io {
+        path: path.to_path_buf(),
+        source,
+    }
+}
+
+/// Build a `map_err` adapter that routes an `io::Error` through [`io_error`] for
+/// `path`, so the per-operation `|source| io_error(path, source)` closure is
+/// written once. Mirrors `storage::map_sqlite_error` for filesystem operations.
+pub(crate) fn map_io_error(path: &Path) -> impl Fn(io::Error) -> JottraceError {
+    move |source| io_error(path, source)
+}
+
+/// Build a `JottraceError::UnsupportedSchemaVersion` for a database at `path`
+/// whose `actual` schema version exceeds the `supported` version. Mirrors
+/// `io_error` so the schema-too-new guard stays uniform across the migration
+/// runner, the web reader, and the archive validator instead of repeating the
+/// struct literal at every call site.
+pub(crate) fn unsupported_schema_version(
+    path: &Path,
+    actual: i64,
+    supported: i64,
+) -> JottraceError {
+    JottraceError::UnsupportedSchemaVersion {
+        path: path.to_path_buf(),
+        actual,
+        supported,
+    }
+}
+
+/// Build a `JottraceError::SessionNotFound` for the session identified by
+/// `source` and `source_session_id`. Mirrors `io_error` so the not-found guard
+/// stays uniform across the storage reader, `taste show`, and `taste extract`
+/// instead of repeating the struct literal at every call site.
+pub(crate) fn session_not_found(source: &str, source_session_id: &str) -> JottraceError {
+    JottraceError::SessionNotFound {
+        source: source.to_string(),
+        source_session_id: source_session_id.to_string(),
+    }
 }
 
 fn lock_token() -> String {

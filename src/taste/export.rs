@@ -3,11 +3,11 @@ use serde::Serialize;
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 
-use crate::JottraceError;
-use crate::storage::{DB_FILE_NAME, open_database, sqlite_error};
-use crate::{Result, acquire_data_lock, data_dir_from_env, private_open_options};
+use crate::storage::query_collect;
+use crate::{JottraceError, map_io_error};
+use crate::{Result, data_dir_from_env, open_locked_database, private_open_options};
 
-use super::compiler::{EvidenceKind, PreferenceExample, PreferenceOutcome};
+use super::compiler::{PreferenceExample, PreferenceOutcome};
 
 const CLAUDE_SOURCE: &str = "claude_cli";
 
@@ -75,9 +75,7 @@ pub fn taste_export_for_data_dir(
     data_dir: &Path,
     options: TasteExportOptions,
 ) -> Result<TasteExportReport> {
-    let db_path = data_dir.join(DB_FILE_NAME);
-    let _lock = acquire_data_lock(data_dir)?;
-    let conn = open_database(&db_path)?;
+    let (db_path, _lock, conn) = open_locked_database(data_dir)?;
     let examples = load_preference_examples(&db_path, &conn)?;
     let rows_exported = u64::try_from(examples.len()).expect("row count fits in u64");
     write_export(&examples, &options)?;
@@ -90,46 +88,18 @@ pub fn taste_export_for_data_dir(
 }
 
 fn load_preference_examples(db_path: &Path, conn: &Connection) -> Result<Vec<PreferenceExample>> {
-    let mut statement = conn
-        .prepare(
-            "SELECT tool_use_id, source_session_id, generation, proposal_event_seq, file_path,
-                    tool_name, proposal_content, context, outcome, confidence, evidence_kind,
-                    extractor_version
-             FROM preference_examples
-             WHERE source = ?1
-             ORDER BY source_session_id ASC, generation ASC, proposal_event_seq ASC",
-        )
-        .map_err(|source| sqlite_error(db_path, source))?;
-
-    statement
-        .query_map(params![CLAUDE_SOURCE], |row| {
-            let tool_use_id: String = row.get(0)?;
-            let source_session_id: String = row.get(1)?;
-            let generation: i64 = row.get(2)?;
-            let proposal_event_seq: i64 = row.get(3)?;
-            let outcome: String = row.get(8)?;
-            let evidence_kind: String = row.get(10)?;
-            Ok(PreferenceExample {
-                source: CLAUDE_SOURCE.to_string(),
-                source_session_id,
-                generation: usize::try_from(generation).expect("generation fits in usize"),
-                proposal_event_seq: usize::try_from(proposal_event_seq)
-                    .expect("proposal_event_seq fits in usize"),
-                tool_use_id,
-                file_path: row.get(4)?,
-                tool_name: row.get(5)?,
-                proposal_content: row.get(6)?,
-                context: row.get(7)?,
-                outcome: PreferenceOutcome::from_db_str(&outcome).expect("valid outcome"),
-                confidence: row.get(9)?,
-                evidence_kind: EvidenceKind::from_db_str(&evidence_kind)
-                    .expect("valid evidence_kind"),
-                extractor_version: row.get(11)?,
-            })
-        })
-        .map_err(|source| sqlite_error(db_path, source))?
-        .collect::<std::result::Result<Vec<_>, _>>()
-        .map_err(|source| sqlite_error(db_path, source))
+    query_collect(
+        db_path,
+        conn,
+        "SELECT source, source_session_id, generation, proposal_event_seq, tool_use_id,
+                file_path, tool_name, proposal_content, context, outcome, confidence,
+                evidence_kind, extractor_version
+         FROM preference_examples
+         WHERE source = ?1
+         ORDER BY source_session_id ASC, generation ASC, proposal_event_seq ASC",
+        params![CLAUDE_SOURCE],
+        PreferenceExample::from_row,
+    )
 }
 
 fn write_export(examples: &[PreferenceExample], options: &TasteExportOptions) -> Result<()> {
@@ -153,19 +123,13 @@ fn write_jsonl_export(examples: &[PreferenceExample], output_path: Option<&Path>
             if let Some(parent) = path.parent()
                 && !parent.as_os_str().is_empty()
             {
-                std::fs::create_dir_all(parent).map_err(|source| JottraceError::Io {
-                    path: parent.to_path_buf(),
-                    source,
-                })?;
+                std::fs::create_dir_all(parent).map_err(map_io_error(parent))?;
             }
             let mut file = private_open_options()
                 .write(true)
                 .create_new(true)
                 .open(path)
-                .map_err(|source| JottraceError::Io {
-                    path: path.to_path_buf(),
-                    source,
-                })?;
+                .map_err(map_io_error(path))?;
             file.write_all(&buffer)
                 .map_err(|source| JottraceError::Output { source })?;
         }
