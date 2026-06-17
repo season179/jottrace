@@ -24,9 +24,10 @@ pub use compact::{CompactMode, CompactOptions, CompactReport, run_compact};
 pub use ingest::{IngestReport, run_ingest};
 pub use storage::{IngestErrorSummary, StatusReport, run_status};
 pub use taste::{
-    TasteExtractOptions, TasteExtractReport, TasteOutcomeCounts, TasteShowTimelineOptions,
-    TasteStatusReport, TasteTimelineShowReport, run_taste_extract, run_taste_show_timeline,
-    run_taste_status, show_timeline_for_data_dir, taste_status_for_data_dir,
+    TasteExampleShowReport, TasteExtractOptions, TasteExtractReport, TasteOutcomeCounts,
+    TasteShowExampleOptions, TasteShowTimelineOptions, TasteStatusReport, TasteTimelineShowReport,
+    run_taste_extract, run_taste_show_example, run_taste_show_timeline, run_taste_status,
+    show_example_for_data_dir, show_timeline_for_data_dir, taste_status_for_data_dir,
 };
 pub use transfer::{PackOptions, PackReport, SettleOptions, SettleReport, run_pack, run_settle};
 pub use update::{UpdateReport, run_update};
@@ -93,6 +94,15 @@ pub enum JottraceError {
     TimelineNotFound {
         source_session_id: String,
         file_path: String,
+    },
+    /// `taste show example` found no preference row for the requested tool id.
+    ExampleNotFound {
+        tool_use_id: String,
+    },
+    /// `taste show example` matched multiple sessions for one tool id.
+    AmbiguousExample {
+        tool_use_id: String,
+        session_count: usize,
     },
     InvalidEventLimit {
         limit: i64,
@@ -215,6 +225,17 @@ impl fmt::Display for JottraceError {
             } => write!(
                 f,
                 "timeline not found: session={source_session_id} file={file_path} (run `jottrace taste extract` first)"
+            ),
+            Self::ExampleNotFound { tool_use_id } => write!(
+                f,
+                "preference example not found: tool_use_id={tool_use_id} (run `jottrace taste extract` first)"
+            ),
+            Self::AmbiguousExample {
+                tool_use_id,
+                session_count,
+            } => write!(
+                f,
+                "preference example is ambiguous: tool_use_id={tool_use_id} matched {session_count} sessions; pass --session <source_session_id>"
             ),
             Self::InvalidEventLimit { limit } => {
                 write!(f, "event limit must be at least 1; got {limit}")

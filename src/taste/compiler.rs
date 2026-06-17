@@ -31,6 +31,15 @@ impl PreferenceOutcome {
             Self::Edited => "edited",
         }
     }
+
+    pub fn from_db_str(value: &str) -> Option<Self> {
+        match value {
+            "accepted" => Some(Self::Accepted),
+            "rejected" => Some(Self::Rejected),
+            "edited" => Some(Self::Edited),
+            _ => None,
+        }
+    }
 }
 
 /// How a proposal was linked to file state for outcome detection.
@@ -51,6 +60,17 @@ impl EvidenceKind {
             Self::BashCorrelation => "bash_correlation",
             Self::PermissionDenial => "permission_denial",
             Self::MissingFinalState => "missing_final_state",
+        }
+    }
+
+    pub fn from_db_str(value: &str) -> Option<Self> {
+        match value {
+            "direct_edit" => Some(Self::DirectEdit),
+            "direct_write" => Some(Self::DirectWrite),
+            "bash_correlation" => Some(Self::BashCorrelation),
+            "permission_denial" => Some(Self::PermissionDenial),
+            "missing_final_state" => Some(Self::MissingFinalState),
+            _ => None,
         }
     }
 }

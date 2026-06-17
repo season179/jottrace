@@ -16,8 +16,9 @@ pub use parse::{
     merge_streams, parse_jsonl, renumber_seq,
 };
 pub use show::{
-    TasteShowTimelineOptions, TasteTimelineShowReport, run_taste_show_timeline,
-    show_timeline_for_data_dir,
+    TasteExampleShowReport, TasteShowExampleOptions, TasteShowTimelineOptions,
+    TasteTimelineShowReport, run_taste_show_example, run_taste_show_timeline,
+    show_example_for_data_dir, show_timeline_for_data_dir,
 };
 pub use sidecar::{ResolvedContent, SnapshotSidecarResolver};
 pub use status::{

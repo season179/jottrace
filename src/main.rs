@@ -406,10 +406,37 @@ fn run_taste_show_command(mut args: impl Iterator<Item = String>) -> ExitCode {
             ExitCode::SUCCESS
         }
         Some("timeline") => run_taste_show_timeline_command(args),
+        Some("example") => run_taste_show_example_command(args),
         Some(subcommand) => {
             eprintln!("unknown taste show subcommand: {subcommand}");
             eprintln!("run `jottrace taste show --help` for usage");
             ExitCode::from(2)
+        }
+    }
+}
+
+fn run_taste_show_example_command(args: impl Iterator<Item = String>) -> ExitCode {
+    let options = match parse_taste_show_example_command(args) {
+        Ok(TasteShowExampleCommand::Help) => {
+            print_taste_show_example_help();
+            return ExitCode::SUCCESS;
+        }
+        Ok(TasteShowExampleCommand::Run(options)) => options,
+        Err(message) => {
+            eprint_command_usage("taste show example", &message);
+            return ExitCode::from(2);
+        }
+    };
+    jottrace::update::maybe_spawn_auto_update();
+
+    match jottrace::run_taste_show_example(options) {
+        Ok(report) => {
+            print_taste_example_report(&report);
+            ExitCode::SUCCESS
+        }
+        Err(error) => {
+            eprint_command_failure("taste show example", error);
+            ExitCode::FAILURE
         }
     }
 }
@@ -440,9 +467,57 @@ fn run_taste_show_timeline_command(args: impl Iterator<Item = String>) -> ExitCo
     }
 }
 
+enum TasteShowExampleCommand {
+    Run(jottrace::TasteShowExampleOptions),
+    Help,
+}
+
 enum TasteShowTimelineCommand {
     Run(jottrace::TasteShowTimelineOptions),
     Help,
+}
+
+fn parse_taste_show_example_command(
+    mut args: impl Iterator<Item = String>,
+) -> std::result::Result<TasteShowExampleCommand, String> {
+    let mut source_session_id = None;
+    let mut tool_use_id = None;
+
+    while let Some(arg) = args.next() {
+        match arg.as_str() {
+            "--help" | "-h" => return Ok(TasteShowExampleCommand::Help),
+            "--session" => {
+                let value = args
+                    .next()
+                    .ok_or_else(|| "--session requires a value".to_string())?;
+                if source_session_id.is_some() {
+                    return Err("taste show example accepts only one --session value".to_string());
+                }
+                source_session_id = Some(value);
+            }
+            value if value.starts_with('-') => {
+                return Err(format!("unknown taste show example option: {value}"));
+            }
+            value => {
+                if tool_use_id.is_some() {
+                    return Err(
+                        "taste show example accepts only one tool_use_id argument".to_string()
+                    );
+                }
+                tool_use_id = Some(value.to_string());
+            }
+        }
+    }
+
+    let tool_use_id =
+        tool_use_id.ok_or_else(|| "taste show example requires <tool_use_id>".to_string())?;
+
+    Ok(TasteShowExampleCommand::Run(
+        jottrace::TasteShowExampleOptions {
+            tool_use_id,
+            source_session_id,
+        },
+    ))
 }
 
 fn parse_taste_show_timeline_command(
@@ -487,6 +562,31 @@ fn parse_taste_show_timeline_command(
             file_path,
         },
     ))
+}
+
+fn print_taste_example_report(report: &jottrace::TasteExampleShowReport) {
+    let example = &report.example;
+    println!("jottrace taste show example");
+    println!("tool_use_id: {}", example.tool_use_id);
+    println!("session: {}", example.source_session_id);
+    println!("generation: {}", example.generation);
+    println!("proposal_event_seq: {}", example.proposal_event_seq);
+    println!("file: {}", example.file_path.as_deref().unwrap_or("-"));
+    println!("tool: {}", example.tool_name);
+    println!("outcome: {}", example.outcome.as_str());
+    println!("confidence: {}", example.confidence);
+    println!("evidence_kind: {}", example.evidence_kind.as_str());
+    println!("extractor_version: {}", example.extractor_version);
+    println!("proposal:");
+    match &example.proposal_content {
+        Some(content) => println!("{content}"),
+        None => println!("<missing proposal>"),
+    }
+    println!("context:");
+    match &example.context {
+        Some(content) => println!("{content}"),
+        None => println!("<missing context>"),
+    }
 }
 
 fn print_taste_timeline_report(report: &jottrace::TasteTimelineShowReport) {
@@ -1102,6 +1202,7 @@ fn print_help() {
     println!("  jottrace taste extract [--session <source_session_id>] [--force]");
     println!("  jottrace taste status [--details]");
     println!("  jottrace taste show timeline --session <id> --file <path>");
+    println!("  jottrace taste show example [--session <id>] <tool_use_id>");
     println!("  jottrace update");
     println!("  jottrace upgrade");
     println!("  jottrace web [--port <port>] [--once]");
@@ -1209,10 +1310,12 @@ fn print_taste_help() {
     println!("  jottrace taste extract [--session <source_session_id>] [--force]");
     println!("  jottrace taste status [--details]");
     println!("  jottrace taste show timeline --session <id> --file <path>");
+    println!("  jottrace taste show example [--session <id>] <tool_use_id>");
     println!();
     println!("Run `jottrace taste extract --help` for extraction options.");
     println!("Run `jottrace taste status --help` for status options.");
     println!("Run `jottrace taste show timeline --help` for timeline inspection options.");
+    println!("Run `jottrace taste show example --help` for example inspection options.");
 }
 
 fn print_taste_show_help() {
@@ -1221,8 +1324,23 @@ fn print_taste_show_help() {
     println!();
     println!("Usage:");
     println!("  jottrace taste show timeline --session <source_session_id> --file <path>");
+    println!("  jottrace taste show example [--session <source_session_id>] <tool_use_id>");
     println!();
     println!("Run `jottrace taste show timeline --help` for timeline options.");
+    println!("Run `jottrace taste show example --help` for example options.");
+}
+
+fn print_taste_show_example_help() {
+    println!("jottrace taste show example");
+    println!("Inspect one labeled preference example with full context.");
+    println!();
+    println!("Usage:");
+    println!("  jottrace taste show example [--session <source_session_id>] <tool_use_id>");
+    println!();
+    println!("Options:");
+    println!(
+        "  --session <id>  Disambiguate when the same tool_use_id appears in multiple sessions"
+    );
 }
 
 fn print_taste_show_timeline_help() {
@@ -1256,6 +1374,7 @@ fn print_taste_extract_help() {
     println!("  jottrace taste extract [--session <source_session_id>] [--force]");
     println!("  jottrace taste status [--details]");
     println!("  jottrace taste show timeline --session <id> --file <path>");
+    println!("  jottrace taste show example [--session <id>] <tool_use_id>");
     println!();
     println!("Options:");
     println!("  --session <id>  Extract only the given Claude parent source_session_id");
