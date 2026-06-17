@@ -1,7 +1,7 @@
 mod common;
 
 use common::taste_fixture;
-use jottrace::storage::{open_database, DB_FILE_NAME};
+use jottrace::storage::{DB_FILE_NAME, open_database};
 use jottrace::taste::{PreferenceOutcome, TasteExtractOptions, run_taste_extract};
 use rusqlite::params;
 use std::fs;
@@ -48,9 +48,7 @@ fn install_taste_claude_fixture(root: &Path) {
         &subagents.join(format!("{TASTE_SUBAGENT_ID}.meta.json")),
     );
 
-    let history_dir = root
-        .join(".claude/file-history")
-        .join(TASTE_SESSION_ID);
+    let history_dir = root.join(".claude/file-history").join(TASTE_SESSION_ID);
     for version in ["v1", "v2", "v3"] {
         copy_fixture_file(
             &format!("claude-cli/file-history/{TASTE_SESSION_ID}/fixture-a1b2c3d4@{version}"),
@@ -176,12 +174,7 @@ fn taste_extract_cli_reports_counts_for_fixture_session() {
     run_ingest_with_home(&root, &data_dir);
 
     let output = Command::new(binary())
-        .args([
-            "taste",
-            "extract",
-            "--session",
-            TASTE_SESSION_ID,
-        ])
+        .args(["taste", "extract", "--session", TASTE_SESSION_ID])
         .env("HOME", root.as_ref())
         .env("JOTTRACE_HOME", &data_dir)
         .output()

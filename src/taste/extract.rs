@@ -7,9 +7,7 @@ use crate::storage::{
 };
 use crate::{Result, acquire_data_lock, data_dir_from_env};
 
-use super::compiler::{
-    EXTRACTOR_VERSION, PreferenceCompiler, replace_session_preference_examples,
-};
+use super::compiler::{EXTRACTOR_VERSION, PreferenceCompiler, replace_session_preference_examples};
 use super::parse::{SourceStream, merge_streams, parse_jsonl};
 use super::sidecar::SnapshotSidecarResolver;
 use super::timeline::{FileTimelineMaterializer, replace_session_file_timelines};
@@ -59,11 +57,8 @@ pub fn run_taste_extract(options: TasteExtractOptions) -> Result<TasteExtractRep
         None => SnapshotSidecarResolver::claude_home()?,
     };
 
-    let targets = list_parent_claude_sessions(
-        &db_path,
-        &conn,
-        options.source_session_id.as_deref(),
-    )?;
+    let targets =
+        list_parent_claude_sessions(&db_path, &conn, options.source_session_id.as_deref())?;
 
     let mut report = TasteExtractReport {
         db_path: db_path.clone(),
@@ -74,9 +69,7 @@ pub fn run_taste_extract(options: TasteExtractOptions) -> Result<TasteExtractRep
     };
 
     for target in targets {
-        if !options.force
-            && !session_needs_extract(&db_path, &conn, &target.source_session_id)?
-        {
+        if !options.force && !session_needs_extract(&db_path, &conn, &target.source_session_id)? {
             report.sessions_skipped += 1;
             continue;
         }
@@ -132,8 +125,7 @@ pub fn run_taste_extract(options: TasteExtractOptions) -> Result<TasteExtractRep
 }
 
 fn commit_transaction(db_path: &Path, tx: Transaction<'_>) -> Result<()> {
-    tx.commit()
-        .map_err(|source| sqlite_error(db_path, source))
+    tx.commit().map_err(|source| sqlite_error(db_path, source))
 }
 
 fn list_parent_claude_sessions(
@@ -306,7 +298,9 @@ mod tests {
     #[test]
     fn subagent_agent_id_extracts_suffix_after_subagents_marker() {
         assert_eq!(
-            subagent_agent_id("00000000-0000-4000-8000-000000000031/subagents/agent-taste000000000001"),
+            subagent_agent_id(
+                "00000000-0000-4000-8000-000000000031/subagents/agent-taste000000000001"
+            ),
             "agent-taste000000000001"
         );
     }

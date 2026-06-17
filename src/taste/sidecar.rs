@@ -52,12 +52,14 @@ impl SnapshotSidecarResolver {
     }
 
     pub fn sidecar_path(&self, session_id: &str, backup_file_name: &str) -> PathBuf {
-        self.history_root
-            .join(session_id)
-            .join(backup_file_name)
+        self.history_root.join(session_id).join(backup_file_name)
     }
 
-    pub fn resolve(&self, session_id: &str, content_ref: &ContentRef) -> Result<ResolvedContent, JottraceError> {
+    pub fn resolve(
+        &self,
+        session_id: &str,
+        content_ref: &ContentRef,
+    ) -> Result<ResolvedContent, JottraceError> {
         match content_ref {
             ContentRef::Inline(content) => Ok(ResolvedContent::Inline(content.clone())),
             ContentRef::Sidecar {

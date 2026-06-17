@@ -1,10 +1,10 @@
 mod common;
 
 use common::taste_fixture;
-use jottrace::storage::{open_database, LATEST_SCHEMA_VERSION};
+use jottrace::storage::{LATEST_SCHEMA_VERSION, open_database};
 use jottrace::taste::{
-    FileTimelineMaterializer, PreferenceCompiler, PreferenceOutcome, SourceStream,
-    SnapshotSidecarResolver, merge_streams, parse_jsonl, replace_session_preference_examples,
+    FileTimelineMaterializer, PreferenceCompiler, PreferenceOutcome, SnapshotSidecarResolver,
+    SourceStream, merge_streams, parse_jsonl, replace_session_preference_examples,
 };
 use rusqlite::params;
 use std::fs;
@@ -63,7 +63,13 @@ fn compile_fixture_examples() -> Vec<jottrace::taste::PreferenceExample> {
         &events,
     )
     .expect("materialize");
-    PreferenceCompiler::compile("claude_cli", TASTE_SESSION_ID, Some(TASTE_CWD), &events, &rows)
+    PreferenceCompiler::compile(
+        "claude_cli",
+        TASTE_SESSION_ID,
+        Some(TASTE_CWD),
+        &events,
+        &rows,
+    )
 }
 
 #[test]

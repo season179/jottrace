@@ -1,9 +1,7 @@
 mod common;
 
 use common::taste_fixture;
-use jottrace::taste::{
-    ContentRef, ParseKind, SourceStream, merge_streams, parse_jsonl,
-};
+use jottrace::taste::{ContentRef, ParseKind, SourceStream, merge_streams, parse_jsonl};
 use std::fs;
 
 const TASTE_SESSION_ID: &str = "00000000-0000-4000-8000-000000000031";
@@ -38,15 +36,13 @@ fn claude_parser_emits_snapshots_proposals_and_denials_from_fixture() {
             .iter()
             .any(|event| matches!(event.content_or_ref, Some(ContentRef::Inline(_))))
     );
-    assert!(
-        snapshots.iter().any(|event| matches!(
-            event.content_or_ref,
-            Some(ContentRef::Sidecar {
-                backup_file_name: _,
-                ..
-            })
-        ))
-    );
+    assert!(snapshots.iter().any(|event| matches!(
+        event.content_or_ref,
+        Some(ContentRef::Sidecar {
+            backup_file_name: _,
+            ..
+        })
+    )));
 
     let proposals: Vec<_> = events
         .iter()

@@ -120,7 +120,9 @@ fn parse_claude_line(
     let event_type = value.get("type").and_then(Value::as_str);
 
     match event_type {
-        Some("file-history-snapshot") => parse_snapshot_events(seq, source_stream, timestamp, &value),
+        Some("file-history-snapshot") => {
+            parse_snapshot_events(seq, source_stream, timestamp, &value)
+        }
         Some("assistant") => parse_assistant_events(seq, source_stream, timestamp, &value),
         Some("user") => parse_user_events(seq, source_stream, timestamp, &value),
         _ => Ok(Vec::new()),
@@ -221,10 +223,7 @@ fn parse_assistant_events(
     timestamp: Option<String>,
     value: &Value,
 ) -> Result<Vec<ParsedEvent>, serde_json::Error> {
-    let Some(content) = value
-        .pointer("/message/content")
-        .and_then(Value::as_array)
-    else {
+    let Some(content) = value.pointer("/message/content").and_then(Value::as_array) else {
         return Ok(Vec::new());
     };
 
@@ -234,7 +233,10 @@ fn parse_assistant_events(
             continue;
         }
         let tool_ref = block.get("id").and_then(Value::as_str).map(str::to_string);
-        let tool_name = block.get("name").and_then(Value::as_str).map(str::to_string);
+        let tool_name = block
+            .get("name")
+            .and_then(Value::as_str)
+            .map(str::to_string);
         let input = block.get("input");
         let file_path = input
             .and_then(|input| input.get("file_path"))
@@ -282,10 +284,7 @@ fn parse_user_events(
     timestamp: Option<String>,
     value: &Value,
 ) -> Result<Vec<ParsedEvent>, serde_json::Error> {
-    let Some(content) = value
-        .pointer("/message/content")
-        .and_then(Value::as_array)
-    else {
+    let Some(content) = value.pointer("/message/content").and_then(Value::as_array) else {
         return Ok(Vec::new());
     };
 
@@ -395,7 +394,10 @@ mod tests {
         let list = parse_claude_line(0, &SourceStream::Parent, list_line).expect("list snapshot");
         assert_eq!(list.len(), 1);
         assert_eq!(list[0].file_path.as_deref(), Some("/tmp/a.rs"));
-        assert_eq!(list[0].content_or_ref, Some(ContentRef::Inline("inline".to_string())));
+        assert_eq!(
+            list[0].content_or_ref,
+            Some(ContentRef::Inline("inline".to_string()))
+        );
 
         let dict = parse_claude_line(1, &SourceStream::Parent, dict_line).expect("dict snapshot");
         assert_eq!(dict.len(), 1);

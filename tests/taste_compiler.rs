@@ -2,8 +2,8 @@ mod common;
 
 use common::taste_fixture;
 use jottrace::taste::{
-    EvidenceKind, FileTimelineMaterializer, PreferenceCompiler, PreferenceOutcome, SourceStream,
-    SnapshotSidecarResolver, merge_streams, parse_jsonl,
+    EvidenceKind, FileTimelineMaterializer, PreferenceCompiler, PreferenceOutcome,
+    SnapshotSidecarResolver, SourceStream, merge_streams, parse_jsonl,
 };
 use std::collections::HashMap;
 use std::fs;
@@ -63,7 +63,13 @@ fn compile_fixture_examples() -> Vec<jottrace::taste::PreferenceExample> {
         &events,
     )
     .expect("materialize");
-    PreferenceCompiler::compile("claude_cli", TASTE_SESSION_ID, Some(TASTE_CWD), &events, &rows)
+    PreferenceCompiler::compile(
+        "claude_cli",
+        TASTE_SESSION_ID,
+        Some(TASTE_CWD),
+        &events,
+        &rows,
+    )
 }
 
 fn example_by_tool<'a>(
@@ -102,10 +108,12 @@ fn compiler_labels_fixture_proposals_with_present_at_session_end_outcomes() {
     assert_eq!(accept.file_path.as_deref(), Some(TASTE_TARGET));
     assert_eq!(accept.outcome, PreferenceOutcome::Rejected);
     assert_eq!(accept.evidence_kind, EvidenceKind::DirectEdit);
-    assert!(accept
-        .context
-        .as_deref()
-        .is_some_and(|content| content.contains("taste fixture baseline")));
+    assert!(
+        accept
+            .context
+            .as_deref()
+            .is_some_and(|content| content.contains("taste fixture baseline"))
+    );
 
     let reject = example_by_tool(&examples, "toolu_taste_edit_reject");
     assert_eq!(reject.outcome, PreferenceOutcome::Rejected);

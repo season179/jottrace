@@ -12,6 +12,9 @@ use super::timeline::{FileTimelineRow, normalize_file_path};
 /// Version tag stored on compiled preference rows for idempotent re-extraction.
 pub const EXTRACTOR_VERSION: &str = "0.1.0";
 
+/// Minimum confidence for a proposal to count toward high-confidence coverage.
+pub const HIGH_CONFIDENCE_THRESHOLD: f64 = 1.0;
+
 /// Labeled outcome for a detected tool proposal.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PreferenceOutcome {
@@ -103,10 +106,7 @@ impl PreferenceCompiler {
                 None => continue,
             };
 
-            let proposal_content = event
-                .content_or_ref
-                .as_ref()
-                .and_then(content_ref_text);
+            let proposal_content = event.content_or_ref.as_ref().and_then(content_ref_text);
 
             let file_path = event
                 .file_path
@@ -213,10 +213,7 @@ pub fn replace_session_preference_examples(
 }
 
 fn is_file_modifying_tool(tool_name: &str) -> bool {
-    matches!(
-        tool_name,
-        "Edit" | "Write" | "NotebookEdit" | "Bash"
-    )
+    matches!(tool_name, "Edit" | "Write" | "NotebookEdit" | "Bash")
 }
 
 fn content_ref_text(content_ref: &ContentRef) -> Option<String> {
@@ -261,13 +258,7 @@ fn index_timelines(rows: &[FileTimelineRow]) -> HashMap<String, FileTimelineInde
                         .map(|trigger| (trigger.clone(), index))
                 })
                 .collect();
-            (
-                file_path,
-                FileTimelineIndex {
-                    rows,
-                    by_trigger,
-                },
-            )
+            (file_path, FileTimelineIndex { rows, by_trigger })
         })
         .collect()
 }
@@ -322,18 +313,10 @@ fn classify_present_at_session_end(
 
     let before = before_state_content(file_path, proposal_seq, timelines);
     let post_apply = post_apply_content(tool_name, tool_use_id, proposal_seq, index, events);
-    let final_content = index
-        .rows
-        .iter()
-        .rev()
-        .find_map(|row| row.content.as_ref());
+    let final_content = index.rows.iter().rev().find_map(|row| row.content.as_ref());
 
     match (post_apply.as_deref(), final_content) {
-        (None, _) => (
-            PreferenceOutcome::Rejected,
-            base_confidence,
-            evidence_kind,
-        ),
+        (None, _) => (PreferenceOutcome::Rejected, base_confidence, evidence_kind),
         (Some(post), Some(final_content)) => {
             let before_text = before.as_deref().unwrap_or("");
             if effect_present(before_text, post, final_content) {
@@ -345,11 +328,7 @@ fn classify_present_at_session_end(
                     evidence_kind,
                 )
             } else {
-                (
-                    PreferenceOutcome::Rejected,
-                    base_confidence,
-                    evidence_kind,
-                )
+                (PreferenceOutcome::Rejected, base_confidence, evidence_kind)
             }
         }
         (Some(_), None) => (
@@ -379,8 +358,7 @@ fn base_confidence_for_tool(tool_name: &str) -> f64 {
 
 fn tool_executed(events: &[ParsedEvent], tool_use_id: &str) -> bool {
     events.iter().any(|event| {
-        event.kind == ParseKind::ToolResult
-            && event.tool_ref.as_deref() == Some(tool_use_id)
+        event.kind == ParseKind::ToolResult && event.tool_ref.as_deref() == Some(tool_use_id)
     })
 }
 
@@ -411,12 +389,15 @@ fn effect_present(before: &str, after: &str, final_content: &str) -> bool {
     let added = line_delta(before, after);
     let removed = line_delta(after, before);
 
-    added
-        .iter()
-        .all(|line| final_content.lines().any(|final_line| final_line == line.as_str()))
-        && removed
-            .iter()
-            .all(|line| !final_content.lines().any(|final_line| final_line == line.as_str()))
+    added.iter().all(|line| {
+        final_content
+            .lines()
+            .any(|final_line| final_line == line.as_str())
+    }) && removed.iter().all(|line| {
+        !final_content
+            .lines()
+            .any(|final_line| final_line == line.as_str())
+    })
 }
 
 fn partial_effect_present(before: &str, after: &str, final_content: &str) -> bool {
@@ -426,7 +407,11 @@ fn partial_effect_present(before: &str, after: &str, final_content: &str) -> boo
     }
     let preserved = added
         .iter()
-        .filter(|line| final_content.lines().any(|final_line| final_line == line.as_str()))
+        .filter(|line| {
+            final_content
+                .lines()
+                .any(|final_line| final_line == line.as_str())
+        })
         .count();
     preserved > 0 && preserved < added.len()
 }

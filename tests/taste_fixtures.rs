@@ -36,7 +36,10 @@ fn taste_fixture_corpus_has_snapshot_sidecar_blobs() {
         let sidecar = taste_fixture(&format!(
             "claude-cli/file-history/{TASTE_SESSION_ID}/fixture-a1b2c3d4@{version}"
         ));
-        assert!(sidecar.exists(), "missing sidecar fixture-a1b2c3d4@{version}");
+        assert!(
+            sidecar.exists(),
+            "missing sidecar fixture-a1b2c3d4@{version}"
+        );
         let body = fs::read_to_string(sidecar).expect("read sidecar");
         assert!(
             body.contains("taste fixture baseline"),

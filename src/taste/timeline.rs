@@ -230,14 +230,9 @@ mod tests {
             ),
         ];
 
-        let rows = FileTimelineMaterializer::materialize(
-            "claude_cli",
-            "sess",
-            None,
-            &resolver,
-            &events,
-        )
-            .expect("materialize");
+        let rows =
+            FileTimelineMaterializer::materialize("claude_cli", "sess", None, &resolver, &events)
+                .expect("materialize");
 
         assert_eq!(rows.len(), 2);
         assert_eq!(rows[0].seq, 0);

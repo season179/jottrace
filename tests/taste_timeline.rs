@@ -1,10 +1,10 @@
 mod common;
 
 use common::taste_fixture;
-use jottrace::storage::{open_database, LATEST_SCHEMA_VERSION};
+use jottrace::storage::{LATEST_SCHEMA_VERSION, open_database};
 use jottrace::taste::{
-    FileTimelineMaterializer, SourceStream, TimelineSourceKind, merge_streams, parse_jsonl,
-    replace_session_file_timelines, SnapshotSidecarResolver,
+    FileTimelineMaterializer, SnapshotSidecarResolver, SourceStream, TimelineSourceKind,
+    merge_streams, parse_jsonl, replace_session_file_timelines,
 };
 use rusqlite::params;
 use std::fs;
@@ -63,7 +63,7 @@ fn timeline_materializer_builds_per_file_snapshot_sequence_from_fixture() {
         &fixture_resolver(),
         &merged_fixture_events(),
     )
-        .expect("materialize");
+    .expect("materialize");
 
     let target_rows: Vec<_> = rows
         .iter()
@@ -72,22 +72,32 @@ fn timeline_materializer_builds_per_file_snapshot_sequence_from_fixture() {
     assert_eq!(target_rows.len(), 4, "expected four taste_target snapshots");
 
     assert_eq!(target_rows[0].seq, 0);
-    assert_eq!(target_rows[0].source_kind, TimelineSourceKind::InlineSnapshot);
-    assert!(target_rows[0]
-        .content
-        .as_deref()
-        .is_some_and(|content| content.contains("taste fixture baseline")));
+    assert_eq!(
+        target_rows[0].source_kind,
+        TimelineSourceKind::InlineSnapshot
+    );
+    assert!(
+        target_rows[0]
+            .content
+            .as_deref()
+            .is_some_and(|content| content.contains("taste fixture baseline"))
+    );
     assert_eq!(target_rows[0].trigger_event_ref, None);
 
-    assert_eq!(target_rows[1].source_kind, TimelineSourceKind::SidecarSnapshot);
+    assert_eq!(
+        target_rows[1].source_kind,
+        TimelineSourceKind::SidecarSnapshot
+    );
     assert_eq!(
         target_rows[1].trigger_event_ref.as_deref(),
         Some("toolu_taste_edit_accept")
     );
-    assert!(target_rows[1]
-        .content
-        .as_deref()
-        .is_some_and(|content| content.contains("accepted_fn")));
+    assert!(
+        target_rows[1]
+            .content
+            .as_deref()
+            .is_some_and(|content| content.contains("accepted_fn"))
+    );
 
     assert_eq!(
         target_rows[2].trigger_event_ref.as_deref(),
@@ -99,10 +109,12 @@ fn timeline_materializer_builds_per_file_snapshot_sequence_from_fixture() {
         target_rows[3].trigger_event_ref.as_deref(),
         Some("toolu_taste_edit_revert")
     );
-    assert!(target_rows[3]
-        .content
-        .as_deref()
-        .is_some_and(|content| !content.contains("accepted_fn")));
+    assert!(
+        target_rows[3]
+            .content
+            .as_deref()
+            .is_some_and(|content| !content.contains("accepted_fn"))
+    );
 }
 
 #[test]
@@ -157,7 +169,7 @@ fn replace_session_file_timelines_persists_rows_in_database() {
         &fixture_resolver(),
         &merged_fixture_events(),
     )
-        .expect("materialize");
+    .expect("materialize");
 
     let inserted =
         replace_session_file_timelines(&db_path, &conn, "claude_cli", TASTE_SESSION_ID, &rows)

@@ -23,7 +23,10 @@ pub mod web;
 pub use compact::{CompactMode, CompactOptions, CompactReport, run_compact};
 pub use ingest::{IngestReport, run_ingest};
 pub use storage::{IngestErrorSummary, StatusReport, run_status};
-pub use taste::{TasteExtractOptions, TasteExtractReport, run_taste_extract};
+pub use taste::{
+    TasteExtractOptions, TasteExtractReport, TasteOutcomeCounts, TasteStatusReport,
+    run_taste_extract, run_taste_status, taste_status_for_data_dir,
+};
 pub use transfer::{PackOptions, PackReport, SettleOptions, SettleReport, run_pack, run_settle};
 pub use update::{UpdateReport, run_update};
 

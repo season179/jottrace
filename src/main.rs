@@ -389,11 +389,58 @@ fn run_taste_command(mut args: impl Iterator<Item = String>) -> ExitCode {
             ExitCode::SUCCESS
         }
         Some("extract") => run_taste_extract_command(args),
+        Some("status") => run_taste_status_command(args),
         Some(subcommand) => {
             eprintln!("unknown taste subcommand: {subcommand}");
             eprintln!("run `jottrace taste --help` for usage");
             ExitCode::from(2)
         }
+    }
+}
+
+fn run_taste_status_command(args: impl Iterator<Item = String>) -> ExitCode {
+    let options = match parse_detail_command("taste status", args) {
+        Ok(DetailCommand::Help) => {
+            print_taste_status_help();
+            return ExitCode::SUCCESS;
+        }
+        Ok(DetailCommand::Run(options)) => options,
+        Err(message) => {
+            eprint_command_usage("taste status", &message);
+            return ExitCode::from(2);
+        }
+    };
+    jottrace::update::maybe_spawn_auto_update();
+
+    match jottrace::run_taste_status() {
+        Ok(report) => {
+            print_taste_status_report(&report, options.details);
+            ExitCode::SUCCESS
+        }
+        Err(error) => {
+            eprint_command_failure("taste status", error);
+            ExitCode::FAILURE
+        }
+    }
+}
+
+fn print_taste_status_report(report: &jottrace::TasteStatusReport, details: bool) {
+    println!("jottrace taste status");
+    if details {
+        println!("db: {}", report.db_path.display());
+        println!("extractor_version: {}", report.extractor_version);
+    }
+    println!("claude_parent_sessions: {}", report.claude_parent_sessions);
+    println!("sessions_processed: {}", report.sessions_processed);
+    println!("sessions_pending: {}", report.sessions_pending);
+    println!("proposals: {}", report.proposals);
+    println!("outcomes:");
+    println!("  accepted: {}", report.outcomes.accepted);
+    println!("  rejected: {}", report.outcomes.rejected);
+    println!("  edited: {}", report.outcomes.edited);
+    println!("high_confidence_coverage: {:.1}%", report.coverage_percent);
+    if !details {
+        println!("extractor_version: {}", report.extractor_version);
     }
 }
 
@@ -454,7 +501,10 @@ fn print_taste_extract_report(report: &jottrace::TasteExtractReport) {
     println!("sessions_processed: {}", report.sessions_processed);
     println!("sessions_skipped: {}", report.sessions_skipped);
     println!("timeline_rows: {}", report.timeline_rows_written);
-    println!("preference_examples: {}", report.preference_examples_written);
+    println!(
+        "preference_examples: {}",
+        report.preference_examples_written
+    );
 }
 
 fn run_auto_update_background_command(mut args: impl Iterator<Item = String>) -> ExitCode {
@@ -935,6 +985,7 @@ fn print_help() {
     println!("  jottrace settle <archive> [--force]");
     println!("  jottrace status [--details]");
     println!("  jottrace taste extract [--session <source_session_id>] [--force]");
+    println!("  jottrace taste status [--details]");
     println!("  jottrace update");
     println!("  jottrace upgrade");
     println!("  jottrace web [--port <port>] [--once]");
@@ -1040,8 +1091,21 @@ fn print_taste_help() {
     println!();
     println!("Usage:");
     println!("  jottrace taste extract [--session <source_session_id>] [--force]");
+    println!("  jottrace taste status [--details]");
     println!();
     println!("Run `jottrace taste extract --help` for extraction options.");
+    println!("Run `jottrace taste status --help` for status options.");
+}
+
+fn print_taste_status_help() {
+    println!("jottrace taste status");
+    println!("Report taste extraction counts and high-confidence coverage.");
+    println!();
+    println!("Usage:");
+    println!("  jottrace taste status [--details]");
+    println!();
+    println!("Options:");
+    println!("  --details  Include the database path and extractor version header");
 }
 
 fn print_taste_extract_help() {
@@ -1050,10 +1114,13 @@ fn print_taste_extract_help() {
     println!();
     println!("Usage:");
     println!("  jottrace taste extract [--session <source_session_id>] [--force]");
+    println!("  jottrace taste status [--details]");
     println!();
     println!("Options:");
     println!("  --session <id>  Extract only the given Claude parent source_session_id");
-    println!("  --force         Re-extract even when rows already use the current extractor version");
+    println!(
+        "  --force         Re-extract even when rows already use the current extractor version"
+    );
 }
 
 fn print_update_help() {
