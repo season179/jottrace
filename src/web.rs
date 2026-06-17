@@ -20,6 +20,8 @@ const MIN_PAYLOAD_SEARCH_CHARS: usize = 3;
 const PAYLOAD_PREVIEW_BYTES: usize = 4096;
 const PAYLOAD_PREVIEW_CHARS: usize = 280;
 const READ_LIMIT_BYTES: usize = 8192;
+const TEXT_PLAIN: &str = "text/plain; charset=utf-8";
+const TEXT_HTML: &str = "text/html; charset=utf-8";
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct JournalQuery {
@@ -161,19 +163,14 @@ impl WebServer {
             .map_err(|source| self.io_error(source))?;
         let request = self.read_request(stream)?;
         let Some((method, target)) = request_line(&request) else {
-            return self.write_response(
-                stream,
-                "400 Bad Request",
-                "text/plain; charset=utf-8",
-                "bad request",
-            );
+            return self.write_response(stream, "400 Bad Request", TEXT_PLAIN, "bad request");
         };
 
         if method != "GET" {
             return self.write_response(
                 stream,
                 "405 Method Not Allowed",
-                "text/plain; charset=utf-8",
+                TEXT_PLAIN,
                 "method not allowed",
             );
         }
@@ -185,26 +182,14 @@ impl WebServer {
                     Ok(view) => render_home_page(&view, &query),
                     Err(error) => render_error_page(&self.db_path, &error),
                 };
-                ("200 OK", "text/html; charset=utf-8", body)
+                ("200 OK", TEXT_HTML, body)
             }
             "/payload" => match event_payload_text_for_path(&self.db_path, target) {
-                Ok(Some(payload)) => ("200 OK", "text/plain; charset=utf-8", payload),
-                Ok(None) => (
-                    "404 Not Found",
-                    "text/plain; charset=utf-8",
-                    "payload not found".to_string(),
-                ),
-                Err(error) => (
-                    "500 Internal Server Error",
-                    "text/plain; charset=utf-8",
-                    error.to_string(),
-                ),
+                Ok(Some(payload)) => ("200 OK", TEXT_PLAIN, payload),
+                Ok(None) => ("404 Not Found", TEXT_PLAIN, "payload not found".to_string()),
+                Err(error) => ("500 Internal Server Error", TEXT_PLAIN, error.to_string()),
             },
-            _ => (
-                "404 Not Found",
-                "text/plain; charset=utf-8",
-                "not found".to_string(),
-            ),
+            _ => ("404 Not Found", TEXT_PLAIN, "not found".to_string()),
         };
         self.write_response(stream, status, content_type, &body)
     }
