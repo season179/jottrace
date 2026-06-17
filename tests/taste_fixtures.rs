@@ -331,10 +331,28 @@ fn taste_extraction_documentation_complete() {
         "preference_examples",
         "taste_extractions",
         "notes/taste-extraction-plan.md",
+        "show timeline",
+        "show example",
+        "export --format jsonl",
+        "--force",
+        "R3 exception",
     ] {
         assert!(
             design.contains(required),
             "docs/design.md should document taste extraction via {required}"
+        );
+    }
+
+    let inventory =
+        fs::read_to_string("docs/reader-source-inventory.md").expect("read reader inventory");
+    for required in [
+        "tasks/*.output",
+        "excluded from taste-extraction scope",
+        "notes/taste-extraction-plan.md",
+    ] {
+        assert!(
+            inventory.contains(required),
+            "docs/reader-source-inventory.md should document taste R3 exclusion via {required}"
         );
     }
 
@@ -357,7 +375,10 @@ fn taste_extraction_documentation_complete() {
         "## Taste Extraction",
         "jottrace taste extract",
         "jottrace taste status",
+        "jottrace taste show timeline",
+        "jottrace taste show example",
         "jottrace taste export",
+        "--force",
     ] {
         assert!(
             readme.contains(required),
