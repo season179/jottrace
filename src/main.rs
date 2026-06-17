@@ -153,21 +153,13 @@ fn parse_events_command(
             "--help" | "-h" => return Ok(ParsedCommand::Help),
             "--all" => all = true,
             "--source" => {
-                source = Some(
-                    args.next()
-                        .ok_or_else(|| "--source requires a value".to_string())?,
-                );
+                source = Some(next_flag_value(&mut args, "--source")?);
             }
             "--session" => {
-                source_session_id = Some(
-                    args.next()
-                        .ok_or_else(|| "--session requires a value".to_string())?,
-                );
+                source_session_id = Some(next_flag_value(&mut args, "--session")?);
             }
             "--limit" => {
-                let value = args
-                    .next()
-                    .ok_or_else(|| "--limit requires a value".to_string())?;
+                let value = next_flag_value(&mut args, "--limit")?;
                 let parsed = value
                     .parse::<i64>()
                     .map_err(|_| format!("invalid limit: {value}"))?;
@@ -248,9 +240,7 @@ fn parse_web_command(
             "--help" | "-h" => return Ok(ParsedCommand::Help),
             "--once" => options.once = true,
             "--port" => {
-                let value = args
-                    .next()
-                    .ok_or_else(|| "--port requires a value".to_string())?;
+                let value = next_flag_value(&mut args, "--port")?;
                 options.port = value
                     .parse()
                     .map_err(|_| format!("invalid port: {value}"))?;
@@ -388,6 +378,16 @@ fn run_taste_show_timeline_command(args: impl Iterator<Item = String>) -> ExitCo
     )
 }
 
+/// Consume the value following a flag, erroring `"{flag} requires a value"`
+/// when the flag is the final argument.
+fn next_flag_value(
+    args: &mut impl Iterator<Item = String>,
+    flag: &str,
+) -> std::result::Result<String, String> {
+    args.next()
+        .ok_or_else(|| format!("{flag} requires a value"))
+}
+
 /// Consume the value following a single-value flag, rejecting a repeated flag.
 ///
 /// The value is always consumed first, so a missing value is reported before a
@@ -398,9 +398,7 @@ fn take_single_flag_value(
     command: &str,
     already_set: bool,
 ) -> std::result::Result<String, String> {
-    let value = args
-        .next()
-        .ok_or_else(|| format!("{flag} requires a value"))?;
+    let value = next_flag_value(args, flag)?;
     if already_set {
         return Err(format!("{command} accepts only one {flag} value"));
     }
@@ -1005,9 +1003,7 @@ fn parse_compact_command(
                 if options.mode == jottrace::CompactMode::Vacuum {
                     return Err("compact --vacuum does not accept --batch-size".to_string());
                 }
-                let value = args
-                    .next()
-                    .ok_or_else(|| "--batch-size requires a value".to_string())?;
+                let value = next_flag_value(&mut args, "--batch-size")?;
                 let parsed = value
                     .parse::<usize>()
                     .map_err(|_| format!("invalid batch size: {value}"))?;
