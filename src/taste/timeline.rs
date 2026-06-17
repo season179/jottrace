@@ -111,7 +111,7 @@ impl FileTimelineMaterializer {
     }
 }
 
-fn normalize_file_path(path: &str, cwd: Option<&str>) -> String {
+pub(crate) fn normalize_file_path(path: &str, cwd: Option<&str>) -> String {
     let path = path.replace('\\', "/");
     if let Some(cwd) = cwd {
         let cwd = cwd.trim_end_matches('/');

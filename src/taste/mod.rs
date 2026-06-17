@@ -1,7 +1,11 @@
+pub mod compiler;
 pub mod parse;
 pub mod sidecar;
 pub mod timeline;
 
+pub use compiler::{
+    EvidenceKind, PreferenceCompiler, PreferenceExample, PreferenceOutcome, EXTRACTOR_VERSION,
+};
 pub use parse::{
     ClaudeSessionParser, ContentRef, ParseKind, ParsedEvent, SessionEventParser, SourceStream,
     merge_streams, parse_jsonl, renumber_seq,
