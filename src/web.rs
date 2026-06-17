@@ -1,4 +1,4 @@
-use rusqlite::{Connection, OpenFlags, OptionalExtension, Row, params};
+use rusqlite::{Connection, OpenFlags, Row, params};
 use std::fmt::Write as _;
 use std::io::{self, Read, Write as IoWrite};
 use std::net::{Ipv4Addr, SocketAddr, TcpListener, TcpStream};
@@ -7,7 +7,7 @@ use std::time::Duration;
 
 use crate::storage::{
     IngestErrorSummary, LATEST_SCHEMA_VERSION, RAW_CODEC, ZSTD_CODEC, decode_event_payload,
-    decode_event_payload_prefix, query_collect, sqlite_error,
+    decode_event_payload_prefix, query_collect, query_optional, sqlite_error,
     unresolved_ingest_errors_from_connection,
 };
 use crate::{JottraceError, Result, io_error};
@@ -510,19 +510,18 @@ fn load_event_payload_text(
     session_id: i64,
     key: EventKey,
 ) -> Result<Option<String>> {
-    let row = conn
-        .query_row(
-            "SELECT payload, codec
+    let row = query_optional(
+        path,
+        conn,
+        "SELECT payload, codec
              FROM events
              WHERE session_id = ?1
                AND generation = ?2
                AND seq = ?3
              LIMIT 1",
-            params![session_id, key.generation, key.seq],
-            |row| Ok((row.get::<_, Vec<u8>>(0)?, row.get::<_, String>(1)?)),
-        )
-        .optional()
-        .map_err(|source| sqlite_error(path, source))?;
+        params![session_id, key.generation, key.seq],
+        |row| Ok((row.get::<_, Vec<u8>>(0)?, row.get::<_, String>(1)?)),
+    )?;
 
     row.map(|(payload, codec)| {
         decode_event_payload(&payload, &codec)
@@ -558,7 +557,9 @@ fn load_session_by_source_session_id(
     source: Option<&str>,
     source_session_id: &str,
 ) -> Result<Option<LoadedSession>> {
-    conn.query_row(
+    query_optional(
+        path,
+        conn,
         "SELECT sessions.id, sessions.source, sessions.source_session_id,
                 sessions.file_path, sessions.cwd, parent.source_session_id,
                 sessions.started_at, sessions.ended_at, sessions.event_count
@@ -571,8 +572,6 @@ fn load_session_by_source_session_id(
         params![source, source_session_id],
         loaded_session_from_row,
     )
-    .optional()
-    .map_err(|source| sqlite_error(path, source))
 }
 
 fn session_matches(
@@ -611,9 +610,10 @@ fn load_event_payload(
     session_id: i64,
     key: EventKey,
 ) -> Result<Option<JournalEvent>> {
-    let row = conn
-        .query_row(
-            "SELECT generation, seq, ts, codec, payload_size,
+    let row = query_optional(
+        path,
+        conn,
+        "SELECT generation, seq, ts, codec, payload_size,
                 CASE
                     WHEN codec = ?4 THEN substr(payload, 1, ?5)
                     ELSE payload
@@ -623,27 +623,25 @@ fn load_event_payload(
            AND generation = ?2
            AND seq = ?3
          LIMIT 1",
-            params![
-                session_id,
-                key.generation,
-                key.seq,
-                RAW_CODEC,
-                PAYLOAD_PREVIEW_BYTES as i64,
-            ],
-            |row| {
-                let payload_size: i64 = row.get("payload_size")?;
-                Ok((
-                    row.get("generation")?,
-                    row.get("seq")?,
-                    row.get("ts")?,
-                    row.get("codec")?,
-                    payload_size as u64,
-                    row.get("payload_preview")?,
-                ))
-            },
-        )
-        .optional()
-        .map_err(|source| sqlite_error(path, source))?;
+        params![
+            session_id,
+            key.generation,
+            key.seq,
+            RAW_CODEC,
+            PAYLOAD_PREVIEW_BYTES as i64,
+        ],
+        |row| {
+            let payload_size: i64 = row.get("payload_size")?;
+            Ok((
+                row.get("generation")?,
+                row.get("seq")?,
+                row.get("ts")?,
+                row.get("codec")?,
+                payload_size as u64,
+                row.get("payload_preview")?,
+            ))
+        },
+    )?;
 
     row.map(
         |(generation, seq, ts, codec, payload_size, payload_preview)| {

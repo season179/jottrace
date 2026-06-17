@@ -298,7 +298,9 @@ fn event_session_id(
     source: &str,
     source_session_id: &str,
 ) -> Result<Option<i64>> {
-    conn.query_row(
+    query_optional(
+        path,
+        conn,
         "SELECT id
          FROM sessions
          WHERE source = ?1
@@ -306,8 +308,6 @@ fn event_session_id(
         params![source, source_session_id],
         |row| row.get(0),
     )
-    .optional()
-    .map_err(|source| sqlite_error(path, source))
 }
 
 fn for_each_decoded_event_payload_from_connection(
@@ -378,9 +378,10 @@ fn reject_unsupported_event_codecs(
         Some((generation, seq)) => (Some(generation), Some(seq)),
         None => (None, None),
     };
-    let codec: Option<String> = conn
-        .query_row(
-            "SELECT events.codec
+    let codec: Option<String> = query_optional(
+        path,
+        conn,
+        "SELECT events.codec
              FROM events
              WHERE events.session_id = ?1
                AND events.codec NOT IN (?2, ?3)
@@ -391,17 +392,15 @@ fn reject_unsupported_event_codecs(
                )
              ORDER BY events.generation, events.seq
              LIMIT 1",
-            params![
-                session_id,
-                RAW_CODEC,
-                ZSTD_CODEC,
-                bound_generation,
-                bound_seq
-            ],
-            |row| row.get(0),
-        )
-        .optional()
-        .map_err(|source| sqlite_error(path, source))?;
+        params![
+            session_id,
+            RAW_CODEC,
+            ZSTD_CODEC,
+            bound_generation,
+            bound_seq
+        ],
+        |row| row.get(0),
+    )?;
 
     match codec {
         Some(codec) => Err(unsupported_event_payload_codec(&codec)),
@@ -420,7 +419,9 @@ fn selected_event_upper_bound(
     };
 
     let offset = limit - 1;
-    conn.query_row(
+    query_optional(
+        path,
+        conn,
         "SELECT generation, seq
          FROM events
          WHERE session_id = ?1
@@ -429,8 +430,6 @@ fn selected_event_upper_bound(
         params![session_id, offset],
         |row| Ok((row.get(0)?, row.get(1)?)),
     )
-    .optional()
-    .map_err(|source| sqlite_error(path, source))
 }
 
 fn unsupported_event_payload_codec(codec: &str) -> JottraceError {
@@ -511,6 +510,24 @@ where
         .query_map(params, mapper)
         .map_err(|source| sqlite_error(path, source))?
         .collect::<std::result::Result<Vec<_>, _>>()
+        .map_err(|source| sqlite_error(path, source))
+}
+
+/// Run `sql` with `params`, returning the single mapped row if present (`Ok(None)` when
+/// no row matches), routing query failures through [`sqlite_error`] for `path`.
+pub(crate) fn query_optional<T, P, F>(
+    path: &Path,
+    conn: &Connection,
+    sql: &str,
+    params: P,
+    mapper: F,
+) -> Result<Option<T>>
+where
+    P: rusqlite::Params,
+    F: FnOnce(&Row<'_>) -> rusqlite::Result<T>,
+{
+    conn.query_row(sql, params, mapper)
+        .optional()
         .map_err(|source| sqlite_error(path, source))
 }
 

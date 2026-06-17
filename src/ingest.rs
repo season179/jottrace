@@ -9,7 +9,8 @@ use std::path::{Path, PathBuf};
 use std::time::UNIX_EPOCH;
 
 use crate::storage::{
-    DB_FILE_NAME, encode_event_payload, open_database, sqlite_error, status_from_connection,
+    DB_FILE_NAME, encode_event_payload, open_database, query_optional, sqlite_error,
+    status_from_connection,
 };
 use crate::{JottraceError, Result, io_error};
 
@@ -1940,7 +1941,9 @@ fn load_session_by_source_session_id(
     source: &str,
     source_session_id: &str,
 ) -> Result<Option<StoredSession>> {
-    conn.query_row(
+    query_optional(
+        error_path,
+        conn,
         "SELECT id, source_session_id, file_path, parent_session_id, current_generation, file_size, file_mtime,
                 content_fingerprint, source_metadata, next_read_offset, event_count, prefix_fingerprint
          FROM sessions
@@ -1963,15 +1966,15 @@ fn load_session_by_source_session_id(
             })
         },
     )
-    .optional()
-    .map_err(|source| sqlite_error(error_path, source))
 }
 
 fn load_session_by_source_file_path(
     conn: &Connection,
     source_file: &SourceFile,
 ) -> Result<Option<StoredSession>> {
-    conn.query_row(
+    query_optional(
+        &source_file.path,
+        conn,
         "SELECT id, source_session_id, file_path, parent_session_id, current_generation, file_size, file_mtime,
                 content_fingerprint, source_metadata, next_read_offset, event_count, prefix_fingerprint
          FROM sessions
@@ -1997,8 +2000,6 @@ fn load_session_by_source_file_path(
             })
         },
     )
-    .optional()
-    .map_err(|source| sqlite_error(&source_file.path, source))
 }
 
 fn stored_session_path_matches(stored: &StoredSession, source_file: &SourceFile) -> bool {

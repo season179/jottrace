@@ -1,8 +1,10 @@
-use rusqlite::{Connection, OptionalExtension, Transaction, params};
+use rusqlite::{Connection, Transaction, params};
 use std::path::{Path, PathBuf};
 
 use crate::JottraceError;
-use crate::storage::{for_each_decoded_event_payload_for_session, query_collect, sqlite_error};
+use crate::storage::{
+    for_each_decoded_event_payload_for_session, query_collect, query_optional, sqlite_error,
+};
 use crate::{Result, data_dir_from_env, open_locked_database};
 
 use super::compiler::{EXTRACTOR_VERSION, PreferenceCompiler, replace_session_preference_examples};
@@ -222,16 +224,15 @@ fn session_needs_extract(
     source_session_id: &str,
 ) -> Result<bool> {
     let current_event_count = count_merged_session_events(db_path, conn, parent_db_id)?;
-    let stored = conn
-        .query_row(
-            "SELECT extractor_version, event_count
+    let stored = query_optional(
+        db_path,
+        conn,
+        "SELECT extractor_version, event_count
              FROM taste_extractions
              WHERE source = ?1 AND source_session_id = ?2",
-            params![CLAUDE_SOURCE, source_session_id],
-            |row| Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?)),
-        )
-        .optional()
-        .map_err(|source| sqlite_error(db_path, source))?;
+        params![CLAUDE_SOURCE, source_session_id],
+        |row| Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?)),
+    )?;
 
     if let Some((version, event_count)) = stored {
         return Ok(version != EXTRACTOR_VERSION
