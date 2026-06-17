@@ -3,6 +3,32 @@ use std::process::Command;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 #[test]
+fn cargo_version_matches_changelog_head() {
+    let manifest = fs::read_to_string("Cargo.toml").expect("read Cargo.toml");
+    let cargo_version = manifest
+        .lines()
+        .find_map(|line| {
+            line.strip_prefix("version = \"")
+                .and_then(|rest| rest.strip_suffix('"'))
+        })
+        .expect("Cargo.toml package version");
+
+    let changelog = fs::read_to_string("CHANGELOG.md").expect("read CHANGELOG.md");
+    let changelog_version = changelog
+        .lines()
+        .find_map(|line| {
+            line.strip_prefix("## v")
+                .and_then(|rest| rest.split_whitespace().next())
+        })
+        .expect("CHANGELOG head version");
+
+    assert_eq!(
+        cargo_version, changelog_version,
+        "Cargo.toml version must match the top CHANGELOG entry"
+    );
+}
+
+#[test]
 fn version_policy_accepts_yy_month_patch_and_matching_tag() {
     let root = temp_root("version-valid");
     let manifest = root.join("Cargo.toml");

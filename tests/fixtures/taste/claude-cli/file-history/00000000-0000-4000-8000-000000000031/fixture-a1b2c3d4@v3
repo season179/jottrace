@@ -1,0 +1,3 @@
+// taste fixture baseline
+pub fn baseline() -> &'static str { "v0" }
+# appended by bash fixture

@@ -952,13 +952,8 @@ fn render_session_pagination(html: &mut String, view: &JournalView, query: &Jour
             )
         }),
         "Previous sessions",
-        page.has_next.then(|| state_href(
-            selected_session,
-            query,
-            page.offset + page.limit,
-            0,
-            None,
-        )),
+        page.has_next
+            .then(|| state_href(selected_session, query, page.offset + page.limit, 0, None)),
         "Next sessions",
     );
 }

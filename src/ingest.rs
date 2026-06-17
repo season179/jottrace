@@ -1286,7 +1286,11 @@ fn resolve_source_file(
         &source_session_id,
     )?;
 
-    Ok(resolved_known_source_file(source_file, source_session_id, buffer))
+    Ok(resolved_known_source_file(
+        source_file,
+        source_session_id,
+        buffer,
+    ))
 }
 
 fn resolved_known_source_file(
@@ -1894,7 +1898,10 @@ fn record_source_file_ingest_error(
         load_session_by_source_file_path(&tx, source_file)?
     };
     let (error_source_file, stored) = if let Some(stored) = stored_by_path {
-        (known_source_file(source_file, stored.source_session_id.clone()), stored)
+        (
+            known_source_file(source_file, stored.source_session_id.clone()),
+            stored,
+        )
     } else {
         let error_source_file = source_file_for_ingest_error(source_file);
         insert_session_if_missing(&tx, &error_source_file)?;
@@ -2110,10 +2117,8 @@ fn import_mode(
         }
         Some(file_size)
             if source_file.source_format == SourceFormat::Jsonl
-                && (
-                    (retry_unresolved_invalid_json && pass_size >= stored.next_read_offset)
-                    || pass_size > file_size
-                ) =>
+                && ((retry_unresolved_invalid_json && pass_size >= stored.next_read_offset)
+                    || pass_size > file_size) =>
         {
             ImportMode::Append
         }

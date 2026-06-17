@@ -59,7 +59,17 @@ reasoning exists in the system, it would have to live inside `RM_NS` (e.g.,
 rule/lint-like predicates contributing to reward) or in data construction —
 neither is specified by the formula or the docs.
 
+## Jottrace implementation
+
+Jottrace produces the `D_RL` training rows this formula samples from: labeled
+`(context, proposal, outcome)` triples derived deterministically from preserved
+Claude sessions. The data-extraction layer is implemented as `jottrace taste`
+with migrations `010`–`013`, present-at-session-end outcome labeling, snapshot
+sidecar resolution, and JSONL export. Design detail and risk coverage:
+`notes/taste-extraction-plan.md` (status: IMPLEMENTED).
+
 ## Reference
 
 - Ouyang et al., *Training language models to follow instructions with human
   feedback* (InstructGPT), 2022 — https://arxiv.org/abs/2203.02155
+- Jottrace taste extraction: `notes/taste-extraction-plan.md`, `docs/design.md`

@@ -72,7 +72,7 @@ surprises later.
 - **Storage:** SQLite at `~/.jottrace/db.sqlite`. The DB is the contract
   between stages, not in-process function calls.
 - **MVP command surface:** `jottrace ingest`, `jottrace status`,
-  `jottrace doctor`, and `jottrace web`.
+  `jottrace doctor`, `jottrace web`, and `jottrace taste`.
 - Specific crate choices (rusqlite vs. sqlx, sync vs. async, CLI framework,
   config loader) are not yet decided — see Open seams.
 
@@ -91,6 +91,8 @@ The first executable surface is intentionally small:
   errors from the local SQLite journal.
 - `jottrace update` — downloads the matching GitHub Release artifact and
   replaces the installed binary without touching the local journal.
+- `jottrace taste` — extracts labeled coding-preference examples from
+  preserved Claude sessions. See Taste extraction below.
 
 Processor, writer, scheduler, and recall commands come later.
 
@@ -305,6 +307,73 @@ If a future caller needs SQL-level filtering on a specific event field
 (e.g. only `tool_use` events), we extract that field as its own
 metadata column at ingest. We don't try to query into the compressed
 payload.
+
+## Taste extraction
+
+Taste extraction is a **separate, materialized interpretation stage** that
+runs after ingest. It is not part of the reader (ingest stays byte-
+preserving) and it is not the LLM processor (taste is deterministic and
+pairwise, not narrative). The goal is to produce export-ready labeled
+`(context, proposal, outcome)` rows — the reward-model training signal —
+from preserved Claude sessions.
+
+**Source scope — Claude only.** Other sources do not store per-file content
+snapshots in their preserved transcripts, so accept/reject signals are not
+recoverable from them.
+
+Pipeline:
+
+```
+events (raw, already stored by the reader)
+  │
+  ├─ [Claude event parser]  ← shared module; future processor input
+  │                          builder will call the same parse layer
+  │
+  ▼
+file_timelines  (per-file content timeline, incl. merged subagents)
+  │
+  ├─ [preference compiler: joins timelines + tool proposals +
+  │    outcome detection + snapshot sidecar resolution]
+  │
+  ▼
+preference_examples  (export-ready labeled dataset rows)
+```
+
+Tables (migrations `010`–`013`):
+
+- **`file_timelines`** — one row per `(session_id, file_path, seq)`:
+  reconstructed file content at that point in the session, what triggered
+  the change, and whether content came from an inline snapshot, a
+  `backupFileName` sidecar, or a tool input. Inspectable via
+  `jottrace taste show timeline`.
+- **`preference_examples`** — one row per detected file-modifying proposal:
+  `context`, `proposal_content`, `outcome` (`accepted`/`rejected`/`edited`),
+  `confidence`, `evidence_kind`, and `extractor_version`.
+- **`taste_extractions`** — per-session extraction metadata
+  (`extractor_version`, merged event count) for idempotent re-runs.
+
+Snapshot sidecars live at `~/.claude/file-history/<session>/`. When blobs
+are missing, affected proposals are flagged low-confidence rather than
+silently emitted.
+
+CLI surface (`jottrace taste`):
+
+- `extract [--session <id>] [--force]` — materialize timelines and
+  preference rows. Skips sessions already extracted at the current
+  `extractor_version` unless raw event counts change or `--force` is set.
+- `status [--details]` — sessions processed/pending, proposals by outcome,
+  and high-confidence coverage.
+- `show timeline --session <id> --file <path>` — inspect a per-file
+  timeline.
+- `show example [--session <id>] <tool_use_id>` — inspect one labeled
+  example with full context.
+- `export --format jsonl [--out <path>]` — emit `(context, chosen,
+  rejected)` triples for external training.
+
+**R3 exception:** Claude async Task `tasks/*.output` transcripts are not
+ingested and are explicitly out of scope for taste-extraction completeness.
+
+Design detail and risk coverage: `notes/taste-extraction-plan.md`.
 
 ## Reader: Claude CLI
 

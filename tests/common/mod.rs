@@ -15,6 +15,12 @@ pub fn reader_fixture(relative: &str) -> PathBuf {
         .join(relative)
 }
 
+pub fn taste_fixture(relative: &str) -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/fixtures/taste")
+        .join(relative)
+}
+
 pub struct TempRoot {
     path: PathBuf,
 }

@@ -16,12 +16,21 @@ use std::os::unix::{
 pub mod compact;
 pub mod ingest;
 pub mod storage;
+pub mod taste;
 pub mod transfer;
 pub mod update;
 pub mod web;
 pub use compact::{CompactMode, CompactOptions, CompactReport, run_compact};
 pub use ingest::{IngestReport, run_ingest};
 pub use storage::{IngestErrorSummary, StatusReport, run_status};
+pub use taste::{
+    TasteEvidenceCounts, TasteExampleShowReport, TasteExportFormat, TasteExportOptions,
+    TasteExportReport, TasteExtractOptions, TasteExtractReport, TasteOutcomeCounts,
+    TasteShowExampleOptions, TasteShowTimelineOptions, TasteStatusReport, TasteTimelineShowReport,
+    run_taste_export, run_taste_extract, run_taste_show_example, run_taste_show_timeline,
+    run_taste_status, show_example_for_data_dir, show_timeline_for_data_dir,
+    taste_export_for_data_dir, taste_extract_for_data_dir, taste_status_for_data_dir,
+};
 pub use transfer::{PackOptions, PackReport, SettleOptions, SettleReport, run_pack, run_settle};
 pub use update::{UpdateReport, run_update};
 
@@ -58,6 +67,13 @@ pub enum JottraceError {
         path: PathBuf,
         message: String,
     },
+    /// A stored session transcript line could not be parsed as valid JSON. The
+    /// path is the database it was read from and `source` is the parse error.
+    InvalidSessionJson {
+        path: PathBuf,
+        source_session_id: String,
+        source: serde_json::Error,
+    },
     /// Existing loose permissions are surfaced instead of silently chmodded so
     /// the user can notice and decide whether the location is trustworthy.
     InsecureMode {
@@ -82,6 +98,20 @@ pub enum JottraceError {
     SessionNotFound {
         source: String,
         source_session_id: String,
+    },
+    /// `taste show timeline` found no materialized rows for the requested file.
+    TimelineNotFound {
+        source_session_id: String,
+        file_path: String,
+    },
+    /// `taste show example` found no preference row for the requested tool id.
+    ExampleNotFound {
+        tool_use_id: String,
+    },
+    /// `taste show example` matched multiple sessions for one tool id.
+    AmbiguousExample {
+        tool_use_id: String,
+        session_count: usize,
     },
     InvalidEventLimit {
         limit: i64,
@@ -163,6 +193,15 @@ impl fmt::Display for JottraceError {
             Self::InvalidSessionMeta { path, message } => {
                 write!(f, "{}: {}", path.display(), message)
             }
+            Self::InvalidSessionJson {
+                path,
+                source_session_id,
+                source,
+            } => write!(
+                f,
+                "{}: invalid JSON in claude_cli session {source_session_id}: {source}",
+                path.display(),
+            ),
             Self::InsecureMode {
                 path,
                 expected,
@@ -197,6 +236,24 @@ impl fmt::Display for JottraceError {
             } => write!(
                 f,
                 "session not found: source={source} source_session_id={source_session_id}"
+            ),
+            Self::TimelineNotFound {
+                source_session_id,
+                file_path,
+            } => write!(
+                f,
+                "timeline not found: session={source_session_id} file={file_path} (run `jottrace taste extract` first)"
+            ),
+            Self::ExampleNotFound { tool_use_id } => write!(
+                f,
+                "preference example not found: tool_use_id={tool_use_id} (run `jottrace taste extract` first)"
+            ),
+            Self::AmbiguousExample {
+                tool_use_id,
+                session_count,
+            } => write!(
+                f,
+                "preference example is ambiguous: tool_use_id={tool_use_id} matched {session_count} sessions; pass --session <source_session_id>"
             ),
             Self::InvalidEventLimit { limit } => {
                 write!(f, "event limit must be at least 1; got {limit}")
@@ -277,6 +334,7 @@ impl std::error::Error for JottraceError {
             Self::EventPayloadCodec { source, .. } => Some(source),
             Self::Output { source } => Some(source),
             Self::Sqlite { source, .. } => Some(source),
+            Self::InvalidSessionJson { source, .. } => Some(source),
             _ => None,
         }
     }
@@ -656,7 +714,7 @@ fn mode(path: &Path) -> Result<u32> {
         & 0o777)
 }
 
-fn private_open_options() -> OpenOptions {
+pub(crate) fn private_open_options() -> OpenOptions {
     let mut options = OpenOptions::new();
     #[cfg(unix)]
     // File permissions have to be attached before `open`; setting them only

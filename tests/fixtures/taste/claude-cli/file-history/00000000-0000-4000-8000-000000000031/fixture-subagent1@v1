@@ -1,0 +1,2 @@
+// subagent edit target
+pub fn subagent_marker() -> bool { true }

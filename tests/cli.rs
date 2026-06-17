@@ -86,6 +86,7 @@ fn top_level_help_aliases_print_the_same_usage() {
     let stdout = String::from_utf8_lossy(&long.stdout);
     assert!(stdout.contains("Usage:"));
     assert!(stdout.contains("jottrace doctor"));
+    assert!(stdout.contains("jottrace taste extract"));
     assert!(stdout.contains("jottrace web [--port <port>] [--once]"));
     assert!(stdout.contains("jottrace <command> --help"));
 }
@@ -129,6 +130,7 @@ fn subcommand_help_aliases_print_command_specific_usage() {
         ("status", "Print journal schema"),
         ("compact", "--batch-size <n>"),
         ("events", "--source <source>"),
+        ("taste", "Extract labeled coding preference examples"),
         ("web", "--port <port>"),
     ];
 
@@ -167,6 +169,118 @@ fn subcommand_help_aliases_print_command_specific_usage() {
             stdout.contains(expected_detail),
             "{command} help:\n{stdout}"
         );
+    }
+}
+
+#[test]
+fn taste_subcommand_help_aliases_print_command_specific_usage() {
+    let cases = [
+        ("taste extract", "Materialize file timelines"),
+        ("taste status", "high-confidence coverage"),
+        ("taste export", "JSONL for external trainer"),
+        (
+            "taste show",
+            "Inspect materialized taste extraction artifacts",
+        ),
+        ("taste show timeline", "--session <source_session_id>"),
+        ("taste show example", "preference example"),
+    ];
+
+    for (command_parts, expected_detail) in cases {
+        let mut args: Vec<&str> = command_parts.split_whitespace().collect();
+        args.push("--help");
+        let long = Command::new(binary())
+            .args(&args)
+            .output()
+            .unwrap_or_else(|error| panic!("run jottrace {command_parts} --help: {error}"));
+        let mut short_args = args.clone();
+        short_args.pop();
+        short_args.push("-h");
+        let short = Command::new(binary())
+            .args(&short_args)
+            .output()
+            .unwrap_or_else(|error| panic!("run jottrace {command_parts} -h: {error}"));
+
+        assert!(
+            long.status.success(),
+            "{command_parts} --help stdout:\n{}\nstderr:\n{}",
+            String::from_utf8_lossy(&long.stdout),
+            String::from_utf8_lossy(&long.stderr)
+        );
+        assert!(
+            short.status.success(),
+            "{command_parts} -h stdout:\n{}\nstderr:\n{}",
+            String::from_utf8_lossy(&short.stdout),
+            String::from_utf8_lossy(&short.stderr)
+        );
+        assert_eq!(
+            long.stdout, short.stdout,
+            "{command_parts} help aliases should match"
+        );
+        assert!(
+            long.stderr.is_empty(),
+            "{command_parts} help should not warn"
+        );
+
+        let stdout = String::from_utf8_lossy(&long.stdout);
+        assert!(stdout.contains(command_parts));
+        assert!(stdout.contains("Usage:"));
+        assert!(
+            stdout.contains(expected_detail),
+            "{command_parts} help:\n{stdout}"
+        );
+    }
+}
+
+#[test]
+fn taste_subcommand_unknown_options_exit_with_targeted_help_hint() {
+    for command in [
+        "taste extract",
+        "taste status",
+        "taste export",
+        "taste show timeline",
+        "taste show example",
+    ] {
+        let root = temp_root(&format!("{}-unknown-option", command.replace(' ', "-")));
+        let data_dir = root.join(".jottrace");
+        let mut args: Vec<&str> = command.split_whitespace().collect();
+        args.push("--definitely-not-an-option");
+        let output = Command::new(binary())
+            .args(&args)
+            .env("JOTTRACE_HOME", &data_dir)
+            .output()
+            .unwrap_or_else(|error| {
+                panic!("run jottrace {command} --definitely-not-an-option: {error}")
+            });
+
+        assert_eq!(
+            output.status.code(),
+            Some(2),
+            "{command} unknown option stdout:\n{}\nstderr:\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(
+            output.stdout.is_empty(),
+            "{command} should not print stdout"
+        );
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            stderr.contains(&format!(
+                "unknown {command} option: --definitely-not-an-option"
+            )),
+            "{command} stderr:\n{stderr}"
+        );
+        assert!(
+            stderr.contains(&format!("jottrace {command} --help")),
+            "{command} stderr:\n{stderr}"
+        );
+        assert!(
+            !db_path(&data_dir).exists(),
+            "usage errors should not initialize the database"
+        );
+
+        let _ = fs::remove_dir_all(root);
     }
 }
 

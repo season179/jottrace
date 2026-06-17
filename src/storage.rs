@@ -6,7 +6,7 @@ use std::time::Duration;
 use crate::{JottraceError, Result, data_dir_from_env, ensure_private_file};
 
 pub const DB_FILE_NAME: &str = "db.sqlite";
-pub const LATEST_SCHEMA_VERSION: i64 = 9;
+pub const LATEST_SCHEMA_VERSION: i64 = 13;
 pub(crate) const RAW_CODEC: &str = "raw";
 pub(crate) const ZSTD_CODEC: &str = "zstd";
 /// Minimum source payload size considered for zstd. Keeping this named makes
@@ -49,6 +49,22 @@ const MIGRATIONS: &[Migration] = &[
     Migration {
         version: 9,
         sql: include_str!("migrations/009_session_prefix_fingerprint.sql"),
+    },
+    Migration {
+        version: 10,
+        sql: include_str!("migrations/010_taste_extraction.sql"),
+    },
+    Migration {
+        version: 11,
+        sql: include_str!("migrations/011_preference_examples.sql"),
+    },
+    Migration {
+        version: 12,
+        sql: include_str!("migrations/012_preference_examples_mcp_evidence.sql"),
+    },
+    Migration {
+        version: 13,
+        sql: include_str!("migrations/013_taste_extractions.sql"),
     },
 ];
 const UNRESOLVED_INGEST_ERROR_COUNT_SQL: &str =
@@ -510,6 +526,8 @@ mod tests {
         assert_sql_object(&conn, "table", "sessions");
         assert_sql_object(&conn, "table", "events");
         assert_sql_object(&conn, "table", "ingest_errors");
+        assert_sql_object(&conn, "table", "file_timelines");
+        assert_sql_object(&conn, "table", "preference_examples");
         assert_sql_object(&conn, "index", "idx_sessions_source_session_id");
         assert_sql_object(&conn, "index", "idx_sessions_source_started_at");
         assert_sql_object(&conn, "index", "idx_events_session_ts");
@@ -846,6 +864,140 @@ mod tests {
             LATEST_SCHEMA_VERSION
         );
         assert!(columns(&conn, "sessions").contains(&"source_metadata".to_string()));
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn migrates_v9_database_to_add_file_timelines_table() {
+        let root = temp_root("storage-upgrade-v9-file-timelines");
+        let db_path = root.join(DB_FILE_NAME);
+        ensure_private_file(&db_path).expect("create db file");
+
+        {
+            let conn = Connection::open(&db_path).expect("open v9 db");
+            apply_migrations_through(&conn, 9);
+            assert!(!sql_object_exists(&conn, "table", "file_timelines"));
+            conn.pragma_update(None, "user_version", 9)
+                .expect("set user_version");
+        }
+
+        let conn = open_database(&db_path).expect("migrate db");
+
+        assert_eq!(
+            user_version(&db_path, &conn).expect("user_version"),
+            LATEST_SCHEMA_VERSION
+        );
+        assert_sql_object(&conn, "table", "file_timelines");
+        assert_sql_object(&conn, "index", "idx_file_timelines_session_file");
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn migrates_v10_database_to_add_preference_examples_table() {
+        let root = temp_root("storage-upgrade-v10-preference-examples");
+        let db_path = root.join(DB_FILE_NAME);
+        ensure_private_file(&db_path).expect("create db file");
+
+        {
+            let conn = Connection::open(&db_path).expect("open v10 db");
+            apply_migrations_through(&conn, 10);
+            assert!(!sql_object_exists(&conn, "table", "preference_examples"));
+            conn.pragma_update(None, "user_version", 10)
+                .expect("set user_version");
+        }
+
+        let conn = open_database(&db_path).expect("migrate db");
+
+        assert_eq!(
+            user_version(&db_path, &conn).expect("user_version"),
+            LATEST_SCHEMA_VERSION
+        );
+        assert_sql_object(&conn, "table", "preference_examples");
+        assert_sql_object(&conn, "index", "idx_preference_examples_session");
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn migrates_v11_database_to_allow_mcp_correlation_evidence_kind() {
+        let root = temp_root("storage-upgrade-v11-mcp-evidence");
+        let db_path = root.join(DB_FILE_NAME);
+        ensure_private_file(&db_path).expect("create db file");
+
+        {
+            let conn = Connection::open(&db_path).expect("open v11 db");
+            apply_migrations_through(&conn, 11);
+            conn.execute(
+                "INSERT INTO preference_examples (
+                    source, source_session_id, generation, proposal_event_seq,
+                    tool_use_id, file_path, tool_name, proposal_content, context,
+                    outcome, confidence, evidence_kind, extractor_version
+                 ) VALUES (
+                    'claude_cli', 'sess', 0, 1, 'tool-mcp', 'src/a.rs',
+                    'mcp_fixture_edit', 'content', NULL, 'accepted', 0.6,
+                    'bash_correlation', '0.1.0'
+                 )",
+                [],
+            )
+            .expect("seed preference row");
+            conn.pragma_update(None, "user_version", 11)
+                .expect("set user_version");
+        }
+
+        let conn = open_database(&db_path).expect("migrate db");
+
+        assert_eq!(
+            user_version(&db_path, &conn).expect("user_version"),
+            LATEST_SCHEMA_VERSION
+        );
+
+        conn.execute(
+            "INSERT INTO preference_examples (
+                source, source_session_id, generation, proposal_event_seq,
+                tool_use_id, file_path, tool_name, proposal_content, context,
+                outcome, confidence, evidence_kind, extractor_version
+             ) VALUES (
+                'claude_cli', 'sess', 1, 2, 'tool-mcp-2', 'src/b.rs',
+                'mcp_fixture_edit', 'content', NULL, 'accepted', 0.6,
+                'mcp_correlation', '0.1.1'
+             )",
+            [],
+        )
+        .expect("insert mcp_correlation row");
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn migrates_v12_database_to_add_taste_extractions_table() {
+        let root = temp_root("storage-upgrade-v12-taste-extractions");
+        let db_path = root.join(DB_FILE_NAME);
+        ensure_private_file(&db_path).expect("create db file");
+
+        {
+            let conn = Connection::open(&db_path).expect("open v12 db");
+            apply_migrations_through(&conn, 12);
+            assert!(!sql_object_exists(&conn, "table", "taste_extractions"));
+            conn.pragma_update(None, "user_version", 12)
+                .expect("set user_version");
+        }
+
+        let conn = open_database(&db_path).expect("migrate db");
+
+        assert_eq!(
+            user_version(&db_path, &conn).expect("user_version"),
+            LATEST_SCHEMA_VERSION
+        );
+        assert_sql_object(&conn, "table", "taste_extractions");
+
+        conn.execute(
+            "INSERT INTO taste_extractions (source, source_session_id, extractor_version, event_count)
+             VALUES ('claude_cli', 'sess', '0.1.6', 42)",
+            [],
+        )
+        .expect("insert taste extraction row");
 
         let _ = fs::remove_dir_all(root);
     }

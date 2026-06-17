@@ -1,0 +1,4 @@
+// taste fixture baseline
+pub fn baseline() -> &'static str { "v0" }
+
+pub fn accepted_fn() -> i32 { 42 }
