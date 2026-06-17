@@ -942,3 +942,149 @@ fn taste_extraction_implementation_sequence_complete() {
         );
     }
 }
+
+#[test]
+fn taste_extraction_deferred_r3_complete() {
+    let plan =
+        fs::read_to_string("notes/taste-extraction-plan.md").expect("read taste extraction plan");
+
+    for required in [
+        "## Deferred: async Task transcripts (R3)",
+        "**Status: excluded (2026-06-17).**",
+        "tasks/*.output",
+        "**Decision: no**",
+        "scope for taste-extraction completeness",
+        "ships without a",
+        "`tasks/*.output` reader",
+    ] {
+        assert!(
+            plan.contains(required),
+            "taste extraction plan should document deferred R3 via {required}"
+        );
+    }
+
+    let inventory =
+        fs::read_to_string("docs/reader-source-inventory.md").expect("read reader inventory");
+    for required in [
+        "tasks/*.output",
+        "excluded from taste-extraction scope",
+        "notes/taste-extraction-plan.md",
+    ] {
+        assert!(
+            inventory.contains(required),
+            "reader inventory should cross-reference deferred R3 via {required}"
+        );
+    }
+
+    let design = fs::read_to_string("docs/design.md").expect("read design.md");
+    assert!(
+        design.contains("R3 exception"),
+        "design.md should document deferred R3 exception"
+    );
+
+    let changelog = fs::read_to_string("CHANGELOG.md").expect("read CHANGELOG.md");
+    assert!(
+        changelog.contains("tasks/*.output"),
+        "CHANGELOG should document R3 tasks/*.output exclusion"
+    );
+
+    // No tasks/*.output reader exists in the taste pipeline.
+    let extract = fs::read_to_string("src/taste/extract.rs").expect("read extract module");
+    assert!(
+        !extract.contains("tasks/") && !extract.contains(".output"),
+        "extract module should not implement deferred tasks/*.output reader"
+    );
+}
+
+#[test]
+fn taste_extraction_reference_complete() {
+    let plan =
+        fs::read_to_string("notes/taste-extraction-plan.md").expect("read taste extraction plan");
+
+    for required in [
+        "## Reference",
+        "notes/command-code-taste-formula.md",
+        "docs/design.md",
+        "docs/processor-design.md",
+        "src/migrations/001_initial_schema.sql",
+    ] {
+        assert!(
+            plan.contains(required),
+            "taste extraction plan should list reference via {required}"
+        );
+    }
+
+    for path in [
+        "notes/command-code-taste-formula.md",
+        "docs/design.md",
+        "docs/processor-design.md",
+        "src/migrations/001_initial_schema.sql",
+    ] {
+        assert!(
+            Path::new(path).exists(),
+            "plan reference artifact should exist: {path}"
+        );
+    }
+
+    let formula = fs::read_to_string("notes/command-code-taste-formula.md")
+        .expect("read command code taste formula notes");
+    for required in [
+        "notes/taste-extraction-plan.md",
+        "jottrace taste",
+        "D_RL",
+    ] {
+        assert!(
+            formula.contains(required),
+            "formula reference should link back to taste extraction via {required}"
+        );
+    }
+
+    let design = fs::read_to_string("docs/design.md").expect("read design.md");
+    for required in [
+        "## Taste extraction",
+        "notes/taste-extraction-plan.md",
+        "sessions",
+        "events",
+        "file_timelines",
+        "preference_examples",
+    ] {
+        assert!(
+            design.contains(required),
+            "design.md reference should document taste on base schema via {required}"
+        );
+    }
+
+    let processor =
+        fs::read_to_string("docs/processor-design.md").expect("read processor-design.md");
+    for required in [
+        "Relationship to taste extraction",
+        "src/taste/parse.rs",
+        "notes/taste-extraction-plan.md",
+    ] {
+        assert!(
+            processor.contains(required),
+            "processor-design reference should document taste boundary via {required}"
+        );
+    }
+
+    let initial_schema = fs::read_to_string("src/migrations/001_initial_schema.sql")
+        .expect("read initial schema migration");
+    for required in ["CREATE TABLE sessions", "CREATE TABLE events"] {
+        assert!(
+            initial_schema.contains(required),
+            "initial schema should define base tables taste extraction reads via {required}"
+        );
+    }
+
+    let extract = fs::read_to_string("src/taste/extract.rs").expect("read extract module");
+    for required in [
+        "list_parent_claude_sessions",
+        "load_merged_session_events",
+        "FROM sessions",
+    ] {
+        assert!(
+            extract.contains(required),
+            "extract should read from initial-schema tables via {required}"
+        );
+    }
+}
