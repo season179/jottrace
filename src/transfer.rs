@@ -377,20 +377,14 @@ fn enforce_private_permissions(root: &Path) -> Result<()> {
             .file_type()
             .map_err(|source| io_error(&path, source))?;
         if file_type.is_symlink() {
-            return Err(JottraceError::UnsafeArchiveEntry {
-                path,
-                kind: "symbolic link",
-            });
+            return Err(unsafe_archive_entry(path, "symbolic link"));
         }
         if file_type.is_dir() {
             enforce_private_permissions(&path)?;
         } else if file_type.is_file() {
             chmod(&path, PRIVATE_FILE_MODE)?;
         } else {
-            return Err(JottraceError::UnsafeArchiveEntry {
-                path,
-                kind: "non-regular file",
-            });
+            return Err(unsafe_archive_entry(path, "non-regular file"));
         }
     }
     Ok(())
@@ -463,10 +457,7 @@ fn inspect_archive_safety(archive: &Path) -> Result<()> {
         .collect();
     let paths: Vec<&str> = paths_stdout.lines().collect();
     if types.len() != paths.len() {
-        return Err(JottraceError::UnsafeArchiveEntry {
-            path: archive.to_path_buf(),
-            kind: "inconsistent tar listing",
-        });
+        return Err(unsafe_archive_entry(archive, "inconsistent tar listing"));
     }
 
     for (type_char, path) in types.iter().zip(paths.iter()) {
@@ -480,17 +471,11 @@ fn inspect_archive_safety(archive: &Path) -> Result<()> {
             _ => Some("unknown archive entry"),
         };
         if let Some(kind) = unsafe_kind {
-            return Err(JottraceError::UnsafeArchiveEntry {
-                path: PathBuf::from(*path),
-                kind,
-            });
+            return Err(unsafe_archive_entry(*path, kind));
         }
         let path_obj = Path::new(*path);
         if path_obj.is_absolute() {
-            return Err(JottraceError::UnsafeArchiveEntry {
-                path: PathBuf::from(*path),
-                kind: "absolute path",
-            });
+            return Err(unsafe_archive_entry(*path, "absolute path"));
         }
         // Iterate components to catch two distinct problems with a single pass:
         // `..` segments (which would let a relative path escape staging once
@@ -505,18 +490,12 @@ fn inspect_archive_safety(archive: &Path) -> Result<()> {
         for component in path_obj.components() {
             match component {
                 std::path::Component::ParentDir => {
-                    return Err(JottraceError::UnsafeArchiveEntry {
-                        path: PathBuf::from(*path),
-                        kind: "parent traversal",
-                    });
+                    return Err(unsafe_archive_entry(*path, "parent traversal"));
                 }
                 std::path::Component::Normal(name) if !saw_first_real_segment => {
                     saw_first_real_segment = true;
                     if is_reserved_archive_top_level(name) {
-                        return Err(JottraceError::UnsafeArchiveEntry {
-                            path: PathBuf::from(*path),
-                            kind: "reserved top-level entry",
-                        });
+                        return Err(unsafe_archive_entry(*path, "reserved top-level entry"));
                     }
                 }
                 _ => {}
@@ -534,6 +513,18 @@ fn archive_database_invalid(archive: &Path, reason: String) -> JottraceError {
     JottraceError::ArchiveDatabaseInvalid {
         archive: archive.to_path_buf(),
         reason,
+    }
+}
+
+/// Build a `JottraceError::UnsafeArchiveEntry` for an entry that would escape
+/// `JOTTRACE_HOME`. Mirrors `archive_database_invalid` so the repeated struct
+/// literal does not recur at every `settle` safety check; `impl Into<PathBuf>`
+/// absorbs the heterogeneous path sources (owned `PathBuf`, borrowed `&Path`,
+/// and tar-listing `&str`) without a conversion at each call site.
+fn unsafe_archive_entry(path: impl Into<PathBuf>, kind: &'static str) -> JottraceError {
+    JottraceError::UnsafeArchiveEntry {
+        path: path.into(),
+        kind,
     }
 }
 
@@ -648,10 +639,7 @@ fn validate_staged_jottrace_database(staging: &Path, archive: &Path) -> Result<(
         match fs::symlink_metadata(&sidecar) {
             Ok(meta) if meta.file_type().is_file() => chmod(&sidecar, PRIVATE_FILE_MODE)?,
             Ok(_) => {
-                return Err(JottraceError::UnsafeArchiveEntry {
-                    path: sidecar,
-                    kind: "non-regular file",
-                });
+                return Err(unsafe_archive_entry(sidecar, "non-regular file"));
             }
             Err(error) if error.kind() == io::ErrorKind::NotFound => {}
             Err(source) => {
