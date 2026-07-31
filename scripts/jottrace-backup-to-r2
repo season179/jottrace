@@ -1,0 +1,47 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+export HOME="/Users/season"
+export PATH="/Users/season/.local/bin:/opt/homebrew/bin:/usr/bin:/bin"
+export RCLONE_CONFIG="/Users/season/.config/rclone/rclone.conf"
+
+JOTTRACE_BIN="/Users/season/.local/bin/jottrace"
+RCLONE_BIN="/opt/homebrew/bin/rclone"
+REMOTE="r2crypt:"
+KEEP=5
+LOG="${HOME}/Library/Logs/jottrace-backup.log"
+
+ARCHIVE=""
+REMOTE_LIST=""
+cleanup() {
+  [[ -n "$ARCHIVE" ]] && rm -f "$ARCHIVE"
+  [[ -n "$REMOTE_LIST" ]] && rm -f "$REMOTE_LIST"
+}
+trap cleanup EXIT
+
+exec >>"$LOG" 2>&1
+echo "=== $(date -u +%Y-%m-%dT%H:%M:%SZ) ==="
+
+TMP_ARCHIVE="$(mktemp -t jottrace-pack)"
+ARCHIVE="${TMP_ARCHIVE}.tar.gz"
+rm -f "$TMP_ARCHIVE"
+
+"$JOTTRACE_BIN" pack --output "$ARCHIVE"
+
+BASENAME="jottrace-pack-$(date -u +%Y%m%d-%H%M%SZ).tar.gz"
+
+"$RCLONE_BIN" copyto "$ARCHIVE" "${REMOTE}${BASENAME}" --s3-no-check-bucket
+
+REMOTE_LIST="$(mktemp -t jottrace-remote-list)"
+"$RCLONE_BIN" lsf "$REMOTE" --files-only --s3-no-check-bucket | sort > "$REMOTE_LIST"
+count="$(wc -l < "$REMOTE_LIST" | tr -d '[:space:]')"
+if (( count > KEEP )); then
+  delete_count=$((count - KEEP))
+  head -n "$delete_count" "$REMOTE_LIST" | while IFS= read -r file; do
+    [[ -n "$file" ]] || continue
+    "$RCLONE_BIN" deletefile "${REMOTE}${file}" --s3-no-check-bucket
+    echo "deleted ${file}"
+  done
+fi
+
+echo "done: uploaded ${BASENAME}, remote count<=${KEEP}"
